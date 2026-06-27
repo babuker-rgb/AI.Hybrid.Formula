@@ -1,0 +1,555 @@
+```html
+<!DOCTYPE html>
+<html lang="ar" dir="ltr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PINN-NSGA-II Hybrid AI Framework | Babuker</title>
+    <!-- Fonts & Icons -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,600;14..32,700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <style>
+        /* Reset & Base */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #f8fafc;
+            color: #1e293b;
+            line-height: 1.7;
+            padding: 2rem 1rem;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 2rem;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.15);
+            overflow: hidden;
+            padding: 3rem 2.5rem;
+        }
+
+        /* Header */
+        .header {
+            text-align: center;
+            padding-bottom: 2.5rem;
+            border-bottom: 2px solid #e9edf2;
+            margin-bottom: 2.5rem;
+        }
+
+        .badge {
+            display: inline-block;
+            background: #dbeafe;
+            color: #1e40af;
+            font-weight: 600;
+            font-size: 0.8rem;
+            padding: 0.3rem 1rem;
+            border-radius: 30px;
+            letter-spacing: 0.5px;
+            margin-bottom: 1rem;
+        }
+
+        .header h1 {
+            font-size: 2.8rem;
+            font-weight: 700;
+            color: #0f172a;
+            line-height: 1.2;
+            margin-bottom: 0.5rem;
+        }
+
+        .header h1 span {
+            background: linear-gradient(135deg, #2563eb, #7c3aed);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .header .subtitle {
+            font-size: 1.2rem;
+            color: #475569;
+            font-weight: 400;
+            margin-bottom: 1.5rem;
+        }
+
+        .author {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 0.5rem 1.5rem;
+            font-size: 1rem;
+            color: #334155;
+            margin-bottom: 0.75rem;
+        }
+
+        .author i {
+            color: #2563eb;
+            margin-right: 0.4rem;
+        }
+
+        .correspondence {
+            font-size: 0.9rem;
+            color: #475569;
+        }
+
+        .correspondence a {
+            color: #2563eb;
+            text-decoration: none;
+            font-weight: 500;
+        }
+
+        .correspondence a:hover {
+            text-decoration: underline;
+        }
+
+        /* Section Styles */
+        .section {
+            margin-bottom: 3rem;
+        }
+
+        .section-title {
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: #0f172a;
+            margin-bottom: 1.2rem;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .section-title i {
+            color: #2563eb;
+            font-size: 1.6rem;
+        }
+
+        .section-subtitle {
+            font-size: 1.3rem;
+            font-weight: 600;
+            color: #1e293b;
+            margin: 1.5rem 0 0.8rem 0;
+        }
+
+        p {
+            margin-bottom: 1rem;
+            color: #334155;
+        }
+
+        /* Cards / Grids */
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 1.5rem;
+            margin: 1.5rem 0;
+        }
+
+        .feature-card {
+            background: #f8fafc;
+            padding: 1.5rem;
+            border-radius: 1.2rem;
+            border: 1px solid #e9edf2;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+            text-align: center;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 12px 25px -8px rgba(0,0,0,0.08);
+            border-color: #b9d0f0;
+        }
+
+        .feature-card i {
+            font-size: 2.4rem;
+            color: #2563eb;
+            margin-bottom: 0.8rem;
+        }
+
+        .feature-card h4 {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 0.4rem;
+        }
+
+        .feature-card p {
+            font-size: 0.95rem;
+            color: #475569;
+            margin-bottom: 0;
+        }
+
+        /* Code & Highlights */
+        .code-block {
+            background: #0f172a;
+            color: #e2e8f0;
+            padding: 1.2rem 1.5rem;
+            border-radius: 1rem;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9rem;
+            overflow-x: auto;
+            margin: 1rem 0;
+            white-space: pre-wrap;
+            word-break: break-word;
+            direction: ltr;
+            text-align: left;
+        }
+
+        .code-block .comment {
+            color: #94a3b8;
+        }
+        .code-block .keyword {
+            color: #f472b6;
+        }
+        .code-block .string {
+            color: #a3e635;
+        }
+        .code-block .function {
+            color: #60a5fa;
+        }
+
+        .highlight-box {
+            background: #eff6ff;
+            border-left: 5px solid #2563eb;
+            padding: 1.2rem 1.8rem;
+            border-radius: 0.8rem;
+            margin: 1.5rem 0;
+        }
+
+        .highlight-box strong {
+            color: #1e40af;
+        }
+
+        .result-stats {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1.5rem 3rem;
+            background: #f1f5f9;
+            padding: 1.5rem 2rem;
+            border-radius: 1.2rem;
+            justify-content: center;
+            margin: 1.5rem 0;
+        }
+
+        .stat-item {
+            text-align: center;
+        }
+
+        .stat-item .value {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #0f172a;
+        }
+
+        .stat-item .label {
+            font-size: 0.9rem;
+            color: #475569;
+        }
+
+        /* Table */
+        .table-wrapper {
+            overflow-x: auto;
+            margin: 1.5rem 0;
+            border-radius: 1rem;
+            border: 1px solid #e9edf2;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.95rem;
+        }
+
+        th {
+            background: #f1f5f9;
+            color: #0f172a;
+            font-weight: 600;
+            padding: 0.8rem 1rem;
+            text-align: left;
+        }
+
+        td {
+            padding: 0.8rem 1rem;
+            border-top: 1px solid #e9edf2;
+        }
+
+        .badge-physics {
+            background: #bbf7d0;
+            color: #15803d;
+            font-size: 0.75rem;
+            font-weight: 700;
+            padding: 0.2rem 0.8rem;
+            border-radius: 20px;
+            display: inline-block;
+        }
+
+        .badge-no-physics {
+            background: #fee2e2;
+            color: #b91c1c;
+            font-size: 0.75rem;
+            font-weight: 700;
+            padding: 0.2rem 0.8rem;
+            border-radius: 20px;
+            display: inline-block;
+        }
+
+        /* Footer */
+        .footer {
+            margin-top: 3rem;
+            padding-top: 2rem;
+            border-top: 2px solid #e9edf2;
+            text-align: center;
+            color: #64748b;
+            font-size: 0.9rem;
+        }
+
+        .footer a {
+            color: #2563eb;
+            text-decoration: none;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .container {
+                padding: 1.5rem;
+            }
+            .header h1 {
+                font-size: 1.9rem;
+            }
+            .section-title {
+                font-size: 1.5rem;
+            }
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+
+    <!-- ==================== HEADER ==================== -->
+    <header class="header">
+        <div class="badge"><i class="fas fa-microchip"></i> AI for Pharma 4.0</div>
+        <h1>Hybrid AI Framework <br><span>(PINN · NSGA-II)</span></h1>
+        <p class="subtitle">Multi‑Objective Tablet Manufacturing Optimization · High‑Load Paracetamol</p>
+        <div class="author">
+            <span><i class="fas fa-user-graduate"></i> Babuker A. Abdalla</span>
+            <span><i class="fas fa-chalkboard-teacher"></i> Prof. Abdelkarim Mohamed</span>
+        </div>
+        <div class="correspondence">
+            <i class="fas fa-envelope"></i> <a href="mailto:babuker@protonmail.com">babuker@protonmail.com</a> &nbsp;|&nbsp;
+            <i class="fas fa-phone"></i> +249-123-638-638
+        </div>
+    </header>
+
+    <!-- ==================== GRAPHICAL ABSTRACT ==================== -->
+    <section class="section">
+        <h2 class="section-title"><i class="fas fa-project-diagram"></i> Graphical Abstract</h2>
+        <div style="background: #f1f5f9; border-radius: 1.5rem; padding: 2rem; text-align: center;">
+            <p style="font-size: 1.2rem; max-width: 800px; margin: 0 auto;">
+                <i class="fas fa-arrow-right" style="color: #2563eb;"></i>
+                <strong>Physics‑Informed Hybrid AI</strong> 
+                (PINN + Heckel Eq. + EFRF) 
+                <i class="fas fa-arrow-right" style="color: #2563eb;"></i>
+                <strong>NSGA‑II</strong> 
+                <i class="fas fa-arrow-right" style="color: #2563eb;"></i>
+                <strong>Pareto‑optimal 90.5% Paracetamol</strong>
+                <span style="display: inline-block; background: #bbf7d0; padding: 0.2rem 1.2rem; border-radius: 40px; margin-left: 0.5rem; font-weight: 700; color: #15803d;">Zero Capping</span>
+            </p>
+            <div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 0.5rem 1.5rem; margin-top: 1.2rem; font-size: 0.9rem; color: #475569;">
+                <span><i class="fas fa-check-circle" style="color: #16a34a;"></i> σₜ ≥ 2 MPa</span>
+                <span><i class="fas fa-check-circle" style="color: #16a34a;"></i> EFRF &lt; 0.5</span>
+                <span><i class="fas fa-flask"></i> 70% reduction in experimental trials</span>
+            </div>
+        </div>
+    </section>
+
+    <!-- ==================== ABSTRACT ==================== -->
+    <section class="section">
+        <h2 class="section-title"><i class="fas fa-file-alt"></i> Abstract</h2>
+        <div class="highlight-box">
+            <p><strong>Background:</strong> High‑dose tablets (≥90% API) face capping and lamination risks due to poor compressibility. Traditional QbD requires 50–200 experiments — costly and slow.</p>
+            <p><strong>Methods:</strong> A hybrid AI framework integrates a <strong>Physics‑Informed Neural Network (PINN)</strong> (embedding Heckel equation &amp; Elastic Failure Risk Function) with <strong>NSGA‑II</strong> multi‑objective optimization. Trained on 45 in‑silico formulations (LHS).</p>
+            <p><strong>Results:</strong> PINN achieved <strong>R² = 0.96 ± 0.02</strong>, RMSE = 0.08 MPa. Outperformed MLP, RF, XGBoost (p &lt; 0.05). Identified <strong>90.5% paracetamol</strong> formulation satisfying σₜ ≥ 2 MPa and EFRF &lt; 0.5.</p>
+            <p><strong>Conclusions:</strong> Physics‑guided AI enables reliable digital design spaces for Pharma 4.0. Experimental validation is ongoing.</p>
+        </div>
+        <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
+            <span style="background: #e9edf2; padding: 0.2rem 1rem; border-radius: 30px; font-size: 0.85rem;">#PINN</span>
+            <span style="background: #e9edf2; padding: 0.2rem 1rem; border-radius: 30px; font-size: 0.85rem;">#NSGA‑II</span>
+            <span style="background: #e9edf2; padding: 0.2rem 1rem; border-radius: 30px; font-size: 0.85rem;">#TabletFormulation</span>
+            <span style="background: #e9edf2; padding: 0.2rem 1rem; border-radius: 30px; font-size: 0.85rem;">#Pharma4.0</span>
+        </div>
+    </section>
+
+    <!-- ==================== KEY FEATURES ==================== -->
+    <section class="section">
+        <h2 class="section-title"><i class="fas fa-cogs"></i> Methodology Highlights</h2>
+        <div class="features-grid">
+            <div class="feature-card">
+                <i class="fas fa-database"></i>
+                <h4>In‑Silico Data</h4>
+                <p>45 LHS samples covering 8 formulation &amp; process variables.</p>
+            </div>
+            <div class="feature-card">
+                <i class="fas fa-brain"></i>
+                <h4>PINN with Physics</h4>
+                <p>Hybrid loss: Data MSE + Physics MSE (Heckel + EFRF).</p>
+            </div>
+            <div class="feature-card">
+                <i class="fas fa-chart-line"></i>
+                <h4>NSGA‑II Optimizer</h4>
+                <p>Pareto front with 100 population × 500 generations.</p>
+            </div>
+            <div class="feature-card">
+                <i class="fas fa-check-double"></i>
+                <h4>Benchmarking</h4>
+                <p>Compared vs. MLP, Random Forest, XGBoost (p &lt; 0.05).</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- ==================== RESULTS ==================== -->
+    <section class="section">
+        <h2 class="section-title"><i class="fas fa-chart-bar"></i> Key Results</h2>
+        
+        <div class="result-stats">
+            <div class="stat-item">
+                <div class="value">0.96</div>
+                <div class="label">R² (Test)</div>
+            </div>
+            <div class="stat-item">
+                <div class="value">0.08</div>
+                <div class="label">RMSE (MPa)</div>
+            </div>
+            <div class="stat-item">
+                <div class="value">90.5%</div>
+                <div class="label">Optimal API Loading</div>
+            </div>
+            <div class="stat-item">
+                <div class="value">&lt; 0.5</div>
+                <div class="label">EFRF</div>
+            </div>
+        </div>
+
+        <h3 class="section-subtitle">Model Performance Comparison</h3>
+        <div class="table-wrapper">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Model</th>
+                        <th>R² (Test)</th>
+                        <th>RMSE (MPa)</th>
+                        <th>MAE (MPa)</th>
+                        <th>Physics Consistency</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>PINN (Proposed)</strong></td>
+                        <td>0.96 ± 0.02</td>
+                        <td>0.08 ± 0.01</td>
+                        <td>0.06 ± 0.01</td>
+                        <td><span class="badge-physics"><i class="fas fa-check"></i> Enforced</span></td>
+                    </tr>
+                    <tr>
+                        <td>MLP</td>
+                        <td>0.91 ± 0.03</td>
+                        <td>0.15 ± 0.02</td>
+                        <td>0.12 ± 0.02</td>
+                        <td><span class="badge-no-physics"><i class="fas fa-times"></i> Not enforced</span></td>
+                    </tr>
+                    <tr>
+                        <td>Random Forest</td>
+                        <td>0.93 ± 0.02</td>
+                        <td>0.12 ± 0.02</td>
+                        <td>0.10 ± 0.01</td>
+                        <td><span class="badge-no-physics"><i class="fas fa-times"></i> Not enforced</span></td>
+                    </tr>
+                    <tr>
+                        <td>XGBoost</td>
+                        <td>0.94 ± 0.02</td>
+                        <td>0.10 ± 0.01</td>
+                        <td>0.08 ± 0.01</td>
+                        <td><span class="badge-no-physics"><i class="fas fa-times"></i> Not enforced</span></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        <p style="font-size: 0.9rem; color: #64748b;"><i class="fas fa-info-circle"></i> All improvements of PINN over baselines are statistically significant (paired t‑test, p &lt; 0.05).</p>
+
+        <h3 class="section-subtitle">Pareto‑Optimal Design Space</h3>
+        <p>The NSGA‑II optimization generated a robust Pareto front. The optimal formulations cluster at <strong>~90.5% paracetamol</strong> loading, satisfying both mechanical constraints (σₜ ≥ 2 MPa and EFRF &lt; 0.5). Formulations exceeding this threshold show a steep rise in predicted capping risk.</p>
+    </section>
+
+    <!-- ==================== CODE SNIPPET ==================== -->
+    <section class="section">
+        <h2 class="section-title"><i class="fas fa-code"></i> Core Code Snippet (PINN Loss)</h2>
+        <div class="code-block">
+<span class="comment"># Hybrid loss: L = ω₁ · MSE_data + ω₂ · MSE_physics</span>
+<span class="keyword">class</span> <span class="function">PINN</span>(nn.Module):
+    <span class="keyword">def</span> <span class="function">compute_loss</span>(self, X, y_true, omega_data=<span class="number">0.8</span>, omega_physics=<span class="number">0.2</span>):
+        y_pred = self.forward(X)
+        data_loss = F.mse_loss(y_pred, y_true)
+        
+        <span class="comment"># Physics residuals: Heckel equation & EFRF</span>
+        physics_loss = self.physics_loss(X, y_pred)
+        
+        total_loss = omega_data * data_loss + omega_physics * physics_loss
+        <span class="keyword">return</span> total_loss, data_loss, physics_loss
+        </div>
+        <p style="font-size: 0.9rem; color: #475569;"><i class="fas fa-github"></i> Full code available on <a href="#" style="color: #2563eb;">GitHub</a> (contact for access).</p>
+    </section>
+
+    <!-- ==================== LIMITATIONS & FUTURE ==================== -->
+    <section class="section">
+        <h2 class="section-title"><i class="fas fa-exclamation-triangle"></i> Limitations &amp; Future Work</h2>
+        <div style="background: #fefce8; border-radius: 1rem; padding: 1.2rem 1.8rem; border: 1px solid #fde68a;">
+            <p><strong><i class="fas fa-circle-exclamation" style="color: #d97706;"></i> Acknowledged:</strong> This is a <strong>computational proof‑of‑concept</strong>. The in‑silico data were generated from the same physics models embedded in the PINN loss — <em>circular validation</em>. Experimental validation is ongoing.</p>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-top: 1.5rem;">
+            <div style="background: #f1f5f9; padding: 1rem; border-radius: 0.8rem;">
+                <i class="fas fa-flask" style="color: #2563eb;"></i>
+                <h4 style="font-size: 1rem; margin: 0.3rem 0;">Experimental Validation</h4>
+                <p style="font-size: 0.9rem; margin: 0;">Testing top 5 predicted formulations.</p>
+            </div>
+            <div style="background: #f1f5f9; padding: 1rem; border-radius: 0.8rem;">
+                <i class="fas fa-expand" style="color: #2563eb;"></i>
+                <h4 style="font-size: 1rem; margin: 0.3rem 0;">Generalization</h4>
+                <p style="font-size: 0.9rem; margin: 0;">Extend to other APIs &amp; continuous manufacturing.</p>
+            </div>
+            <div style="background: #f1f5f9; padding: 1rem; border-radius: 0.8rem;">
+                <i class="fas fa-database" style="color: #2563eb;"></i>
+                <h4 style="font-size: 1rem; margin: 0.3rem 0;">Larger Datasets</h4>
+                <p style="font-size: 0.9rem; margin: 0;">Hybrid experimental + in‑silico for iterative refinement.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- ==================== REFERENCES ==================== -->
+    <section class="section">
+        <h2 class="section-title"><i class="fas fa-book"></i> Selected References</h2>
+        <ul style="list-style: none; padding: 0; font-size: 0.9rem; color: #334155;">
+            <li style="padding: 0.4rem 0; border-bottom: 1px solid #f1f5f9;"><i class="fas fa-caret-right" style="color: #2563eb;"></i> Raissi, M., Perdikaris, P., &amp; Karniadakis, G.E. (2019). Physics‑informed neural networks. <em>J. Comput. Phys.</em>, 378, 686‑707.</li>
+            <li style="padding: 0.4rem 0; border-bottom: 1px solid #f1f5f9;"><i class="fas fa-caret-right" style="color: #2563eb;"></i> Deb, K., et al. (2002). A fast and elitist multiobjective genetic algorithm: NSGA‑II. <em>IEEE Trans. Evol. Comput.</em>, 6(2), 182‑197.</li>
+            <li style="padding: 0.4rem 0; border-bottom: 1px solid #f1f5f9;"><i class="fas fa-caret-right" style="color: #2563eb;"></i> Paul, S. &amp; Sun, C.C. (2017). High‑dose (90%) paracetamol tablet formulation. <em>Int. J. Pharm.</em>, 533(1), 122‑132.</li>
+            <li style="padding: 0.4rem 0;"><i class="fas fa-caret-right" style="color: #2563eb;"></i> Mazel, V. &amp; Tchoreloff, P. (2021). Tablet capping: mechanisms and prevention. <em>Int. J. Pharm.</em>, 592, 120096.</li>
+        </ul>
+    </section>
+
+    <!-- ==================== FOOTER ==================== -->
+    <footer class="footer">
+        <p><i class="fas fa-graduation-cap"></i> Nile Valley University · Postgraduate College · Sudan</p>
+        <p style="margin-top: 0.3rem;">
+            <i class="fas fa-code"></i> Built with <i class="fas fa-heart" style="color: #ef4444;"></i> for Pharma 4.0 research · 
+            <a href="mailto:babuker@protonmail.com">Contact</a>
+        </p>
+        <p style="font-size: 0.8rem; color: #94a3b8; margin-top: 0.5rem;">
+            Last updated: June 2025 · <a href="#" style="color: #94a3b8;">DOI</a> (coming soon)
+        </p>
+    </footer>
+
+</div>
+<!-- End container -->
+</body>
+</html>
+```
