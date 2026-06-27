@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Data & Results (اختياري: إذا كنت لا تريد رفع الملفات الكبيرة)
+# data/*.csv
+# results/figures/*.png
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
