@@ -1,0 +1,19 @@
+
+---
+
+### 🚀 Getting Started
+
+#### Prerequisites
+
+- Python 3.8+
+- pip (Python package manager)
+
+#### Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/babuker-rgb/AI.Hybrid.Formula.git
+cd AI.Hybrid.Formula
+
+# Install dependencies
+pip install -r requirements.txt
