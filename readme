@@ -1,0 +1,46 @@
+# Hybrid AI Framework (PINN-NSGA-II) for Multi-Objective Tablet Manufacturing Optimization
+
+## Overcoming High-Load Paracetamol Limitations
+
+---
+
+### 📌 Project Overview
+
+This repository contains the complete code and documentation for the research paper:
+
+**"A Hybrid AI Framework (PINN-NSGA-II) for Multi-Objective Tablet Manufacturing Optimization: Overcoming High-Load Paracetamol Limitations"**
+
+**Authors:** Babuker A. Abdalla & Prof. Abdelkarim Mohamed  
+**Affiliation:** Postgraduate College, Nile Valley University, Atbara, Sudan  
+**Contact:** babuker@protonmail.com | +249-123-638-638
+
+---
+
+### 🎯 Research Objective
+
+To develop a **physics-informed hybrid AI framework** that integrates:
+
+- **Physics-Informed Neural Network (PINN)** — embedding Heckel compaction equation and Elastic Failure Risk Function (EFRF)
+- **NSGA-II** — multi-objective evolutionary optimization
+
+The framework identifies **Pareto-optimal high-load paracetamol formulations** (≥90% API) that satisfy mechanical constraints:  
+✅ Tensile Strength (σₜ) ≥ 2 MPa  
+✅ EFRF < 0.5 (zero capping risk)
+
+---
+
+### 📊 Key Results
+
+| Metric | Value |
+|--------|-------|
+| **R² (Test Set)** | 0.96 ± 0.02 |
+| **RMSE** | 0.08 ± 0.01 MPa |
+| **MAE** | 0.06 ± 0.01 MPa |
+| **Optimal API Loading** | ~90.5% |
+| **Experimental Reduction** | ~70% |
+
+**Statistical Significance:** PINN outperformed MLP, Random Forest, and XGBoost (paired t-test, p < 0.05).
+
+---
+
+### 🗂️ Repository Structure
