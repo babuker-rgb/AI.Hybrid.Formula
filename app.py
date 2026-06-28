@@ -1,4 +1,3 @@
-```python
 """
 Hybrid AI Framework - Interactive Web Application
 Multi-Objective Tablet Manufacturing Optimization
@@ -21,12 +20,15 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 1. AI MODEL DEFINITION
+# 1. PINN MODEL DEFINITION
 # ================================================================
 
 class SimplePINN(nn.Module):
+    """Simplified Physics-Informed Neural Network"""
+    
     def __init__(self, input_dim=8, hidden_dim=64, output_dim=2):
         super(SimplePINN, self).__init__()
+        
         self.network = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.Tanh(),
@@ -49,11 +51,13 @@ class SimplePINN(nn.Module):
 
 
 # ================================================================
-# 2. DATA GENERATION
+# 2. DATA GENERATION WITH 100% CONSTRAINT
 # ================================================================
 
 def generate_data(n_samples=100, random_state=42):
+    """Generate synthetic data ensuring all components sum to 100%"""
     np.random.seed(random_state)
+    
     X = np.zeros((n_samples, 8))
     y = np.zeros((n_samples, 2))
     
@@ -62,6 +66,7 @@ def generate_data(n_samples=100, random_state=42):
         binder = np.random.uniform(0.5, 3.0)
         mgst = np.random.uniform(0.2, 1.0)
         pvpp = np.random.uniform(1.0, 5.0)
+        
         mcc = 100 - (api + binder + mgst + pvpp)
         mcc = np.clip(mcc, 0, 8.0)
         
@@ -103,18 +108,21 @@ def generate_data(n_samples=100, random_state=42):
 
 def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule, 
                       tensile, efrf, total, status, timestamp):
+    """Generate a professional PDF report with formulation and results."""
+    
     pdf = FPDF()
     pdf.add_page()
     
+    # HEADER
     pdf.set_font("Arial", "B", 18)
-    pdf.cell(0, 10, "Formulation Optimization Report", ln=True, align="C")
+    pdf.cell(0, 10, "Formulation Report", ln=True, align="C")
     pdf.set_font("Arial", "I", 11)
-    pdf.cell(0, 6, "Hybrid AI Framework for Tablet Manufacturing", ln=True, align="C")
+    pdf.cell(0, 6, "Hybrid AI Framework for Tablet Manufacturing Optimization", ln=True, align="C")
     pdf.set_font("Arial", "", 10)
     pdf.cell(0, 6, f"Date: {timestamp}", ln=True, align="C")
     pdf.ln(8)
     
-    # 1. Formulation Summary
+    # 1. FORMULATION SUMMARY
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, "1. Formulation Summary", ln=True, fill=True)
@@ -142,16 +150,16 @@ def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
     
     pdf.ln(5)
     
-    # 2. Process Parameters
+    # 2. PROCESS PARAMETERS
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, "2. Process Parameters", ln=True, fill=True)
     pdf.set_font("Arial", "", 10)
     
     params = [
-        ("Compaction Pressure", f"{pressure:.1f} MPa", "Affects tablet hardness and density"),
-        ("Punch Speed", f"{speed:.1f} rpm", "Influences compression time and elastic recovery"),
-        ("Granule Size", f"{granule:.1f} µm", "Impacts flowability and content uniformity"),
+        ("Compaction Pressure", f"{pressure:.1f} MPa", "Affects tablet hardness"),
+        ("Punch Speed", f"{speed:.1f} rpm", "Influences compression time"),
+        ("Granule Size", f"{granule:.1f} µm", "Impacts flowability"),
     ]
     
     pdf.set_font("Arial", "B", 10)
@@ -167,7 +175,7 @@ def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
     
     pdf.ln(5)
     
-    # 3. Prediction Results
+    # 3. PREDICTION RESULTS
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, "3. Prediction Results", ln=True, fill=True)
@@ -196,7 +204,7 @@ def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
     
     pdf.ln(5)
     
-    # 4. Overall Status
+    # 4. OVERALL STATUS
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, "4. Overall Status", ln=True, fill=True)
@@ -207,7 +215,7 @@ def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
         pdf.cell(0, 8, "PASS - Formulation Satisfies All Constraints", ln=True, align="C")
         pdf.set_font("Arial", "", 10)
         pdf.set_text_color(0, 0, 0)
-        pdf.multi_cell(0, 6, "This formulation is recommended for experimental validation and scale-up studies.")
+        pdf.multi_cell(0, 6, "This formulation is recommended for experimental validation.")
     else:
         pdf.set_text_color(255, 0, 0)
         pdf.cell(0, 8, "FAIL - Formulation Does NOT Satisfy All Constraints", ln=True, align="C")
@@ -218,7 +226,7 @@ def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
     pdf.set_text_color(0, 0, 0)
     pdf.ln(5)
     
-    # 5. Recommendations
+    # 5. RECOMMENDATIONS
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, "5. Recommendations", ln=True, fill=True)
@@ -227,18 +235,18 @@ def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
     if tensile >= 2.0 and efrf < 0.5:
         recommendations = [
             "1. Proceed with experimental validation.",
-            "2. Confirm tensile strength and capping resistance.",
-            "3. Evaluate disintegration time and dissolution profile.",
-            "4. Assess stability under accelerated ICH conditions.",
-            "5. Scale-up to pilot batch."
+            "2. Confirm tensile strength with physical testing.",
+            "3. Evaluate disintegration time and dissolution.",
+            "4. Assess stability under ICH conditions.",
+            "5. Scale-up for process optimization."
         ]
     else:
         recommendations = [
-            "1. Reduce API loading or adjust binder concentration.",
-            "2. Optimize lubricant level.",
+            "1. Reduce API or adjust binder concentration.",
+            "2. Optimize Mg-St level.",
             "3. Increase compaction pressure.",
             "4. Reduce punch speed.",
-            "5. Re-run prediction with adjusted parameters."
+            "5. Re-run with adjusted parameters."
         ]
     
     for rec in recommendations:
@@ -246,7 +254,7 @@ def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
     
     pdf.ln(5)
     
-    # 6. Contact Information
+    # 6. CONTACT INFORMATION
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, "6. Contact Information", ln=True, fill=True)
@@ -259,11 +267,12 @@ def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
     
     pdf.ln(3)
     
-    # Footer
+    # FOOTER
     pdf.set_y(270)
     pdf.set_font("Arial", "I", 8)
     pdf.cell(0, 6, "Generated by: Hybrid AI Framework", ln=True, align="C")
     
+    # RETURN PDF
     pdf_bytes = pdf.output(dest="S")
     
     if isinstance(pdf_bytes, bytearray):
@@ -280,6 +289,8 @@ def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
 
 @st.cache_resource
 def load_model():
+    """Train and return the model with caching"""
+    
     df, feature_names = generate_data(n_samples=100)
     X = df[feature_names].values
     y = df[['Tensile_Strength_MPa', 'EFRF']].values
@@ -315,6 +326,7 @@ def load_model():
 # ================================================================
 
 def predict(model, scaler, inputs):
+    """Predict tensile strength and EFRF"""
     try:
         inputs_scaled = scaler.transform([inputs])
         X_tensor = torch.FloatTensor(inputs_scaled)
@@ -351,14 +363,14 @@ st.markdown("""
 # HEADER
 st.markdown('<div class="main-header">', unsafe_allow_html=True)
 st.title("🧠 Hybrid AI Framework")
-st.markdown("### Multi‑Objective Tablet Manufacturing Optimization · High‑Load Paracetamol")
+st.markdown("### Multi‑Objective Tablet Manufacturing Optimization")
 st.caption("👨‍🔬 Babuker A. Abdalla & Prof. Abdelkarim Mohamed · Nile Valley University")
 st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown("---")
 
 # Load model
-with st.spinner("🔄 Loading AI model..."):
+with st.spinner("🔄 Loading model..."):
     model, scaler, feature_names = load_model()
 st.success("✅ Model loaded successfully!")
 
@@ -369,36 +381,29 @@ col_left, col_right = st.columns([1, 1.2], gap="medium")
 
 with col_left:
     st.markdown("### 📊 Formulation Parameters")
-    st.markdown("**Important:** All components must sum to 100%")
+    st.markdown("**All components must sum to 100%**")
     
     with st.container(border=True):
-        # API slider
         api = st.slider("🧪 API Loading (%)", 85.0, 95.0, 90.5, 0.1)
-        
         binder = st.slider("🔗 Binder (%)", 0.5, 3.0, 2.7, 0.1)
         pvpp = st.slider("💊 PVPP (%)", 1.0, 5.0, 3.0, 0.1)
         mgst = st.slider("🧴 Mg-St (%)", 0.2, 1.0, 0.2, 0.05)
         
-        # Auto-calculate MCC to maintain 100%
+        # Calculate remaining for MCC
         total_others = binder + pvpp + mgst
         remaining = 100 - api - total_others
-        max_mcc = min(remaining, 8.0)
         
         if remaining < 0:
-            st.error(f"❌ API + Binder + PVPP + Mg-St = {api + total_others:.1f}% > 100%! Please reduce values.")
+            st.error(f"❌ Total exceeds 100%! Please reduce API or other components.")
             mcc = 0.0
         else:
-            # MCC is auto-calculated but user can still adjust up to max_mcc
-            default_mcc = float(min(max_mcc, 3.6))
-            mcc = st.number_input(
-                "📦 MCC (%)", 
-                min_value=0.0, 
-                max_value=float(max_mcc),
-                value=default_mcc,
-                step=0.1,
-                format="%.1f",
-                help="Microcrystalline Cellulose - auto-calculated to maintain 100%"
-            )
+            # Auto-calculate MCC as the remainder
+            mcc = remaining
+            st.metric("📦 MCC (%)", f"{mcc:.1f}%", 
+                      delta="Auto-calculated as remainder to reach 100%" if mcc > 0 else "No filler needed")
+            
+            if mcc > 8.0:
+                st.warning(f"⚠️ MCC exceeds 8% ({mcc:.1f}%). Consider reducing API or other components.")
         
         # Process parameters
         st.markdown("---")
@@ -422,7 +427,7 @@ with col_right:
     if predict_btn:
         total = api + binder + pvpp + mgst + mcc
         if abs(total - 100) > 0.1:
-            st.warning("⚠️ **Invalid formulation:** Components must sum to 100%")
+            st.warning("⚠️ **Invalid formulation:** Components must sum to 100%.")
         else:
             inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
             
@@ -452,7 +457,7 @@ with col_right:
             
             # Overall status
             if tensile >= 2.0 and efrf < 0.5:
-                st.success("🎉 **Formulation satisfies all constraints!**")
+                st.success("🎉 **Formulation satisfies all mechanical constraints!**")
                 st.balloons()
             else:
                 st.warning("⚠️ **Formulation does NOT satisfy all constraints.**")
@@ -465,9 +470,7 @@ with col_right:
             }
             st.dataframe(pd.DataFrame(summary_data), hide_index=True, use_container_width=True)
             
-            # ================================================================
-            # PARETO FRONT PLOT
-            # ================================================================
+            # Pareto Front
             st.markdown("### 📉 Pareto Front")
             fig, ax = plt.subplots(figsize=(10, 5))
             
@@ -488,7 +491,7 @@ with col_right:
             ax.fill_between(api_range, 0, efrf_vals, where=(np.array(efrf_vals) < 0.5), 
                             color='green', alpha=0.15)
             ax.scatter([api], [efrf], color='blue', s=150, zorder=5, label='Your Formulation')
-            ax.scatter([90.5], [0.2], color='gold', s=200, marker='*', zorder=5, label='Target: 90.5%')
+            ax.scatter([90.5], [0.2], color='gold', s=200, marker='*', zorder=5, label='⭐ Target: 90.5%')
             
             ax.set_xlabel('API Loading (%)')
             ax.set_ylabel('EFRF')
@@ -499,9 +502,7 @@ with col_right:
             ax.set_xlim(84, 96)
             st.pyplot(fig)
             
-            # ================================================================
-            # SENSITIVITY ANALYSIS
-            # ================================================================
+            # Sensitivity Analysis
             st.markdown("### 🔍 Sensitivity Analysis")
             with st.expander("Click to view feature importance"):
                 base_inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
@@ -524,14 +525,12 @@ with col_right:
                 
                 fig2, ax2 = plt.subplots(figsize=(10, 5))
                 ax2.barh([features[i] for i in sorted_idx], [sensitivities[i] for i in sorted_idx])
-                ax2.set_xlabel('Sensitivity')
+                ax2.set_xlabel('Sensitivity (ΔEFRF)')
                 ax2.set_title('Feature Impact on EFRF')
                 ax2.grid(True, alpha=0.3, axis='x')
                 st.pyplot(fig2)
             
-            # ================================================================
-            # GENERATE PDF REPORT
-            # ================================================================
+            # Generate PDF Report
             st.markdown("---")
             st.markdown("### 📄 Generate Report")
             
@@ -556,8 +555,6 @@ with col_right:
                     use_container_width=True,
                     type="primary"
                 )
-                
-                st.caption("PDF includes formulation, results, and contact information.")
             except Exception as e:
                 st.error(f"Error generating PDF: {e}")
     
@@ -566,22 +563,24 @@ with col_right:
 
 # Footer
 st.markdown("---")
-st.caption("🔬 **Computational proof-of-concept**")
+st.caption("🔬 **Computational proof-of-concept. Experimental validation ongoing.**")
 st.caption("📧 Contact: [babuker@protonmail.com](mailto:babuker@protonmail.com)")
 
 # Sidebar
 with st.sidebar:
     st.markdown("### 📚 About")
     st.markdown("""
-    Formulation optimization tool using AI technology.
+    This tool implements a Physics-Informed Neural Network 
+    coupled with multi-objective optimization.
     
-    **Important:** All components must sum to **100%**.
+    **All formulation components must sum to 100%:**
+    - API + MCC + PVPP + Mg-St + Binder = 100%
     
-    **Targets:**
-    - 💪 Tensile Strength ≥ 2 MPa
+    **Constraints:**
+    - 💪 σₜ ≥ 2 MPa
     - ⚠️ EFRF < 0.5
     
-    **Target API:** 90.5% Paracetamol
+    **Optimal Target:** 90.5% Paracetamol
     """)
     st.markdown("---")
     st.markdown("### 🔗 Links")
@@ -589,4 +588,3 @@ with st.sidebar:
     st.markdown("[🏠 Website](https://babuker-rgb.github.io/AI.Hybrid.Formula/)")
     st.markdown("---")
     st.info("⚡ **Proof-of-Concept**")
-```
