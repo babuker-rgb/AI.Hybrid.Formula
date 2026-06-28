@@ -364,7 +364,7 @@ st.markdown("""
 st.markdown('<div class="main-header">', unsafe_allow_html=True)
 st.title("🧠 Hybrid AI Framework")
 st.markdown("### Multi‑Objective Tablet Manufacturing Optimization")
-st.caption("👨‍🔬 Babuker A. Abdalla & Prof. Abdelkarim Mohamed · Nile Valley University")
+st.caption("👨‍🔬 Babuker A. Abdalla · Nile Valley University")
 st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown("---")
