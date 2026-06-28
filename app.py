@@ -109,7 +109,7 @@ def generate_data(n_samples=100, random_state=42):
 class NSGAII:
     """Non-dominated Sorting Genetic Algorithm II"""
     
-    def __init__(self, model, scaler, bounds, pop_size=100, n_generations=100):
+    def __init__(self, model, scaler, bounds, pop_size=100, n_generations=80):
         self.model = model
         self.scaler = scaler
         self.bounds = bounds
@@ -117,17 +117,17 @@ class NSGAII:
         self.n_generations = n_generations
         self.population = None
         self.objectives = None
+        self.constraints = None
+        self.tensile = None
         self.fronts = None
         
     def _initialize_population(self):
-        """Initialize random population within bounds"""
         pop = np.zeros((self.pop_size, 8))
         for i in range(8):
             pop[:, i] = np.random.uniform(self.bounds[i, 0], self.bounds[i, 1], self.pop_size)
         return pop
     
     def _evaluate(self, population):
-        """Evaluate population objectives and constraints"""
         n = population.shape[0]
         objectives = np.zeros((n, 2))
         constraints = np.zeros(n, dtype=bool)
@@ -163,11 +163,10 @@ class NSGAII:
             efrf = pred[1]
             
             tensile_strengths[i] = tensile
-            objectives[i, 0] = -api  # Negative for maximization
+            objectives[i, 0] = -api
             objectives[i, 1] = efrf
             constraints[i] = (tensile >= 2.0 and efrf < 0.5)
             
-            # Store updated values back
             population[i, 0] = api
             population[i, 1] = mcc
             population[i, 2] = pvpp
@@ -177,21 +176,18 @@ class NSGAII:
         return objectives, constraints, tensile_strengths, population
     
     def _fast_non_dominated_sort(self, objectives, constraints):
-        """Perform non-dominated sorting with constraint handling"""
         n = objectives.shape[0]
         S = [[] for _ in range(n)]
         n_dom = np.zeros(n)
         rank = np.zeros(n, dtype=int)
         fronts = []
         
-        # Constraint violation count
         constraint_violation = ~constraints
         
         for i in range(n):
             for j in range(n):
                 if i == j:
                     continue
-                # Check dominance with constraint handling
                 if (constraint_violation[i] < constraint_violation[j]) or \
                    (constraint_violation[i] == constraint_violation[j] and 
                     objectives[i, 0] <= objectives[j, 0] and 
@@ -231,7 +227,6 @@ class NSGAII:
         return fronts, rank
     
     def _crowding_distance(self, objectives, front):
-        """Calculate crowding distance for individuals in a front"""
         n = len(front)
         if n <= 2:
             return np.ones(n) * np.inf
@@ -256,7 +251,6 @@ class NSGAII:
         return distance
     
     def _tournament_selection(self, pop_indices, objectives, ranks, crowding):
-        """Binary tournament selection"""
         n = len(pop_indices)
         selected = []
         
@@ -275,7 +269,6 @@ class NSGAII:
         return selected
     
     def _simulated_binary_crossover(self, parent1, parent2):
-        """Simulated Binary Crossover (SBX)"""
         if np.random.random() > 0.9:
             return parent1.copy(), parent2.copy()
         
@@ -304,7 +297,6 @@ class NSGAII:
         return child1, child2
     
     def _polynomial_mutation(self, individual):
-        """Polynomial mutation"""
         eta_m = 20
         mutated = individual.copy()
         
@@ -828,6 +820,13 @@ with col_right:
                     best_efrf = feasible_efrf[best_idx]
                     best_tensile = nsga.tensile[front0][feasible][best_idx]
                     st.success(f"Optimal Pareto solution: API = {best_api:.2f}% | EFRF = {best_efrf:.4f} | σt = {best_tensile:.3f} MPa | Feasible solutions: {len(feasible_api)}")
+                else:
+                    # If no feasible solutions, show best non-dominated solution
+                    best_idx = 0
+                    best_api = pareto_api[best_idx]
+                    best_efrf = pareto_efrf[best_idx]
+                    best_tensile = nsga.tensile[front0][0]
+                    st.warning(f"No feasible solutions found. Best non-dominated: API = {best_api:.2f}% | EFRF = {best_efrf:.4f} | σt = {best_tensile:.3f} MPa")
             
             # ================================================================
             # PARETO FRONT PLOT
