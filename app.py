@@ -384,37 +384,45 @@ with col_left:
     st.markdown("**All components must sum to 100%**")
     
     with st.container(border=True):
+        # Create sliders for each component
         api = st.slider("🧪 API Loading (%)", 85.0, 95.0, 90.5, 0.1)
         binder = st.slider("🔗 Binder (%)", 0.5, 3.0, 2.7, 0.1)
         pvpp = st.slider("💊 PVPP (%)", 1.0, 5.0, 3.0, 0.1)
         mgst = st.slider("🧴 Mg-St (%)", 0.2, 1.0, 0.2, 0.05)
         
-        # Calculate remaining for MCC
-        total_others = binder + pvpp + mgst
-        remaining = 100 - api - total_others
+        # Calculate the remaining percentage for MCC
+        used_total = api + binder + pvpp + mgst
+        remaining = 100 - used_total
+        
+        # MCC slider with dynamic max
+        mcc_max = min(remaining, 8.0)
+        mcc_min = max(0.0, remaining - 8.0)
         
         if remaining < 0:
             st.error(f"❌ Total exceeds 100%! Please reduce API or other components.")
             mcc = 0.0
         else:
-            # Auto-calculate MCC as the remainder
-            mcc = remaining
-            st.metric("📦 MCC (%)", f"{mcc:.1f}%", 
-                      delta="Auto-calculated as remainder to reach 100%" if mcc > 0 else "No filler needed")
-            
-            if mcc > 8.0:
-                st.warning(f"⚠️ MCC exceeds 8% ({mcc:.1f}%). Consider reducing API or other components.")
+            # If remaining is within MCC range, allow full adjustment
+            if remaining <= 8.0:
+                mcc = st.slider("📦 MCC (%)", 0.0, float(remaining), float(remaining), 0.1,
+                               help="Microcrystalline Cellulose - filler")
+            else:
+                # If remaining > 8%, MCC can only go up to 8%
+                mcc = st.slider("📦 MCC (%)", 0.0, 8.0, 8.0, 0.1,
+                               help="Microcrystalline Cellulose - filler (limited to 8%)")
+                st.warning(f"⚠️ Remaining filler would be {remaining:.1f}%, but MCC limited to 8%. Reduce API or other components.")
         
-        # Process parameters
-        st.markdown("---")
-        pressure = st.slider("⚙️ Compaction Pressure (MPa)", 100.0, 250.0, 230.0, 5.0)
-        speed = st.slider("🔄 Punch Speed (rpm)", 10.0, 40.0, 12.0, 1.0)
-        granule = st.slider("🔬 Granule Size (µm)", 50.0, 200.0, 125.0, 5.0)
-        
-        # Calculate and display total
+        # Calculate total and show validation
         total = api + binder + pvpp + mgst + mcc
         st.metric("**Total Formulation**", f"{total:.1f}%", 
                   delta="✅ Valid" if abs(total - 100) < 0.1 else "❌ Invalid")
+        
+        # Show MCC status
+        if abs(total - 100) < 0.1:
+            if mcc < 0.5:
+                st.info("ℹ️ Low MCC content. Formulation is mostly API.")
+            elif mcc > 6.0:
+                st.info("ℹ️ High MCC content. Good for compaction.")
     
     predict_btn = st.button("🔬 Predict & Optimize", use_container_width=True)
 
