@@ -102,6 +102,14 @@ class PINN(nn.Module):
     def forward(self, X):
         return self.network(X)
     
+    def compute_loss(self, X, y_true, omega_data=0.8, omega_physics=0.2):
+        """Compute hybrid loss: L = ω₁ * MSE_data + ω₂ * MSE_physics"""
+        y_pred = self.forward(X)
+        data_loss = nn.MSELoss()(y_pred, y_true)
+        physics_loss = self.physics_loss(X, y_pred)
+        total_loss = omega_data * data_loss + omega_physics * physics_loss
+        return total_loss, data_loss, physics_loss
+    
     def predict(self, X):
         """Predict with physics constraints"""
         self.eval()
@@ -400,8 +408,6 @@ with col_right:
         # Plot Pareto front
         ax.plot(api_range, efrf_range, 'r-', linewidth=2.5, label='Pareto Front')
         ax.axhline(y=0.5, color='k', linestyle='--', alpha=0.7, label='EFRF = 0.5 (Threshold)')
-        ax.axhline(y=0.5, color='green', linestyle=':', alpha=0.3, linewidth=4, 
-                   label='Feasible Region (EFRF < 0.5)')
         
         # Fill feasible region
         feasible_mask = efrf_range < 0.5
@@ -477,6 +483,7 @@ with col_right:
     
     else:
         st.info("👆 Adjust the parameters on the left and click **'Predict & Optimize'** to see results.")
+        # Placeholder image
         st.image("https://via.placeholder.com/600x300/1e293b/ffffff?text=Ready+for+Prediction", 
                  caption="Adjust parameters and click Predict")
 
