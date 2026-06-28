@@ -123,7 +123,7 @@ def generate_data(n_samples=100, random_state=42):
 
 
 # ================================================================
-# 3. PDF REPORT GENERATION (Fixed for Unicode compatibility)
+# 3. PDF REPORT GENERATION
 # ================================================================
 
 def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule, 
@@ -133,123 +133,174 @@ def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
     pdf = FPDF()
     pdf.add_page()
     
-    # Set font (using standard fonts that support basic characters)
-    pdf.set_font("Arial", "B", 16)
-    
-    # Title
+    # HEADER
+    pdf.set_font("Arial", "B", 18)
     pdf.cell(0, 10, "PINN-NSGA-II Formulation Report", ln=True, align="C")
-    pdf.set_font("Arial", "I", 10)
+    pdf.set_font("Arial", "I", 11)
     pdf.cell(0, 6, "Hybrid AI Framework for Multi-Objective Tablet Manufacturing Optimization", ln=True, align="C")
-    pdf.set_font("Arial", "B", 10)
-    pdf.cell(0, 6, f"Date: {timestamp}", ln=True, align="C")
-    
-    pdf.ln(5)
-    
-    # ============ Formulation Summary ============
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 8, "1. Formulation Summary", ln=True)
     pdf.set_font("Arial", "", 10)
-    pdf.cell(50, 6, "Component", 1, 0, "C")
-    pdf.cell(50, 6, "Value (%)", 1, 1, "C")
+    pdf.cell(0, 6, f"Date: {timestamp}", ln=True, align="C")
+    pdf.ln(8)
+    
+    # 1. FORMULATION SUMMARY
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.cell(0, 8, "1. Formulation Summary", ln=True, fill=True)
+    pdf.set_font("Arial", "", 10)
     
     components = [
-        ("API (Paracetamol)", f"{api:.1f}%"),
-        ("MCC", f"{mcc:.1f}%"),
-        ("PVPP", f"{pvpp:.1f}%"),
-        ("Mg-St", f"{mgst:.2f}%"),
-        ("Binder", f"{binder:.1f}%"),
-        ("Total", f"{total:.1f}%")
+        ("Active Pharmaceutical Ingredient (API)", f"{api:.1f}%", "Paracetamol"),
+        ("Microcrystalline Cellulose (MCC)", f"{mcc:.1f}%", "Filler/Binder"),
+        ("Crospovidone (PVPP)", f"{pvpp:.1f}%", "Superdisintegrant"),
+        ("Magnesium Stearate (Mg-St)", f"{mgst:.2f}%", "Lubricant"),
+        ("Binder", f"{binder:.1f}%", "Binding Agent"),
+        ("TOTAL", f"{total:.1f}%", "100% Complete")
     ]
     
-    for comp, val in components:
-        pdf.cell(50, 6, comp, 1, 0, "L")
-        pdf.cell(50, 6, val, 1, 1, "C")
+    pdf.set_font("Arial", "B", 10)
+    pdf.cell(60, 6, "Component", 1, 0, "C")
+    pdf.cell(30, 6, "Value", 1, 0, "C")
+    pdf.cell(80, 6, "Function", 1, 1, "C")
+    
+    pdf.set_font("Arial", "", 10)
+    for comp, val, func in components:
+        pdf.cell(60, 6, comp, 1, 0, "L")
+        pdf.cell(30, 6, val, 1, 0, "C")
+        pdf.cell(80, 6, func, 1, 1, "L")
     
     pdf.ln(5)
     
-    # ============ Process Parameters ============
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 8, "2. Process Parameters", ln=True)
+    # 2. PROCESS PARAMETERS
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.cell(0, 8, "2. Process Parameters", ln=True, fill=True)
     pdf.set_font("Arial", "", 10)
     
     params = [
-        ("Compaction Pressure", f"{pressure:.1f} MPa"),
-        ("Punch Speed", f"{speed:.1f} rpm"),
-        ("Granule Size", f"{granule:.1f} um"),
+        ("Compaction Pressure", f"{pressure:.1f} MPa", "Affects tablet hardness and density"),
+        ("Punch Speed", f"{speed:.1f} rpm", "Influences compression time and elastic recovery"),
+        ("Granule Size", f"{granule:.1f} µm", "Impacts flowability and content uniformity"),
     ]
-    for p, v in params:
-        pdf.cell(60, 6, p, 1, 0, "L")
-        pdf.cell(40, 6, v, 1, 1, "C")
+    
+    pdf.set_font("Arial", "B", 10)
+    pdf.cell(50, 6, "Parameter", 1, 0, "C")
+    pdf.cell(40, 6, "Value", 1, 0, "C")
+    pdf.cell(80, 6, "Significance", 1, 1, "C")
+    
+    pdf.set_font("Arial", "", 10)
+    for p, v, s in params:
+        pdf.cell(50, 6, p, 1, 0, "L")
+        pdf.cell(40, 6, v, 1, 0, "C")
+        pdf.cell(80, 6, s, 1, 1, "L")
     
     pdf.ln(5)
     
-    # ============ Prediction Results ============
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 8, "3. Prediction Results", ln=True)
+    # 3. PREDICTION RESULTS
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.cell(0, 8, "3. Prediction Results", ln=True, fill=True)
     pdf.set_font("Arial", "", 10)
     
-    # Replace special characters with text equivalents to avoid Unicode errors
     tensile_status = "PASS" if tensile >= 2.0 else "FAIL"
     efrf_status = "PASS" if efrf < 0.5 else "FAIL"
     
     results = [
         ("Tensile Strength", f"{tensile:.3f} MPa", ">= 2 MPa", tensile_status),
-        ("EFRF", f"{efrf:.4f}", "< 0.5", efrf_status),
+        ("EFRF (Capping Risk)", f"{efrf:.4f}", "< 0.5", efrf_status),
     ]
     
-    pdf.cell(50, 6, "Metric", 1, 0, "C")
-    pdf.cell(40, 6, "Value", 1, 0, "C")
-    pdf.cell(40, 6, "Threshold", 1, 0, "C")
-    pdf.cell(40, 6, "Status", 1, 1, "C")
+    pdf.set_font("Arial", "B", 10)
+    pdf.cell(45, 6, "Metric", 1, 0, "C")
+    pdf.cell(35, 6, "Value", 1, 0, "C")
+    pdf.cell(45, 6, "Threshold", 1, 0, "C")
+    pdf.cell(45, 6, "Status", 1, 1, "C")
     
+    pdf.set_font("Arial", "", 10)
     for r in results:
-        pdf.cell(50, 6, r[0], 1, 0, "L")
-        pdf.cell(40, 6, r[1], 1, 0, "C")
-        pdf.cell(40, 6, r[2], 1, 0, "C")
-        pdf.cell(40, 6, r[3], 1, 1, "C")
+        pdf.cell(45, 6, r[0], 1, 0, "L")
+        pdf.cell(35, 6, r[1], 1, 0, "C")
+        pdf.cell(45, 6, r[2], 1, 0, "C")
+        pdf.cell(45, 6, r[3], 1, 1, "C")
     
     pdf.ln(5)
     
-    # ============ Overall Status ============
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 8, "4. Overall Status", ln=True)
-    pdf.set_font("Arial", "B", 14)
+    # 4. OVERALL STATUS
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.cell(0, 8, "4. Overall Status", ln=True, fill=True)
     
+    pdf.set_font("Arial", "B", 14)
     if tensile >= 2.0 and efrf < 0.5:
         pdf.set_text_color(0, 128, 0)
-        pdf.cell(0, 8, "PASS - Formulation Satisfies All Constraints", ln=True, align="C")
+        pdf.cell(0, 8, "PASS - Formulation Satisfies All Mechanical Constraints", ln=True, align="C")
+        pdf.set_font("Arial", "", 10)
+        pdf.set_text_color(0, 0, 0)
+        pdf.multi_cell(0, 6, "This formulation is recommended for experimental validation and scale-up studies.")
     else:
         pdf.set_text_color(255, 0, 0)
         pdf.cell(0, 8, "FAIL - Formulation Does NOT Satisfy All Constraints", ln=True, align="C")
+        pdf.set_font("Arial", "", 10)
+        pdf.set_text_color(0, 0, 0)
+        pdf.multi_cell(0, 6, "This formulation requires further optimization. Adjust parameters and re-evaluate.")
     
     pdf.set_text_color(0, 0, 0)
     pdf.ln(5)
     
-    # ============ Signature Section ============
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 8, "5. Digital Signature & Approval", ln=True)
+    # 5. RECOMMENDATIONS
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.cell(0, 8, "5. Recommendations", ln=True, fill=True)
     pdf.set_font("Arial", "", 10)
-    pdf.cell(0, 6, "This report was generated automatically by the Hybrid AI Framework (PINN-NSGA-II).", ln=True)
-    pdf.cell(0, 6, "It serves as a computational proof-of-concept and requires experimental validation.", ln=True)
-    pdf.ln(3)
     
-    # Signature line
-    pdf.set_font("Arial", "", 10)
-    pdf.cell(80, 6, "Signature:", 0, 0)
-    pdf.cell(80, 6, "___________________________", 0, 1)
-    pdf.cell(80, 6, "Date:", 0, 0)
-    pdf.cell(80, 6, f"{timestamp}", 0, 1)
-    pdf.cell(80, 6, "Researcher:", 0, 0)
-    pdf.cell(80, 6, "Babuker A. Abdalla", 0, 1)
-    pdf.cell(80, 6, "Supervisor:", 0, 0)
-    pdf.cell(80, 6, "Prof. Abdelkarim Mohamed", 0, 1)
+    if tensile >= 2.0 and efrf < 0.5:
+        recommendations = [
+            "1. Proceed with experimental validation using twin-screw wet granulation.",
+            "2. Confirm tensile strength and capping resistance with physical testing.",
+            "3. Evaluate disintegration time and dissolution profile.",
+            "4. Assess stability under accelerated ICH conditions.",
+            "5. Scale-up to pilot batch for process optimization."
+        ]
+    else:
+        recommendations = [
+            "1. Reduce API loading or adjust binder concentration.",
+            "2. Optimize Mg-St level (reduce if EFRF is high).",
+            "3. Increase compaction pressure to improve tensile strength.",
+            "4. Reduce punch speed to minimize elastic recovery.",
+            "5. Re-run prediction with adjusted parameters."
+        ]
+    
+    for rec in recommendations:
+        pdf.cell(0, 6, rec, ln=True)
     
     pdf.ln(5)
-    pdf.set_font("Arial", "I", 8)
-    pdf.cell(0, 4, "Generated by: Hybrid AI Framework (PINN-NSGA-II) | Nile Valley University", ln=True, align="C")
-    pdf.cell(0, 4, "Contact: babuker@protonmail.com", ln=True, align="C")
     
-    return pdf.output(dest="S").encode("latin1")
+    # 6. CONTACT INFORMATION
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.cell(0, 8, "6. Contact Information", ln=True, fill=True)
+    pdf.set_font("Arial", "", 11)
+    
+    pdf.cell(0, 8, "Chem. Eng. Babuker A. Abdalla", ln=True)
+    pdf.cell(0, 7, "Email: babuker@protonmail.com", ln=True)
+    pdf.cell(0, 7, "Phone: +249-123-638-638", ln=True)
+    pdf.cell(0, 7, "Sudan", ln=True)
+    
+    pdf.ln(3)
+    
+    # FOOTER
+    pdf.set_y(270)
+    pdf.set_font("Arial", "I", 8)
+    pdf.cell(0, 6, "Generated by: Hybrid AI Framework (PINN-NSGA-II)", ln=True, align="C")
+    
+    # RETURN PDF
+    pdf_bytes = pdf.output(dest="S")
+    
+    if isinstance(pdf_bytes, bytearray):
+        return bytes(pdf_bytes)
+    elif isinstance(pdf_bytes, bytes):
+        return pdf_bytes
+    else:
+        return str(pdf_bytes).encode('latin1')
 
 
 # ================================================================
@@ -375,31 +426,19 @@ with col_left:
         # Calculate remaining for MCC (max 8%)
         total_others = binder + pvpp + mgst
         remaining = 100 - api - total_others
-        max_mcc = min(remaining, 8.0)
         
         if remaining < 0:
             st.error(f"❌ API + Binder + PVPP + Mg-St = {api + total_others:.1f}% > 100%! Please reduce API or other components.")
             mcc = 0.0
         else:
-            mcc = st.number_input(
-                "📦 MCC (%)", 
-                min_value=0.0, 
-                max_value=float(max_mcc),
-                value=float(min(max_mcc, 3.6)),
-                step=0.1,
-                format="%.1f",
-                help="Microcrystalline Cellulose - filler (remaining to 100%)"
-            )
-        
-        # Auto-fill MCC if needed
-        if st.button("🔧 Auto-fill MCC to 100%"):
-            total_components = api + binder + pvpp + mgst
-            if total_components <= 100:
-                auto_mcc = 100 - total_components
-                if auto_mcc <= 8.0:
-                    mcc = auto_mcc
-                else:
-                    st.warning(f"⚠️ Remaining filler ({auto_mcc:.1f}%) exceeds MCC limit (8%). Reduce API or other components.")
+            # Auto-calculate MCC
+            mcc = min(remaining, 8.0)
+            st.metric("📦 MCC (%)", f"{mcc:.1f}%", 
+                      help="Microcrystalline Cellulose - filler (automatically calculated to reach 100%)")
+            
+            # Show remaining if MCC is capped at 8%
+            if remaining > 8.0:
+                st.warning(f"⚠️ Remaining filler ({remaining:.1f}%) exceeds MCC limit (8%). Reduce API or other components.")
         
         # Process parameters
         st.markdown("---")
@@ -467,9 +506,7 @@ with col_right:
             }
             st.dataframe(pd.DataFrame(summary_data), hide_index=True, use_container_width=True)
             
-            # ================================================================
             # PARETO FRONT PLOT
-            # ================================================================
             st.markdown("### 📉 Pareto Front")
             fig, ax = plt.subplots(figsize=(10, 5))
             
@@ -479,8 +516,8 @@ with col_right:
             for a in api_range:
                 # Adjust MCC to maintain 100%
                 total_others = binder + pvpp + mgst
-                mcc_fixed = 100 - a - total_others
-                if 0 <= mcc_fixed <= 8:
+                mcc_fixed = min(100 - a - total_others, 8.0)
+                if mcc_fixed >= 0:
                     test_inputs = [a, mcc_fixed, pvpp, mgst, binder, pressure, speed, granule]
                     _, e = predict(model, scaler, test_inputs)
                     efrf_vals.append(e)
@@ -503,9 +540,7 @@ with col_right:
             ax.set_xlim(84, 96)
             st.pyplot(fig)
             
-            # ================================================================
             # SENSITIVITY ANALYSIS
-            # ================================================================
             st.markdown("### 🔍 Sensitivity Analysis")
             with st.expander("Click to view feature importance"):
                 base_inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
@@ -533,9 +568,7 @@ with col_right:
                 ax2.grid(True, alpha=0.3, axis='x')
                 st.pyplot(fig2)
             
-            # ================================================================
             # GENERATE PDF REPORT
-            # ================================================================
             st.markdown("---")
             st.markdown("### 📄 Generate Report")
             
@@ -571,7 +604,7 @@ with col_right:
                 st.info("Please try again or contact support.")
     
     else:
-        st.info("👆 Adjust parameters to 100% total and click **'Predict & Optimize'**")
+        st.info("👆 Adjust parameters and click **'Predict & Optimize'**")
 
 # Footer
 st.markdown("---")
