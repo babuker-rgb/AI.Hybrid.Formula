@@ -14,18 +14,10 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from sklearn.preprocessing import StandardScaler
+from fpdf import FPDF
+import datetime
 import warnings
 warnings.filterwarnings('ignore')
-
-# NEW: PDF and Barcode libraries
-import io
-import base64
-from datetime import datetime
-import qrcode
-from PIL import Image
-from fpdf import FPDF
-import tempfile
-import os
 
 # ================================================================
 # 1. PINN MODEL DEFINITION
@@ -66,19 +58,31 @@ def generate_data(n_samples=100, random_state=42):
     """Generate synthetic data ensuring all components sum to 100%"""
     np.random.seed(random_state)
     
+    # Initialize dataset
     X = np.zeros((n_samples, 8))
     y = np.zeros((n_samples, 2))
     
     for i in range(n_samples):
+        # Generate 5 components that sum to 100%
+        # 1. API: 85-95%
         api = np.random.uniform(85, 95)
+        
+        # 2. Binder: 0.5-3.0%
         binder = np.random.uniform(0.5, 3.0)
+        
+        # 3. Mg-St: 0.2-1.0%
         mgst = np.random.uniform(0.2, 1.0)
+        
+        # 4. PVPP: 1.0-5.0%
         pvpp = np.random.uniform(1.0, 5.0)
         
+        # 5. Remaining is MCC (max 8%)
         mcc = 100 - (api + binder + mgst + pvpp)
         mcc = np.clip(mcc, 0, 8.0)
         
+        # If MCC exceeds 8%, rescale others proportionally
         if mcc > 8.0:
+            # Reduce others proportionally
             scale_factor = (100 - 8.0) / (api + binder + mgst + pvpp)
             api = api * scale_factor
             binder = binder * scale_factor
@@ -86,15 +90,20 @@ def generate_data(n_samples=100, random_state=42):
             pvpp = pvpp * scale_factor
             mcc = 8.0
         
+        # 6. Process parameters
         pressure = np.random.uniform(100, 250)
         speed = np.random.uniform(10, 40)
         granule = np.random.uniform(50, 200)
         
+        # Store inputs
         X[i] = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
         
+        # --- Calculate outputs ---
+        # Tensile strength: decreases with API, increases with binder and pressure
         strength = 3.5 - 0.15 * (api - 85) + 0.3 * binder + 0.008 * (pressure - 100) - 1.5 * mgst - 0.02 * (speed - 10)
         strength = np.clip(strength, 0.5, 6.0)
         
+        # EFRF: increases with API and speed, decreases with pressure and binder
         efrf = 0.2 + 0.08 * (api - 85) + 0.005 * (speed - 10) - 0.001 * (pressure - 100) - 0.2 * binder + 0.5 * mgst
         efrf = np.clip(efrf, 0.1, 1.5)
         
@@ -106,33 +115,169 @@ def generate_data(n_samples=100, random_state=42):
     df = pd.DataFrame(X, columns=feature_names)
     df['Tensile_Strength_MPa'] = y[:, 0]
     df['EFRF'] = y[:, 1]
+    
+    # Calculate total composition
     df['Total_Composition_%'] = df[['API_%', 'MCC_%', 'PVPP_%', 'MgSt_%', 'Binder_%']].sum(axis=1)
     
     return df, feature_names
 
 
 # ================================================================
-# 3. TRAIN MODEL
+# 3. PDF REPORT GENERATION
+# ================================================================
+
+def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule, 
+                      tensile, efrf, total, status, timestamp):
+    """Generate a professional PDF report with formulation and results."""
+    
+    pdf = FPDF()
+    pdf.add_page()
+    
+    # Set font
+    pdf.set_font("Arial", "B", 16)
+    
+    # Title
+    pdf.cell(0, 10, "PINN-NSGA-II Formulation Report", ln=True, align="C")
+    pdf.set_font("Arial", "I", 10)
+    pdf.cell(0, 6, "Hybrid AI Framework for Multi-Objective Tablet Manufacturing Optimization", ln=True, align="C")
+    pdf.set_font("Arial", "B", 10)
+    pdf.cell(0, 6, f"Date: {timestamp}", ln=True, align="C")
+    
+    pdf.ln(5)
+    
+    # ============ Formulation Summary ============
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 8, "1. Formulation Summary", ln=True)
+    pdf.set_font("Arial", "", 10)
+    pdf.cell(50, 6, "Component", 1, 0, "C")
+    pdf.cell(50, 6, "Value (%)", 1, 1, "C")
+    
+    components = [
+        ("API (Paracetamol)", f"{api:.1f}%"),
+        ("MCC", f"{mcc:.1f}%"),
+        ("PVPP", f"{pvpp:.1f}%"),
+        ("Mg-St", f"{mgst:.2f}%"),
+        ("Binder", f"{binder:.1f}%"),
+        ("Total", f"{total:.1f}%")
+    ]
+    
+    for comp, val in components:
+        pdf.cell(50, 6, comp, 1, 0, "L")
+        pdf.cell(50, 6, val, 1, 1, "C")
+    
+    pdf.ln(5)
+    
+    # ============ Process Parameters ============
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 8, "2. Process Parameters", ln=True)
+    pdf.set_font("Arial", "", 10)
+    
+    params = [
+        ("Compaction Pressure", f"{pressure:.1f} MPa"),
+        ("Punch Speed", f"{speed:.1f} rpm"),
+        ("Granule Size", f"{granule:.1f} µm"),
+    ]
+    for p, v in params:
+        pdf.cell(60, 6, p, 1, 0, "L")
+        pdf.cell(40, 6, v, 1, 1, "C")
+    
+    pdf.ln(5)
+    
+    # ============ Prediction Results ============
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 8, "3. Prediction Results", ln=True)
+    pdf.set_font("Arial", "", 10)
+    
+    tensile_status = "✅ PASS" if tensile >= 2.0 else "❌ FAIL"
+    efrf_status = "✅ PASS" if efrf < 0.5 else "❌ FAIL"
+    
+    results = [
+        ("Tensile Strength", f"{tensile:.3f} MPa", "≥ 2 MPa", tensile_status),
+        ("EFRF", f"{efrf:.4f}", "< 0.5", efrf_status),
+    ]
+    
+    pdf.cell(50, 6, "Metric", 1, 0, "C")
+    pdf.cell(40, 6, "Value", 1, 0, "C")
+    pdf.cell(40, 6, "Threshold", 1, 0, "C")
+    pdf.cell(40, 6, "Status", 1, 1, "C")
+    
+    for r in results:
+        pdf.cell(50, 6, r[0], 1, 0, "L")
+        pdf.cell(40, 6, r[1], 1, 0, "C")
+        pdf.cell(40, 6, r[2], 1, 0, "C")
+        pdf.cell(40, 6, r[3], 1, 1, "C")
+    
+    pdf.ln(5)
+    
+    # ============ Overall Status ============
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 8, "4. Overall Status", ln=True)
+    pdf.set_font("Arial", "B", 14)
+    
+    if tensile >= 2.0 and efrf < 0.5:
+        pdf.set_text_color(0, 128, 0)
+        pdf.cell(0, 8, "✅ FORMULATION SATISFIES ALL CONSTRAINTS", ln=True, align="C")
+    else:
+        pdf.set_text_color(255, 0, 0)
+        pdf.cell(0, 8, "❌ FORMULATION DOES NOT SATISFY ALL CONSTRAINTS", ln=True, align="C")
+    
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(5)
+    
+    # ============ Signature Section ============
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 8, "5. Digital Signature & Approval", ln=True)
+    pdf.set_font("Arial", "", 10)
+    pdf.cell(0, 6, "This report was generated automatically by the Hybrid AI Framework (PINN-NSGA-II).", ln=True)
+    pdf.cell(0, 6, "It serves as a computational proof-of-concept and requires experimental validation.", ln=True)
+    pdf.ln(3)
+    
+    # Signature line
+    pdf.set_font("Arial", "", 10)
+    pdf.cell(80, 6, "Signature:", 0, 0)
+    pdf.cell(80, 6, "___________________________", 0, 1)
+    pdf.cell(80, 6, "Date:", 0, 0)
+    pdf.cell(80, 6, f"{timestamp}", 0, 1)
+    pdf.cell(80, 6, "Researcher:", 0, 0)
+    pdf.cell(80, 6, "Babuker A. Abdalla", 0, 1)
+    pdf.cell(80, 6, "Supervisor:", 0, 0)
+    pdf.cell(80, 6, "Prof. Abdelkarim Mohamed", 0, 1)
+    
+    pdf.ln(5)
+    pdf.set_font("Arial", "I", 8)
+    pdf.cell(0, 4, "Generated by: Hybrid AI Framework (PINN-NSGA-II) | Nile Valley University", ln=True, align="C")
+    pdf.cell(0, 4, "Contact: babuker@protonmail.com", ln=True, align="C")
+    
+    return pdf.output(dest="S").encode("latin1")
+
+
+# ================================================================
+# 4. TRAIN MODEL
 # ================================================================
 
 @st.cache_resource
 def load_model():
-    """Train and return the PINN model with caching"""
+    """Train and return the model with caching"""
     
+    # Generate data
     df, feature_names = generate_data(n_samples=100)
     X = df[feature_names].values
     y = df[['Tensile_Strength_MPa', 'EFRF']].values
     
+    # Scale features
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
     
+    # Convert to tensors
     X_tensor = torch.FloatTensor(X_scaled)
     y_tensor = torch.FloatTensor(y)
     
+    # Train model
     model = SimplePINN()
     optimizer = optim.Adam(model.parameters(), lr=0.01)
     criterion = nn.MSELoss()
     
+    # Training loop
     progress_bar = st.progress(0)
     for epoch in range(1000):
         optimizer.zero_grad()
@@ -150,7 +295,7 @@ def load_model():
 
 
 # ================================================================
-# 4. PREDICTION FUNCTION
+# 5. PREDICTION FUNCTION
 # ================================================================
 
 def predict(model, scaler, inputs):
@@ -167,161 +312,7 @@ def predict(model, scaler, inputs):
 
 
 # ================================================================
-# 5. PDF REPORT GENERATOR
-# ================================================================
-
-class PDFReport(FPDF):
-    def __init__(self, title, author):
-        super().__init__()
-        self.title = title
-        self.author = author
-        self.set_auto_page_break(auto=True, margin=15)
-    
-    def header(self):
-        self.set_font('Arial', 'B', 14)
-        self.cell(0, 10, self.title, 0, 1, 'C')
-        self.set_font('Arial', 'I', 10)
-        self.cell(0, 5, f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")}', 0, 1, 'R')
-        self.ln(5)
-    
-    def footer(self):
-        self.set_y(-15)
-        self.set_font('Arial', 'I', 8)
-        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
-
-def generate_pdf_report(formulation_data, results, figure_path=None):
-    """Generate a PDF report of the formulation results"""
-    
-    pdf = PDFReport(
-        title="Hybrid AI Framework (PINN-NSGA-II) Formulation Report",
-        author="Babuker A. Abdalla & Prof. Abdelkarim Mohamed"
-    )
-    pdf.add_page()
-    
-    # Section 1: Formulation Details
-    pdf.set_font('Arial', 'B', 12)
-    pdf.cell(0, 10, '1. Formulation Composition', 0, 1)
-    pdf.set_font('Arial', '', 10)
-    
-    # Create table for formulation
-    pdf.set_fill_color(240, 240, 240)
-    pdf.set_font('Arial', 'B', 10)
-    pdf.cell(50, 8, 'Component', 1, 0, 'C', True)
-    pdf.cell(50, 8, 'Percentage (%)', 1, 0, 'C', True)
-    pdf.cell(50, 8, 'Role', 1, 1, 'C', True)
-    
-    pdf.set_font('Arial', '', 10)
-    components = [
-        ('API (Paracetamol)', f"{formulation_data['api']:.1f}%", 'Active Ingredient'),
-        ('MCC', f"{formulation_data['mcc']:.1f}%", 'Filler/Binder'),
-        ('PVPP', f"{formulation_data['pvpp']:.1f}%", 'Superdisintegrant'),
-        ('Mg-St', f"{formulation_data['mgst']:.2f}%", 'Lubricant'),
-        ('Binder', f"{formulation_data['binder']:.1f}%", 'Binder'),
-        ('Total', f"{formulation_data['total']:.1f}%", '100% Formulation')
-    ]
-    
-    for name, value, role in components:
-        pdf.cell(50, 8, name, 1, 0, 'L')
-        pdf.cell(50, 8, value, 1, 0, 'C')
-        pdf.cell(50, 8, role, 1, 1, 'L')
-    
-    pdf.ln(5)
-    
-    # Section 2: Process Parameters
-    pdf.set_font('Arial', 'B', 12)
-    pdf.cell(0, 10, '2. Process Parameters', 0, 1)
-    pdf.set_font('Arial', '', 10)
-    
-    process_data = [
-        ('Compaction Pressure', f"{formulation_data['pressure']:.1f} MPa"),
-        ('Punch Speed', f"{formulation_data['speed']:.1f} rpm"),
-        ('Granule Size', f"{formulation_data['granule']:.1f} µm")
-    ]
-    
-    for param, value in process_data:
-        pdf.cell(60, 8, param, 0, 0)
-        pdf.cell(40, 8, value, 0, 1)
-    
-    pdf.ln(5)
-    
-    # Section 3: Results
-    pdf.set_font('Arial', 'B', 12)
-    pdf.cell(0, 10, '3. Prediction Results', 0, 1)
-    pdf.set_font('Arial', '', 10)
-    
-    results_data = [
-        ('Tensile Strength (σₜ)', f"{results['tensile']:.3f} MPa", f"{'✅ PASS' if results['tensile'] >= 2.0 else '❌ FAIL'}"),
-        ('EFRF (Capping Risk)', f"{results['efrf']:.4f}", f"{'✅ PASS' if results['efrf'] < 0.5 else '❌ FAIL'}")
-    ]
-    
-    pdf.set_fill_color(240, 240, 240)
-    pdf.set_font('Arial', 'B', 10)
-    pdf.cell(70, 8, 'Metric', 1, 0, 'C', True)
-    pdf.cell(60, 8, 'Value', 1, 0, 'C', True)
-    pdf.cell(50, 8, 'Status', 1, 1, 'C', True)
-    
-    pdf.set_font('Arial', '', 10)
-    for metric, value, status in results_data:
-        pdf.cell(70, 8, metric, 1, 0, 'L')
-        pdf.cell(60, 8, value, 1, 0, 'C')
-        pdf.cell(50, 8, status, 1, 1, 'C')
-    
-    pdf.ln(5)
-    
-    # Section 4: Summary
-    pdf.set_font('Arial', 'B', 12)
-    pdf.cell(0, 10, '4. Summary', 0, 1)
-    pdf.set_font('Arial', '', 10)
-    
-    overall_status = "✅ ALL CONSTRAINTS SATISFIED" if (results['tensile'] >= 2.0 and results['efrf'] < 0.5) else "❌ CONSTRAINTS NOT MET"
-    pdf.cell(60, 8, f"Overall Status: {overall_status}", 0, 1)
-    
-    pdf.cell(60, 8, "Recommendation:", 0, 1)
-    if results['tensile'] >= 2.0 and results['efrf'] < 0.5:
-        pdf.cell(80, 8, "- This formulation is suitable for experimental validation.", 0, 1)
-        pdf.cell(80, 8, "- Proceed to wet-lab manufacturing and testing.", 0, 1)
-    else:
-        pdf.cell(80, 8, "- Adjust formulation parameters to meet constraints.", 0, 1)
-        pdf.cell(80, 8, "- Focus on reducing API or increasing binder content.", 0, 1)
-    
-    pdf.ln(5)
-    
-    # Section 5: Signature
-    pdf.set_font('Arial', 'I', 10)
-    pdf.cell(0, 10, f'Report generated by: {pdf.author}', 0, 1)
-    pdf.cell(0, 10, f'Date: {datetime.now().strftime("%Y-%m-%d %H:%M")}', 0, 1)
-    
-    # Add figure if provided
-    if figure_path and os.path.exists(figure_path):
-        pdf.add_page()
-        pdf.set_font('Arial', 'B', 12)
-        pdf.cell(0, 10, '5. Pareto Front Visualization', 0, 1)
-        pdf.image(figure_path, x=20, w=170)
-    
-    return pdf
-
-
-# ================================================================
-# 6. QR CODE GENERATOR
-# ================================================================
-
-def generate_qr_code(data):
-    """Generate QR code for the formulation data"""
-    qr = qrcode.QRCode(
-        version=1,
-        error_correction=qrcode.constants.ERROR_CORRECT_L,
-        box_size=10,
-        border=4,
-    )
-    qr.add_data(data)
-    qr.make(fit=True)
-    
-    img = qr.make_image(fill_color="black", back_color="white")
-    return img
-
-
-# ================================================================
-# 7. STREAMLIT UI
+# 6. STREAMLIT UI
 # ================================================================
 
 st.set_page_config(
@@ -340,8 +331,6 @@ st.markdown("""
     .constraint-warning { color: #d97706; font-weight: 700; }
     .stButton > button { width: 100%; background: #2563eb; color: white; font-weight: 600; padding: 0.6rem; border-radius: 8px; border: none; }
     .stButton > button:hover { background: #1d4ed8; color: white; }
-    .download-btn { background: #16a34a !important; }
-    .download-btn:hover { background: #15803d !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -382,8 +371,10 @@ with col_left:
         mgst = st.slider("🧴 Mg-St (%)", 0.2, 1.0, 0.2, 0.05,
                         help="Lubricant (Magnesium Stearate)")
         
+        # Calculate remaining for MCC (max 8%)
         total_others = binder + pvpp + mgst
         remaining = 100 - api - total_others
+        max_mcc = min(remaining, 8.0)
         
         if remaining < 0:
             st.error(f"❌ API + Binder + PVPP + Mg-St = {api + total_others:.1f}% > 100%! Please reduce API or other components.")
@@ -392,13 +383,14 @@ with col_left:
             mcc = st.number_input(
                 "📦 MCC (%)", 
                 min_value=0.0, 
-                max_value=float(min(remaining, 8.0)),
-                value=float(min(remaining, 3.6)),
+                max_value=float(max_mcc),
+                value=float(min(max_mcc, 3.6)),
                 step=0.1,
                 format="%.1f",
                 help="Microcrystalline Cellulose - filler (remaining to 100%)"
             )
         
+        # Auto-fill MCC if needed
         if st.button("🔧 Auto-fill MCC to 100%"):
             total_components = api + binder + pvpp + mgst
             if total_components <= 100:
@@ -408,11 +400,13 @@ with col_left:
                 else:
                     st.warning(f"⚠️ Remaining filler ({auto_mcc:.1f}%) exceeds MCC limit (8%). Reduce API or other components.")
         
+        # Process parameters
         st.markdown("---")
         pressure = st.slider("⚙️ Compaction Pressure (MPa)", 100.0, 250.0, 230.0, 5.0)
         speed = st.slider("🔄 Punch Speed (rpm)", 10.0, 40.0, 12.0, 1.0)
         granule = st.slider("🔬 Granule Size (µm)", 50.0, 200.0, 125.0, 5.0)
         
+        # Calculate and display total
         total = api + binder + pvpp + mgst + mcc
         st.metric("**Total Formulation**", f"{total:.1f}%", 
                   delta="✅ Valid" if abs(total - 100) < 0.1 else "❌ Invalid")
@@ -426,6 +420,7 @@ with col_right:
     st.markdown("### 📈 Prediction Results")
     
     if predict_btn:
+        # Validate total
         total = api + binder + pvpp + mgst + mcc
         if abs(total - 100) > 0.1:
             st.warning("⚠️ **Invalid formulation:** Components do not sum to 100%. Adjust your inputs and try again.")
@@ -434,14 +429,6 @@ with col_right:
             
             with st.spinner("🧠 Running prediction..."):
                 tensile, efrf = predict(model, scaler, inputs)
-            
-            # Store results for PDF
-            formulation_data = {
-                'api': api, 'mcc': mcc, 'pvpp': pvpp, 'mgst': mgst, 
-                'binder': binder, 'pressure': pressure, 'speed': speed, 
-                'granule': granule, 'total': total
-            }
-            results_data = {'tensile': tensile, 'efrf': efrf}
             
             # Metrics
             col1, col2 = st.columns(2)
@@ -471,106 +458,8 @@ with col_right:
             else:
                 st.warning("⚠️ **Formulation does NOT satisfy all constraints. Adjust parameters.**")
             
-            # ================================================================
-            # PDF REPORT & QR CODE SECTION
-            # ================================================================
-            st.markdown("---")
-            st.markdown("### 📄 Report & Export")
-            
-            col_pdf, col_qr = st.columns([1, 1])
-            
-            with col_pdf:
-                # Generate PDF
-                if st.button("📥 Download PDF Report", use_container_width=True):
-                    with st.spinner("Generating PDF..."):
-                        # Save Pareto plot temporarily
-                        fig, ax = plt.subplots(figsize=(8, 5))
-                        api_range = np.linspace(85, 95, 50)
-                        efrf_vals = []
-                        for a in api_range:
-                            total_others = binder + pvpp + mgst
-                            mcc_fixed = 100 - a - total_others
-                            if 0 <= mcc_fixed <= 8:
-                                test_inputs = [a, mcc_fixed, pvpp, mgst, binder, pressure, speed, granule]
-                                _, e = predict(model, scaler, test_inputs)
-                                efrf_vals.append(e)
-                            else:
-                                efrf_vals.append(np.nan)
-                        
-                        ax.plot(api_range, efrf_vals, 'r-', linewidth=2)
-                        ax.axhline(y=0.5, color='k', linestyle='--', alpha=0.7)
-                        ax.scatter([api], [efrf], color='blue', s=100, zorder=5)
-                        ax.set_xlabel('API Loading (%)')
-                        ax.set_ylabel('EFRF')
-                        ax.set_title('Pareto Front')
-                        ax.grid(True, alpha=0.3)
-                        
-                        # Save figure to temp file
-                        with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmpfile:
-                            fig.savefig(tmpfile.name, dpi=150, bbox_inches='tight')
-                            figure_path = tmpfile.name
-                        
-                        pdf = generate_pdf_report(formulation_data, results_data, figure_path)
-                        
-                        # Generate PDF in memory
-                        pdf_output = pdf.output(dest='S').encode('latin1')
-                        
-                        # Clean up temp file
-                        os.unlink(figure_path)
-                        
-                        # Download button
-                        st.download_button(
-                            label="📥 Click to Download PDF",
-                            data=pdf_output,
-                            file_name=f"formulation_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                            mime="application/pdf",
-                            use_container_width=True
-                        )
-            
-            with col_qr:
-                st.markdown("### 📱 QR Code")
-                st.markdown("Scan to access this formulation online")
-                
-                # Generate QR code
-                qr_data = f"""
-                Formulation Report
-                Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")}
-                API: {api:.1f}%
-                MCC: {mcc:.1f}%
-                PVPP: {pvpp:.1f}%
-                Mg-St: {mgst:.2f}%
-                Binder: {binder:.1f}%
-                Pressure: {pressure:.1f} MPa
-                Speed: {speed:.1f} rpm
-                Granule: {granule:.1f} µm
-                Tensile: {tensile:.3f} MPa
-                EFRF: {efrf:.4f}
-                Status: {'PASS' if (tensile >= 2.0 and efrf < 0.5) else 'FAIL'}
-                """
-                
-                qr_img = generate_qr_code(qr_data)
-                
-                # Display QR code
-                buf = io.BytesIO()
-                qr_img.save(buf, format='PNG')
-                buf.seek(0)
-                st.image(buf, width=200)
-                
-                # Download QR code
-                st.download_button(
-                    label="📥 Download QR Code",
-                    data=buf.getvalue(),
-                    file_name=f"formulation_qr_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png",
-                    mime="image/png",
-                    use_container_width=True
-                )
-            
-            # ================================================================
-            # FORMULATION SUMMARY TABLE
-            # ================================================================
-            st.markdown("---")
+            # Formulation summary
             st.markdown("### 📋 Formulation Summary")
-            
             summary_data = {
                 "Component": ["API", "MCC", "PVPP", "Mg-St", "Binder", "Total"],
                 "%": [f"{api:.1f}%", f"{mcc:.1f}%", f"{pvpp:.1f}%", f"{mgst:.2f}%", f"{binder:.1f}%", f"{total:.1f}%"]
@@ -578,14 +467,16 @@ with col_right:
             st.dataframe(pd.DataFrame(summary_data), hide_index=True, use_container_width=True)
             
             # ================================================================
-            # PARETO FRONT
+            # PARETO FRONT PLOT
             # ================================================================
             st.markdown("### 📉 Pareto Front")
             fig, ax = plt.subplots(figsize=(10, 5))
             
+            # Generate Pareto front
             api_range = np.linspace(85, 95, 50)
             efrf_vals = []
             for a in api_range:
+                # Adjust MCC to maintain 100%
                 total_others = binder + pvpp + mgst
                 mcc_fixed = 100 - a - total_others
                 if 0 <= mcc_fixed <= 8:
@@ -640,6 +531,39 @@ with col_right:
                 ax2.set_title('Feature Impact on EFRF')
                 ax2.grid(True, alpha=0.3, axis='x')
                 st.pyplot(fig2)
+            
+            # ================================================================
+            # GENERATE PDF REPORT
+            # ================================================================
+            st.markdown("---")
+            st.markdown("### 📄 Generate Report")
+            
+            # Determine overall status
+            if tensile >= 2.0 and efrf < 0.5:
+                status_text = "✅ PASS"
+            else:
+                status_text = "❌ FAIL"
+            
+            # Get current timestamp
+            timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            # Create PDF
+            pdf_data = create_pdf_report(
+                api, mcc, pvpp, mgst, binder, pressure, speed, granule,
+                tensile, efrf, total, status_text, timestamp
+            )
+            
+            # Download button
+            st.download_button(
+                label="📥 Download Signed PDF Report",
+                data=pdf_data,
+                file_name=f"formulation_report_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                type="primary"
+            )
+            
+            st.caption("🔏 This PDF includes a digital signature section for approval.")
     
     else:
         st.info("👆 Adjust parameters to 100% total and click **'Predict & Optimize'**")
@@ -671,9 +595,3 @@ with st.sidebar:
     st.markdown("[🏠 Website](https://babuker-rgb.github.io/AI.Hybrid.Formula/)")
     st.markdown("---")
     st.info("⚡ **Proof-of-Concept**")
-    st.markdown("---")
-    st.markdown("### 📱 Features")
-    st.markdown("✅ PDF Report Generation")
-    st.markdown("✅ QR Code Export")
-    st.markdown("✅ Real-time Predictions")
-    st.markdown("✅ Sensitivity Analysis")
