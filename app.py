@@ -804,11 +804,15 @@ with col_right:
                 nsga = NSGAII(model, scaler, bounds, pop_size=100, n_generations=80)
                 pop, objectives, constraints, fronts = nsga.run()
                 
-                # Extract Pareto front (front 0)
-                if len(fronts) > 0:
+                # ============================================================
+                # FIX: Ensure pareto_api is a flat array, not a list containing an array
+                # ============================================================
+                if len(fronts) > 0 and len(fronts[0]) > 0:
                     front0 = fronts[0]
-                    pareto_api = [-objectives[front0, 0]]
-                    pareto_efrf = objectives[front0, 1]
+                    
+                    # ✅ CORRECT: Extract as flat arrays
+                    pareto_api = -objectives[front0, 0]   # flat array
+                    pareto_efrf = objectives[front0, 1]   # flat array
                     
                     # Find feasible solutions (those satisfying constraints)
                     feasible = constraints[front0]
@@ -817,12 +821,13 @@ with col_right:
                     if len(feasible_indices) > 0:
                         # There is at least one feasible solution
                         # Find the one with highest API among feasible
-                        feasible_api_values = [pareto_api[i] for i in feasible_indices]
+                        feasible_api_values = [pareto_api[i] for i in feasible_indices]   # ✅ Now works
                         best_idx_local = int(np.argmax(feasible_api_values))
                         best_idx = feasible_indices[best_idx_local]
                         
                         best_api = float(pareto_api[best_idx])
                         best_efrf = float(pareto_efrf[best_idx])
+                        # ✅ Ensure tensile value is extracted correctly
                         best_tensile = float(nsga.tensile[front0][best_idx])
                         
                         st.success(
@@ -856,9 +861,9 @@ with col_right:
                       alpha=0.3, s=20, color='gray', label='All Solutions')
             
             # Plot Pareto front
-            if len(fronts) > 0:
+            if len(fronts) > 0 and len(fronts[0]) > 0:
                 front0 = fronts[0]
-                pareto_api = [-objectives[front0, 0]]
+                pareto_api = -objectives[front0, 0]
                 pareto_efrf = objectives[front0, 1]
                 ax.scatter(pareto_api, pareto_efrf, 
                           color='red', s=50, label='Pareto Front', zorder=5)
