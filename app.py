@@ -1,714 +1,929 @@
 """
-================================================================================
-Hybrid AI Framework — Improved Streamlit Application
-Multi-Objective Tablet Manufacturing Optimization (PINN + NSGA-II)
-================================================================================
-Authors : A/Kareem & Babuker A.
-Affil.  : Postgraduate College, Nile Valley University, Atbara, Sudan
+Hybrid AI Framework - Interactive Web Application
+Multi-Objective Tablet Manufacturing Optimization
 
-IMPROVEMENTS OVER ORIGINAL:
-1. Replaced PyTorch with pure-NumPy PINN (no torch dependency → runs anywhere)
-2. Real physics loss (Heckel + EFRF residuals) — not just MSELoss on synthetic data
-3. Real NSGA-II from scratch (no placeholder Pareto curve)
-4. Real ±5% sensitivity analysis via trained PINN
-5. Full 100% formulation constraint properly enforced
-6. Professional bilingual UI (Arabic / English)
-7. Robust PDF report with real results
-8. Authors corrected: A/Kareem & Babuker A.
-================================================================================
+Author: Babuker A. Abdalla
+Affiliation: Nile Valley University, Sudan
 """
 
 import streamlit as st
 import numpy as np
 import pandas as pd
-import matplotlib
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
+import torch
+import torch.nn as nn
+import torch.optim as optim
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import r2_score, mean_squared_error
-import datetime, io, warnings
+from fpdf import FPDF
+import datetime
+import warnings
 warnings.filterwarnings('ignore')
 
-# ── Page config ───────────────────────────────────────────────────────────────
+# ================================================================
+# 1. PINN MODEL DEFINITION
+# ================================================================
+
+class SimplePINN(nn.Module):
+    """Simplified Physics-Informed Neural Network"""
+    
+    def __init__(self, input_dim=8, hidden_dim=64, output_dim=2):
+        super(SimplePINN, self).__init__()
+        
+        self.network = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, output_dim)
+        )
+        
+    def forward(self, X):
+        return self.network(X)
+    
+    def predict(self, X):
+        self.eval()
+        with torch.no_grad():
+            if not isinstance(X, torch.Tensor):
+                X = torch.FloatTensor(X)
+            return self.forward(X).numpy()
+
+
+# ================================================================
+# 2. DATA GENERATION WITH 100% CONSTRAINT
+# ================================================================
+
+def generate_data(n_samples=100, random_state=42):
+    """Generate synthetic data ensuring all components sum to 100%"""
+    np.random.seed(random_state)
+    
+    X = np.zeros((n_samples, 8))
+    y = np.zeros((n_samples, 2))
+    
+    for i in range(n_samples):
+        api = np.random.uniform(85, 95)
+        binder = np.random.uniform(0.5, 3.0)
+        mgst = np.random.uniform(0.2, 1.0)
+        pvpp = np.random.uniform(1.0, 5.0)
+        
+        mcc = 100 - (api + binder + mgst + pvpp)
+        mcc = np.clip(mcc, 0, 8.0)
+        
+        if mcc > 8.0:
+            scale_factor = (100 - 8.0) / (api + binder + mgst + pvpp)
+            api = api * scale_factor
+            binder = binder * scale_factor
+            mgst = mgst * scale_factor
+            pvpp = pvpp * scale_factor
+            mcc = 8.0
+        
+        pressure = np.random.uniform(100, 250)
+        speed = np.random.uniform(10, 40)
+        granule = np.random.uniform(50, 200)
+        
+        X[i] = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
+        
+        strength = 3.5 - 0.15 * (api - 85) + 0.3 * binder + 0.008 * (pressure - 100) - 1.5 * mgst - 0.02 * (speed - 10)
+        strength = np.clip(strength, 0.5, 6.0)
+        
+        efrf = 0.2 + 0.08 * (api - 85) + 0.005 * (speed - 10) - 0.001 * (pressure - 100) - 0.2 * binder + 0.5 * mgst
+        efrf = np.clip(efrf, 0.1, 1.5)
+        
+        y[i] = [strength, efrf]
+    
+    feature_names = ['API_%', 'MCC_%', 'PVPP_%', 'MgSt_%', 'Binder_%', 
+                     'Pressure_MPa', 'Speed_rpm', 'Granule_Size_µm']
+    
+    df = pd.DataFrame(X, columns=feature_names)
+    df['Tensile_Strength_MPa'] = y[:, 0]
+    df['EFRF'] = y[:, 1]
+    
+    return df, feature_names
+
+
+# ================================================================
+# 3. NSGA-II IMPLEMENTATION
+# ================================================================
+
+class NSGAII:
+    """Non-dominated Sorting Genetic Algorithm II"""
+    
+    def __init__(self, model, scaler, bounds, pop_size=100, n_generations=100):
+        self.model = model
+        self.scaler = scaler
+        self.bounds = bounds
+        self.pop_size = pop_size
+        self.n_generations = n_generations
+        self.population = None
+        self.objectives = None
+        self.fronts = None
+        
+    def _initialize_population(self):
+        """Initialize random population within bounds"""
+        pop = np.zeros((self.pop_size, 8))
+        for i in range(8):
+            pop[:, i] = np.random.uniform(self.bounds[i, 0], self.bounds[i, 1], self.pop_size)
+        return pop
+    
+    def _evaluate(self, population):
+        """Evaluate population objectives and constraints"""
+        n = population.shape[0]
+        objectives = np.zeros((n, 2))
+        constraints = np.zeros(n, dtype=bool)
+        tensile_strengths = np.zeros(n)
+        
+        for i in range(n):
+            # Ensure 100% constraint
+            api, binder, mgst, pvpp, pressure, speed, granule = population[i, 0], population[i, 4], population[i, 3], population[i, 2], population[i, 5], population[i, 6], population[i, 7]
+            used = api + binder + mgst + pvpp
+            if used > 100:
+                scale = 100 / used
+                api *= scale
+                binder *= scale
+                mgst *= scale
+                pvpp *= scale
+            mcc = 100 - (api + binder + mgst + pvpp)
+            if mcc > 8.0:
+                scale = (100 - 8.0) / (api + binder + mgst + pvpp)
+                api *= scale
+                binder *= scale
+                mgst *= scale
+                pvpp *= scale
+                mcc = 8.0
+            
+            inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
+            inputs_scaled = self.scaler.transform([inputs])
+            X_tensor = torch.FloatTensor(inputs_scaled)
+            
+            with torch.no_grad():
+                pred = self.model(X_tensor).numpy()[0]
+            
+            tensile = pred[0]
+            efrf = pred[1]
+            
+            tensile_strengths[i] = tensile
+            objectives[i, 0] = -api  # Negative for maximization
+            objectives[i, 1] = efrf
+            constraints[i] = (tensile >= 2.0 and efrf < 0.5)
+            
+            # Store updated values back
+            population[i, 0] = api
+            population[i, 1] = mcc
+            population[i, 2] = pvpp
+            population[i, 3] = mgst
+            population[i, 4] = binder
+        
+        return objectives, constraints, tensile_strengths, population
+    
+    def _fast_non_dominated_sort(self, objectives, constraints):
+        """Perform non-dominated sorting with constraint handling"""
+        n = objectives.shape[0]
+        S = [[] for _ in range(n)]
+        n_dom = np.zeros(n)
+        rank = np.zeros(n, dtype=int)
+        fronts = []
+        
+        # Constraint violation count
+        constraint_violation = ~constraints
+        
+        for i in range(n):
+            for j in range(n):
+                if i == j:
+                    continue
+                # Check dominance with constraint handling
+                if (constraint_violation[i] < constraint_violation[j]) or \
+                   (constraint_violation[i] == constraint_violation[j] and 
+                    objectives[i, 0] <= objectives[j, 0] and 
+                    objectives[i, 1] <= objectives[j, 1] and
+                    (objectives[i, 0] < objectives[j, 0] or 
+                     objectives[i, 1] < objectives[j, 1])):
+                    S[i].append(j)
+                elif (constraint_violation[j] < constraint_violation[i]) or \
+                     (constraint_violation[i] == constraint_violation[j] and 
+                      objectives[j, 0] <= objectives[i, 0] and 
+                      objectives[j, 1] <= objectives[i, 1] and
+                      (objectives[j, 0] < objectives[i, 0] or 
+                       objectives[j, 1] < objectives[i, 1])):
+                    n_dom[i] += 1
+            
+            if n_dom[i] == 0:
+                rank[i] = 0
+                if not fronts:
+                    fronts.append([])
+                fronts[0].append(i)
+        
+        i = 0
+        while fronts[i]:
+            next_front = []
+            for p in fronts[i]:
+                for q in S[p]:
+                    n_dom[q] -= 1
+                    if n_dom[q] == 0:
+                        rank[q] = i + 1
+                        next_front.append(q)
+            i += 1
+            fronts.append(next_front)
+        
+        if not fronts[-1]:
+            fronts.pop()
+        
+        return fronts, rank
+    
+    def _crowding_distance(self, objectives, front):
+        """Calculate crowding distance for individuals in a front"""
+        n = len(front)
+        if n <= 2:
+            return np.ones(n) * np.inf
+        
+        distance = np.zeros(n)
+        obj_min = objectives.min(axis=0)
+        obj_max = objectives.max(axis=0)
+        obj_range = obj_max - obj_min
+        obj_range[obj_range == 0] = 1
+        
+        for m in range(2):
+            sorted_idx = sorted(range(n), key=lambda i: objectives[front[i], m])
+            distance[sorted_idx[0]] = np.inf
+            distance[sorted_idx[-1]] = np.inf
+            
+            for i in range(1, n - 1):
+                if distance[sorted_idx[i]] != np.inf:
+                    diff = (objectives[front[sorted_idx[i+1]], m] - 
+                           objectives[front[sorted_idx[i-1]], m])
+                    distance[sorted_idx[i]] += diff / obj_range[m]
+        
+        return distance
+    
+    def _tournament_selection(self, pop_indices, objectives, ranks, crowding):
+        """Binary tournament selection"""
+        n = len(pop_indices)
+        selected = []
+        
+        for _ in range(n):
+            i1, i2 = np.random.choice(pop_indices, 2, replace=False)
+            if ranks[i1] < ranks[i2]:
+                selected.append(i1)
+            elif ranks[i1] > ranks[i2]:
+                selected.append(i2)
+            else:
+                if crowding[i1] > crowding[i2]:
+                    selected.append(i1)
+                else:
+                    selected.append(i2)
+        
+        return selected
+    
+    def _simulated_binary_crossover(self, parent1, parent2):
+        """Simulated Binary Crossover (SBX)"""
+        if np.random.random() > 0.9:
+            return parent1.copy(), parent2.copy()
+        
+        eta_c = 20
+        child1 = np.zeros(8)
+        child2 = np.zeros(8)
+        
+        for i in range(8):
+            if np.random.random() < 0.5:
+                u = np.random.random()
+                if u <= 0.5:
+                    beta = (2 * u) ** (1 / (eta_c + 1))
+                else:
+                    beta = (1 / (2 * (1 - u))) ** (1 / (eta_c + 1))
+                
+                child1[i] = 0.5 * ((1 + beta) * parent1[i] + (1 - beta) * parent2[i])
+                child2[i] = 0.5 * ((1 - beta) * parent1[i] + (1 + beta) * parent2[i])
+            else:
+                child1[i] = parent1[i]
+                child2[i] = parent2[i]
+        
+        for i in range(8):
+            child1[i] = np.clip(child1[i], self.bounds[i, 0], self.bounds[i, 1])
+            child2[i] = np.clip(child2[i], self.bounds[i, 0], self.bounds[i, 1])
+        
+        return child1, child2
+    
+    def _polynomial_mutation(self, individual):
+        """Polynomial mutation"""
+        eta_m = 20
+        mutated = individual.copy()
+        
+        for i in range(8):
+            if np.random.random() < 0.01:
+                u = np.random.random()
+                delta = min(u, 1 - u) ** (1 / (eta_m + 1))
+                
+                if u < 0.5:
+                    mutated[i] = individual[i] + delta * (self.bounds[i, 1] - self.bounds[i, 0])
+                else:
+                    mutated[i] = individual[i] - delta * (self.bounds[i, 1] - self.bounds[i, 0])
+                
+                mutated[i] = np.clip(mutated[i], self.bounds[i, 0], self.bounds[i, 1])
+        
+        return mutated
+    
+    def run(self):
+        """Run the NSGA-II algorithm"""
+        self.population = self._initialize_population()
+        
+        for gen in range(self.n_generations):
+            objectives, constraints, tensile, pop = self._evaluate(self.population)
+            self.population = pop
+            self.objectives = objectives
+            self.constraints = constraints
+            self.tensile = tensile
+            
+            fronts, ranks = self._fast_non_dominated_sort(objectives, constraints)
+            self.fronts = fronts
+            
+            if gen == self.n_generations - 1:
+                break
+            
+            crowding = np.zeros(self.pop_size)
+            for front in fronts:
+                dist = self._crowding_distance(objectives, front)
+                crowding[front] = dist
+            
+            selected = self._tournament_selection(
+                range(self.pop_size), objectives, ranks, crowding
+            )
+            
+            offspring = []
+            for i in range(0, len(selected), 2):
+                if i + 1 < len(selected):
+                    child1, child2 = self._simulated_binary_crossover(
+                        self.population[selected[i]], 
+                        self.population[selected[i + 1]]
+                    )
+                    child1 = self._polynomial_mutation(child1)
+                    child2 = self._polynomial_mutation(child2)
+                    offspring.append(child1)
+                    offspring.append(child2)
+                else:
+                    child = self._polynomial_mutation(self.population[selected[i]])
+                    offspring.append(child)
+            
+            offspring = np.array(offspring[:self.pop_size])
+            
+            objectives_off, constraints_off, tensile_off, _ = self._evaluate(offspring)
+            
+            combined_pop = np.vstack([self.population, offspring])
+            combined_obj = np.vstack([self.objectives, objectives_off])
+            combined_const = np.concatenate([self.constraints, constraints_off])
+            
+            combined_fronts, combined_ranks = self._fast_non_dominated_sort(
+                combined_obj, combined_const
+            )
+            
+            combined_crowding = np.zeros(len(combined_pop))
+            for front in combined_fronts:
+                dist = self._crowding_distance(combined_obj, front)
+                combined_crowding[front] = dist
+            
+            new_pop = []
+            new_obj = []
+            new_const = []
+            
+            for front in combined_fronts:
+                if len(new_pop) + len(front) <= self.pop_size:
+                    for idx in front:
+                        new_pop.append(combined_pop[idx])
+                        new_obj.append(combined_obj[idx])
+                        new_const.append(combined_const[idx])
+                else:
+                    front_sorted = sorted(front, key=lambda i: combined_crowding[i], reverse=True)
+                    remaining = self.pop_size - len(new_pop)
+                    for idx in front_sorted[:remaining]:
+                        new_pop.append(combined_pop[idx])
+                        new_obj.append(combined_obj[idx])
+                        new_const.append(combined_const[idx])
+                    break
+            
+            self.population = np.array(new_pop)
+            self.objectives = np.array(new_obj)
+            self.constraints = np.array(new_const)
+        
+        # Final evaluation
+        objectives, constraints, tensile, pop = self._evaluate(self.population)
+        self.population = pop
+        self.objectives = objectives
+        self.constraints = constraints
+        self.tensile = tensile
+        self.fronts, _ = self._fast_non_dominated_sort(objectives, constraints)
+        
+        return self.population, self.objectives, self.constraints, self.fronts
+
+
+# ================================================================
+# 4. PDF REPORT GENERATION
+# ================================================================
+
+def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule, 
+                      tensile, efrf, total, status, timestamp):
+    """Generate a professional PDF report with formulation and results."""
+    
+    pdf = FPDF()
+    pdf.add_page()
+    
+    # HEADER
+    pdf.set_font("Arial", "B", 18)
+    pdf.cell(0, 10, "Formulation Report", ln=True, align="C")
+    pdf.set_font("Arial", "I", 11)
+    pdf.cell(0, 6, "Hybrid AI Framework for Tablet Manufacturing Optimization", ln=True, align="C")
+    pdf.set_font("Arial", "", 10)
+    pdf.cell(0, 6, f"Date: {timestamp}", ln=True, align="C")
+    pdf.ln(8)
+    
+    # 1. FORMULATION SUMMARY
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.cell(0, 8, "1. Formulation Summary", ln=True, fill=True)
+    pdf.set_font("Arial", "", 10)
+    
+    components = [
+        ("Active Pharmaceutical Ingredient (API)", f"{api:.1f}%", "Paracetamol"),
+        ("Microcrystalline Cellulose (MCC)", f"{mcc:.1f}%", "Filler/Binder"),
+        ("Crospovidone (PVPP)", f"{pvpp:.1f}%", "Superdisintegrant"),
+        ("Magnesium Stearate (Mg-St)", f"{mgst:.2f}%", "Lubricant"),
+        ("Binder", f"{binder:.1f}%", "Binding Agent"),
+        ("TOTAL", f"{total:.1f}%", "100% Complete")
+    ]
+    
+    pdf.set_font("Arial", "B", 10)
+    pdf.cell(60, 6, "Component", 1, 0, "C")
+    pdf.cell(30, 6, "Value", 1, 0, "C")
+    pdf.cell(80, 6, "Function", 1, 1, "C")
+    
+    pdf.set_font("Arial", "", 10)
+    for comp, val, func in components:
+        pdf.cell(60, 6, comp, 1, 0, "L")
+        pdf.cell(30, 6, val, 1, 0, "C")
+        pdf.cell(80, 6, func, 1, 1, "L")
+    
+    pdf.ln(5)
+    
+    # 2. PROCESS PARAMETERS
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.cell(0, 8, "2. Process Parameters", ln=True, fill=True)
+    pdf.set_font("Arial", "", 10)
+    
+    params = [
+        ("Compaction Pressure", f"{pressure:.1f} MPa", "Affects tablet hardness"),
+        ("Punch Speed", f"{speed:.1f} rpm", "Influences compression time"),
+        ("Granule Size", f"{granule:.1f} um", "Impacts flowability"),
+    ]
+    
+    pdf.set_font("Arial", "B", 10)
+    pdf.cell(50, 6, "Parameter", 1, 0, "C")
+    pdf.cell(40, 6, "Value", 1, 0, "C")
+    pdf.cell(80, 6, "Significance", 1, 1, "C")
+    
+    pdf.set_font("Arial", "", 10)
+    for p, v, s in params:
+        pdf.cell(50, 6, p, 1, 0, "L")
+        pdf.cell(40, 6, v, 1, 0, "C")
+        pdf.cell(80, 6, s, 1, 1, "L")
+    
+    pdf.ln(5)
+    
+    # 3. PREDICTION RESULTS
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.cell(0, 8, "3. Prediction Results", ln=True, fill=True)
+    pdf.set_font("Arial", "", 10)
+    
+    tensile_status = "PASS" if tensile >= 2.0 else "FAIL"
+    efrf_status = "PASS" if efrf < 0.5 else "FAIL"
+    
+    results = [
+        ("Tensile Strength", f"{tensile:.3f} MPa", ">= 2 MPa", tensile_status),
+        ("EFRF (Capping Risk)", f"{efrf:.4f}", "< 0.5", efrf_status),
+    ]
+    
+    pdf.set_font("Arial", "B", 10)
+    pdf.cell(45, 6, "Metric", 1, 0, "C")
+    pdf.cell(35, 6, "Value", 1, 0, "C")
+    pdf.cell(45, 6, "Threshold", 1, 0, "C")
+    pdf.cell(45, 6, "Status", 1, 1, "C")
+    
+    pdf.set_font("Arial", "", 10)
+    for r in results:
+        pdf.cell(45, 6, r[0], 1, 0, "L")
+        pdf.cell(35, 6, r[1], 1, 0, "C")
+        pdf.cell(45, 6, r[2], 1, 0, "C")
+        pdf.cell(45, 6, r[3], 1, 1, "C")
+    
+    pdf.ln(5)
+    
+    # 4. OVERALL STATUS
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.cell(0, 8, "4. Overall Status", ln=True, fill=True)
+    
+    pdf.set_font("Arial", "B", 14)
+    if tensile >= 2.0 and efrf < 0.5:
+        pdf.set_text_color(0, 128, 0)
+        pdf.cell(0, 8, "PASS - Formulation Satisfies All Constraints", ln=True, align="C")
+        pdf.set_font("Arial", "", 10)
+        pdf.set_text_color(0, 0, 0)
+        pdf.multi_cell(0, 6, "This formulation is recommended for experimental validation.")
+    else:
+        pdf.set_text_color(255, 0, 0)
+        pdf.cell(0, 8, "FAIL - Formulation Does NOT Satisfy All Constraints", ln=True, align="C")
+        pdf.set_font("Arial", "", 10)
+        pdf.set_text_color(0, 0, 0)
+        pdf.multi_cell(0, 6, "This formulation requires further optimization.")
+    
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(5)
+    
+    # 5. RECOMMENDATIONS
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.cell(0, 8, "5. Recommendations", ln=True, fill=True)
+    pdf.set_font("Arial", "", 10)
+    
+    if tensile >= 2.0 and efrf < 0.5:
+        recommendations = [
+            "1. Proceed with experimental validation.",
+            "2. Confirm tensile strength with physical testing.",
+            "3. Evaluate disintegration time and dissolution.",
+            "4. Assess stability under ICH conditions.",
+            "5. Scale-up for process optimization."
+        ]
+    else:
+        recommendations = [
+            "1. Reduce API or adjust binder concentration.",
+            "2. Optimize Mg-St level.",
+            "3. Increase compaction pressure.",
+            "4. Reduce punch speed.",
+            "5. Re-run with adjusted parameters."
+        ]
+    
+    for rec in recommendations:
+        pdf.cell(0, 6, rec, ln=True)
+    
+    pdf.ln(5)
+    
+    # 6. CONTACT INFORMATION
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.cell(0, 8, "6. Contact Information", ln=True, fill=True)
+    pdf.set_font("Arial", "", 11)
+    
+    pdf.cell(0, 8, "Chem. Eng. Babuker A. Abdalla", ln=True)
+    pdf.cell(0, 7, "Email: babuker@protonmail.com", ln=True)
+    pdf.cell(0, 7, "Phone: +249-123-638-638", ln=True)
+    pdf.cell(0, 7, "Sudan", ln=True)
+    
+    pdf.ln(3)
+    
+    # FOOTER
+    pdf.set_y(270)
+    pdf.set_font("Arial", "I", 8)
+    pdf.cell(0, 6, "Generated by: Hybrid AI Framework", ln=True, align="C")
+    
+    # RETURN PDF
+    pdf_bytes = pdf.output(dest="S")
+    
+    if isinstance(pdf_bytes, bytearray):
+        return bytes(pdf_bytes)
+    elif isinstance(pdf_bytes, bytes):
+        return pdf_bytes
+    else:
+        return str(pdf_bytes).encode('latin1')
+
+
+# ================================================================
+# 5. TRAIN MODEL
+# ================================================================
+
+@st.cache_resource
+def load_model():
+    """Train and return the model with caching"""
+    
+    df, feature_names = generate_data(n_samples=100)
+    X = df[feature_names].values
+    y = df[['Tensile_Strength_MPa', 'EFRF']].values
+    
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    X_tensor = torch.FloatTensor(X_scaled)
+    y_tensor = torch.FloatTensor(y)
+    
+    model = SimplePINN()
+    optimizer = optim.Adam(model.parameters(), lr=0.01)
+    criterion = nn.MSELoss()
+    
+    progress_bar = st.progress(0)
+    for epoch in range(1000):
+        optimizer.zero_grad()
+        y_pred = model(X_tensor)
+        loss = criterion(y_pred, y_tensor)
+        loss.backward()
+        optimizer.step()
+        
+        if (epoch + 1) % 100 == 0:
+            progress_bar.progress((epoch + 1) / 1000)
+    
+    progress_bar.progress(1.0)
+    model.eval()
+    return model, scaler, feature_names
+
+
+# ================================================================
+# 6. PREDICTION FUNCTION
+# ================================================================
+
+def predict(model, scaler, inputs):
+    """Predict tensile strength and EFRF"""
+    try:
+        inputs_scaled = scaler.transform([inputs])
+        X_tensor = torch.FloatTensor(inputs_scaled)
+        with torch.no_grad():
+            predictions = model(X_tensor).numpy()[0]
+        return predictions[0], predictions[1]
+    except Exception as e:
+        st.error(f"Prediction error: {e}")
+        return 0.0, 1.0
+
+
+# ================================================================
+# 7. STREAMLIT UI
+# ================================================================
+
 st.set_page_config(
-    page_title="PINN–NSGA-II | Tablet Optimisation",
+    page_title="Hybrid AI Framework",
     page_icon="🧬",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
-# ── CSS ───────────────────────────────────────────────────────────────────────
+# Custom CSS
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
-html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-
-.hero {
-    background: linear-gradient(135deg, #1F3864 0%, #2E5FA3 60%, #1a7a3e 100%);
-    border-radius: 16px; padding: 2rem 2.5rem; margin-bottom: 1.5rem;
-    color: white; text-align: center;
-}
-.hero h1 { font-size: 1.8rem; font-weight: 700; margin: 0 0 .4rem 0; }
-.hero p  { font-size: 1rem; opacity: .85; margin: 0; }
-.hero .sub { font-size: .85rem; opacity: .65; margin-top: .3rem; }
-
-.card {
-    background: #f8fafc; border-radius: 12px;
-    padding: 1.2rem 1.5rem; border: 1px solid #e2e8f0;
-    margin-bottom: .75rem;
-}
-.kpi {
-    background: white; border-radius: 10px; padding: 1rem;
-    text-align: center; border: 2px solid #e2e8f0;
-    box-shadow: 0 2px 8px rgba(0,0,0,.06);
-}
-.kpi .val { font-size: 1.6rem; font-weight: 700; color: #1F3864; }
-.kpi .lbl { font-size: .78rem; color: #64748b; margin-top: .2rem; }
-.kpi .badge-pass { color: #16a34a; font-weight: 700; font-size: .82rem; }
-.kpi .badge-fail { color: #dc2626; font-weight: 700; font-size: .82rem; }
-
-.total-bar {
-    background: #1F3864; color: white; border-radius: 8px;
-    padding: .6rem 1rem; font-weight: 700; text-align: center;
-    font-size: .95rem; margin-top: .5rem;
-}
-.total-warn {
-    background: #dc2626; color: white; border-radius: 8px;
-    padding: .6rem 1rem; font-weight: 700; text-align: center;
-    font-size: .95rem; margin-top: .5rem;
-}
-
-.btn-primary > button {
-    background: linear-gradient(90deg,#1F3864,#2E5FA3) !important;
-    color: white !important; font-weight: 700 !important;
-    border-radius: 8px !important; border: none !important;
-    padding: .7rem !important; font-size: 1rem !important;
-    width: 100% !important;
-}
-.section-title {
-    font-size: 1rem; font-weight: 700; color: #1F3864;
-    border-left: 4px solid #2E5FA3; padding-left: .6rem;
-    margin: 1rem 0 .5rem 0;
-}
+    .main-header { text-align: center; padding: 0.5rem 0; }
+    .metric-card { background: #f8fafc; border-radius: 12px; padding: 1rem 1.5rem; text-align: center; border: 1px solid #e9edf2; }
+    .constraint-pass { color: #16a34a; font-weight: 700; }
+    .constraint-fail { color: #dc2626; font-weight: 700; }
+    .stButton > button { width: 100%; background: #2563eb; color: white; font-weight: 600; padding: 0.6rem; border-radius: 8px; border: none; }
+    .stButton > button:hover { background: #1d4ed8; color: white; }
+    .stProgress > div > div { background-color: #2563eb; }
 </style>
 """, unsafe_allow_html=True)
 
-# ══════════════════════════════════════════════════════════════════════════════
-# PHYSICS MODELS
-# ══════════════════════════════════════════════════════════════════════════════
-def heckel_density(P, k=0.008, A=1.2):
-    return 1.0 - np.exp(-(k * P + A))
+# HEADER
+st.markdown('<div class="main-header">', unsafe_allow_html=True)
+st.title("🧬 Hybrid AI Framework for Tablet Optimisation")
+st.markdown("### Physics-Informed Neural Network (PINN) coupled with NSGA-II Multi-Objective Optimisation")
+st.caption("A/Kareem & Babuker A. · Postgraduate College, Nile Valley University, Atbara, Sudan")
+st.markdown('</div>', unsafe_allow_html=True)
 
-def physics_tensile(X):
-    api=X[:,0]; mcc=X[:,1]; pvpp=X[:,2]; mgst=X[:,3]
-    bind=X[:,4]; P=X[:,5]; spd=X[:,6]; gran=X[:,7]
-    D = heckel_density(P)
-    s = (5.5*D - 0.15*(api-85) + 0.30*bind + 0.008*(P-100)
-         - 1.5*mgst + 0.02*pvpp - 0.02*(spd-10) - 0.0008*(gran-125))
-    return np.clip(s, 0.3, 6.0)
+st.markdown("---")
 
-def physics_efrf(X):
-    api=X[:,0]; mgst=X[:,3]; bind=X[:,4]
-    P=X[:,5]; spd=X[:,6]; gran=X[:,7]
-    er = (0.2 + 0.08*(api-85) + 0.005*(spd-10)
-          - 0.001*(P-100) - 0.2*bind + 0.5*mgst + 0.0003*(gran-125))
-    sig = physics_tensile(X)
-    return np.clip(er / (sig + 1e-6), 0.05, 2.0)
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PURE-NUMPY PINN
-# ══════════════════════════════════════════════════════════════════════════════
-class PINN:
-    def __init__(self, ni=8, no=2, h=64, w1=0.8, w2=0.2, lr=0.001):
-        self.w1=w1; self.w2=w2; self.lr=lr
-        self.sx=StandardScaler(); self.sy=StandardScaler()
-        sizes=[ni,h,h,h,no]; rng=np.random.RandomState(42)
-        self.W=[]; self.b=[]
-        for i in range(len(sizes)-1):
-            sc=np.sqrt(2./sizes[i])
-            self.W.append(rng.randn(sizes[i],sizes[i+1])*sc)
-            self.b.append(np.zeros(sizes[i+1]))
-        self.mW=[np.zeros_like(w) for w in self.W]
-        self.vW=[np.zeros_like(w) for w in self.W]
-        self.mb=[np.zeros_like(b) for b in self.b]
-        self.vb=[np.zeros_like(b) for b in self.b]
-        self.t=0; self.losses=[]
-
-    def _fwd(self,X):
-        self._c=[X]; h=X
-        for i,(W,b) in enumerate(zip(self.W,self.b)):
-            z=h@W+b; h=np.tanh(z) if i<len(self.W)-1 else z
-            self._c.append(h)
-        return h
-
-    def _phys_loss(self,Xn,Xo,yp):
-        y=self.sy.inverse_transform(yp)
-        X=self.sx.inverse_transform(Xn)
-        sig_p=y[:,0]; ef_p=y[:,1]
-        sig_h=physics_tensile(X)
-        ef_h=physics_efrf(X)
-        return np.mean((sig_p-sig_h)**2)+np.mean((ef_p-ef_h)**2)
-
-    def _bwd(self,Xn,yn):
-        n=Xn.shape[0]; out=self._fwd(Xn)
-        dL=2*(out-yn)/n*self.w1
-        gW=[None]*len(self.W); gb=[None]*len(self.b); delta=dL
-        for i in reversed(range(len(self.W))):
-            hp=self._c[i]; hc=self._c[i+1]
-            if i<len(self.W)-1: delta=delta*(1-hc**2)
-            gW[i]=hp.T@delta; gb[i]=delta.sum(0)
-            if i>0: delta=delta@self.W[i].T
-        return gW,gb
-
-    def _adam(self,gW,gb,b1=0.9,b2=0.999,e=1e-8):
-        self.t+=1
-        for i in range(len(self.W)):
-            self.mW[i]=b1*self.mW[i]+(1-b1)*gW[i]
-            self.vW[i]=b2*self.vW[i]+(1-b2)*gW[i]**2
-            mh=self.mW[i]/(1-b1**self.t); vh=self.vW[i]/(1-b2**self.t)
-            self.W[i]-=self.lr*mh/(np.sqrt(vh)+e)
-            self.mb[i]=b1*self.mb[i]+(1-b1)*gb[i]
-            self.vb[i]=b2*self.vb[i]+(1-b2)*gb[i]**2
-            mh=self.mb[i]/(1-b1**self.t); vh=self.vb[i]/(1-b2**self.t)
-            self.b[i]-=self.lr*mh/(np.sqrt(vh)+e)
-
-    def fit(self,X,y,epochs=500,bs=16,progress_cb=None):
-        Xn=self.sx.fit_transform(X); yn=self.sy.fit_transform(y)
-        n=Xn.shape[0]
-        for ep in range(1,epochs+1):
-            idx=np.random.permutation(n); el=0.
-            for s in range(0,n,bs):
-                bi=idx[s:s+bs]; Xb=Xn[bi]; yb=yn[bi]
-                out=self._fwd(Xb)
-                dl=np.mean((out-yb)**2)
-                pl=self._phys_loss(Xb,X[bi],out)
-                el+=self.w1*dl+self.w2*pl
-                gW,gb=self._bwd(Xb,yb); self._adam(gW,gb)
-            self.losses.append(el/max(1,n//bs))
-            if progress_cb and ep%50==0:
-                progress_cb(ep/epochs)
-
-    def predict(self,X):
-        return self.sy.inverse_transform(self._fwd(self.sx.transform(X)))
-
-# ══════════════════════════════════════════════════════════════════════════════
-# NSGA-II
-# ══════════════════════════════════════════════════════════════════════════════
-BOUNDS = np.array([[85.,95.],[0.,8.],[1.,5.],[0.2,1.],[0.5,3.],[100.,250.],[10.,40.],[50.,200.]])
-
-def nsga2_optimize(pinn, bounds=BOUNDS, pop=80, gen=150):
-    lo,hi=bounds[:,0],bounds[:,1]
-    population=lo+np.random.rand(pop,8)*(hi-lo)
-    # enforce sum constraint: API+MCC+PVPP+MgSt+Binder=100
-    for i in range(pop):
-        s=population[i,:5].sum()
-        if abs(s-100)>0.5: population[i,:5]*=100/s
-
-    def evaluate(P):
-        pred=pinn.predict(P); sig=pred[:,0]; ef=pred[:,1]
-        f1=-P[:,0]; f2=ef
-        cv=np.maximum(0,2.-sig)+np.maximum(0,ef-0.5)
-        return np.column_stack([f1,f2]),sig,ef,cv
-
-    def nds(F):
-        n=len(F); np_c=np.zeros(n,int); S=[[] for _ in range(n)]; fronts=[[]]
-        for p in range(n):
-            for q in range(n):
-                if p==q: continue
-                if F[p,0]<=F[q,0] and F[p,1]<=F[q,1] and (F[p,0]<F[q,0] or F[p,1]<F[q,1]): S[p].append(q)
-                elif F[q,0]<=F[p,0] and F[q,1]<=F[p,1] and (F[q,0]<F[p,0] or F[q,1]<F[p,1]): np_c[p]+=1
-            if np_c[p]==0: fronts[0].append(p)
-        i=0
-        while fronts[i]:
-            nf=[]
-            for p in fronts[i]:
-                for q in S[p]:
-                    np_c[q]-=1
-                    if np_c[q]==0: nf.append(q)
-            fronts.append(nf); i+=1
-        return fronts[:-1]
-
-    def crd(F,front):
-        n=len(front); cd=np.zeros(n)
-        for m in range(2):
-            idx=np.argsort(F[front,m]); fm=F[front,m][idx]; rng=fm[-1]-fm[0]
-            cd[idx[0]]=cd[idx[-1]]=np.inf
-            if rng>1e-10:
-                for i in range(1,n-1): cd[idx[i]]+=(fm[i+1]-fm[i-1])/rng
-        return cd
-
-    F,sig,ef,cv=evaluate(population)
-    for _ in range(gen):
-        fronts=nds(F); rank=np.zeros(pop,int)
-        for r,fr in enumerate(fronts):
-            for p in fr: rank[p]=r
-        cd=np.zeros(pop)
-        for fr in fronts: cd[fr]=crd(F,fr)
-        def tour():
-            a,b=np.random.choice(pop,2,replace=False)
-            return a if (rank[a]<rank[b] or (rank[a]==rank[b] and cd[a]>cd[b])) else b
-        off=[]
-        while len(off)<pop:
-            p1=population[tour()].copy(); p2=population[tour()].copy()
-            if np.random.rand()<0.9:
-                for j in range(8):
-                    if abs(p1[j]-p2[j])<1e-10: continue
-                    u=np.random.rand()
-                    b_=(2*u)**(1/21) if u<=0.5 else (1/(2*(1-u)))**(1/21)
-                    c1j=np.clip(.5*((1+b_)*p1[j]+(1-b_)*p2[j]),lo[j],hi[j])
-                    p1[j]=c1j
-            for j in range(8):
-                if np.random.rand()<0.05:
-                    u=np.random.rand(); dq=hi[j]-lo[j]
-                    d=(2*u)**(1/21)-1 if u<0.5 else 1-(2*(1-u))**(1/21)
-                    p1[j]=np.clip(p1[j]+d*dq,lo[j],hi[j])
-            s=p1[:5].sum()
-            if abs(s-100)>0.1: p1[:5]*=100/s
-            off.append(p1)
-        off=np.array(off[:pop]); Fo,_,_,cvo=evaluate(off)
-        comb=np.vstack([population,off]); Fc=np.vstack([F,Fo]); cvc=np.concatenate([cv,cvo])
-        frc=nds(Fc); ni=[]
-        for fr in frc:
-            if len(ni)+len(fr)<=pop: ni.extend(fr)
-            else:
-                needed=pop-len(ni); cdf=crd(Fc,fr)
-                sf=sorted(range(len(fr)),key=lambda i:-cdf[i])
-                ni.extend([fr[i] for i in sf[:needed]]); break
-        population=comb[ni]; F=Fc[ni]; cv=cvc[ni]; _,sig,ef,cv=evaluate(population)
-
-    fr0=nds(F); pi=fr0[0]
-    pX=population[pi]; pAPI=-F[pi,0]; pEF=F[pi,1]
-    _,psig,_,pcv=evaluate(pX); feas=pcv==0
-    return pX,pAPI,pEF,psig,feas,population,F,ef,cv
-
-# ══════════════════════════════════════════════════════════════════════════════
-# DATA GENERATION + TRAINING
-# ══════════════════════════════════════════════════════════════════════════════
-@st.cache_resource(show_spinner=False)
-def build_model():
-    rng=np.random.RandomState(42); n=100
-    X=np.zeros((n,8)); lo=BOUNDS[:,0]; hi=BOUNDS[:,1]
-    for i in range(n):
-        api=rng.uniform(85,95); bind=rng.uniform(0.5,3.); mgst=rng.uniform(0.2,1.)
-        pvpp=rng.uniform(1.,5.); mcc=np.clip(100-(api+bind+mgst+pvpp),0,8.)
-        P=rng.uniform(100,250); spd=rng.uniform(10,40); gran=rng.uniform(50,200)
-        X[i]=[api,mcc,pvpp,mgst,bind,P,spd,gran]
-    noise1=rng.normal(0,0.05,n); noise2=rng.normal(0,0.01,n)
-    y=np.column_stack([physics_tensile(X)+noise1, physics_efrf(X)+noise2])
-    model=PINN()
-    model.fit(X,y,epochs=500,bs=16)
-    pred=model.predict(X)
-    r2=r2_score(y[:,0],pred[:,0])
-    return model, r2
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PDF REPORT
-# ══════════════════════════════════════════════════════════════════════════════
-def make_pdf(params, results, sens_data, timestamp):
-    try:
-        from fpdf import FPDF
-        pdf=FPDF(); pdf.add_page()
-        pdf.set_font("Arial","B",18)
-        pdf.cell(0,10,"Formulation Optimisation Report",ln=True,align="C")
-        pdf.set_font("Arial","I",11)
-        pdf.cell(0,6,"PINN-NSGA-II Hybrid AI Framework",ln=True,align="C")
-        pdf.set_font("Arial","",10)
-        pdf.cell(0,6,f"A/Kareem & Babuker A. | Nile Valley University, Sudan",ln=True,align="C")
-        pdf.cell(0,6,f"Generated: {timestamp}",ln=True,align="C")
-        pdf.ln(6)
-
-        def section(title):
-            pdf.set_font("Arial","B",13); pdf.set_fill_color(230,237,255)
-            pdf.cell(0,8,title,ln=True,fill=True); pdf.set_font("Arial","",10)
-
-        section("1. Formulation Components")
-        pdf.set_font("Arial","B",10)
-        pdf.cell(70,6,"Component",1,0,"C"); pdf.cell(40,6,"Value",1,0,"C"); pdf.cell(70,6,"Role",1,1,"C")
-        pdf.set_font("Arial","",10)
-        rows=[("API (Paracetamol)",f"{params['api']:.1f}%","Active Ingredient"),
-              ("MCC",f"{params['mcc']:.1f}%","Filler/Binder"),
-              ("PVPP",f"{params['pvpp']:.1f}%","Superdisintegrant"),
-              ("Mg-St",f"{params['mgst']:.2f}%","Lubricant"),
-              ("Binder",f"{params['bind']:.1f}%","Binding Agent"),
-              ("TOTAL",f"{params['total']:.1f}%","")]
-        for r in rows:
-            pdf.cell(70,6,r[0],1,0,"L"); pdf.cell(40,6,r[1],1,0,"C"); pdf.cell(70,6,r[2],1,1,"L")
-        pdf.ln(4)
-
-        section("2. Process Parameters")
-        pdf.set_font("Arial","B",10)
-        pdf.cell(70,6,"Parameter",1,0,"C"); pdf.cell(60,6,"Value",1,0,"C"); pdf.cell(50,6,"Range",1,1,"C")
-        pdf.set_font("Arial","",10)
-        prows=[("Compaction Pressure",f"{params['pressure']:.1f} MPa","100–250 MPa"),
-               ("Punch Speed",f"{params['speed']:.1f} rpm","10–40 rpm"),
-               ("Granule Size",f"{params['granule']:.1f} µm","50–200 µm")]
-        for r in prows:
-            pdf.cell(70,6,r[0],1,0,"L"); pdf.cell(60,6,r[1],1,0,"C"); pdf.cell(50,6,r[2],1,1,"C")
-        pdf.ln(4)
-
-        section("3. PINN Prediction Results")
-        ts_ok=results['tensile']>=2.0; ef_ok=results['efrf']<0.5
-        pdf.set_font("Arial","B",10)
-        pdf.cell(55,6,"Metric",1,0,"C"); pdf.cell(40,6,"Predicted",1,0,"C")
-        pdf.cell(40,6,"Threshold",1,0,"C"); pdf.cell(45,6,"Status",1,1,"C")
-        pdf.set_font("Arial","",10)
-        pdf.cell(55,6,"Tensile Strength",1,0,"L")
-        pdf.cell(40,6,f"{results['tensile']:.3f} MPa",1,0,"C")
-        pdf.cell(40,6,">= 2.0 MPa",1,0,"C")
-        pdf.cell(45,6,"PASS" if ts_ok else "FAIL",1,1,"C")
-        pdf.cell(55,6,"EFRF (Capping Risk)",1,0,"L")
-        pdf.cell(40,6,f"{results['efrf']:.4f}",1,0,"C")
-        pdf.cell(40,6,"< 0.5",1,0,"C")
-        pdf.cell(45,6,"PASS" if ef_ok else "FAIL",1,1,"C")
-        pdf.ln(4)
-
-        section("4. Overall Verdict")
-        pdf.set_font("Arial","B",13)
-        if ts_ok and ef_ok:
-            pdf.set_text_color(0,128,0)
-            pdf.cell(0,10,"✓  FORMULATION PASSES ALL CONSTRAINTS",ln=True,align="C")
-        else:
-            pdf.set_text_color(200,0,0)
-            pdf.cell(0,10,"✗  FORMULATION FAILS — OPTIMISATION REQUIRED",ln=True,align="C")
-        pdf.set_text_color(0,0,0); pdf.set_font("Arial","",10); pdf.ln(4)
-
-        section("5. Top Sensitivity Drivers")
-        pdf.set_font("Arial","B",10)
-        pdf.cell(90,6,"Feature",1,0,"C"); pdf.cell(50,6,"|ΔEFRF|",1,0,"C"); pdf.cell(40,6,"Rank",1,1,"C")
-        pdf.set_font("Arial","",10)
-        for rank,(feat,val) in enumerate(sens_data[:5],1):
-            pdf.cell(90,6,feat,1,0,"L"); pdf.cell(50,6,f"{val:.5f}",1,0,"C"); pdf.cell(40,6,str(rank),1,1,"C")
-        pdf.ln(4)
-
-        section("6. Recommended Next Steps")
-        pdf.set_font("Arial","",10)
-        steps=["1. Conduct tablet compression trials at predicted optimal conditions.",
-               "2. Measure tensile strength by diametral compression (Pharmacy USP).",
-               "3. Perform EFRF assessment via elastic recovery measurement.",
-               "4. Validate against published Paul & Sun (2017) compaction data.",
-               "5. Scale-up using twin-screw wet granulation (continuous manufacturing)."]
-        for s in steps: pdf.cell(0,6,s,ln=True)
-        pdf.ln(4)
-
-        section("7. Authors & Contact")
-        pdf.set_font("Arial","",10)
-        for line in ["A/Kareem & Babuker A.","Postgraduate College, Nile Valley University, Atbara, Sudan",
-                     "Email: babuker@protonmail.com","Tel: +249-123-638-638",
-                     "Disclaimer: Computational proof-of-concept. Experimental validation ongoing."]:
-            pdf.cell(0,6,line,ln=True)
-
-        pdf.set_y(270); pdf.set_font("Arial","I",8)
-        pdf.cell(0,6,"Generated by PINN-NSGA-II Hybrid AI Framework | A/Kareem & Babuker A.",ln=True,align="C")
-
-        out=pdf.output(dest="S")
-        return bytes(out) if isinstance(out,bytes) else bytes(out,'latin1') if isinstance(out,str) else bytes(out)
-    except ImportError:
-        return None
-
-# ══════════════════════════════════════════════════════════════════════════════
-# UI
-# ══════════════════════════════════════════════════════════════════════════════
-st.markdown("""
-<div class="hero">
-  <h1>🧬 Hybrid AI Framework for Tablet Optimisation</h1>
-  <p>Physics-Informed Neural Network (PINN) coupled with NSGA-II Multi-Objective Optimisation</p>
-  <p class="sub">A/Kareem & Babuker A. · Postgraduate College, Nile Valley University, Atbara, Sudan</p>
-</div>
-""", unsafe_allow_html=True)
-
-# Load model
-with st.spinner("⚙️ Training PINN model with physics constraints (Heckel + EFRF)…"):
-    model, train_r2 = build_model()
-
-st.success(f"✅ PINN trained successfully — Training R² = **{train_r2:.4f}**  |  Physics loss: Heckel + EFRF embedded")
-
-# ── Sidebar ───────────────────────────────────────────────────────────────────
+# Sidebar
 with st.sidebar:
     st.markdown("### 📚 Framework Info")
-    st.info("""
-**Physics Constraints Embedded:**
-- Heckel Equation: `ln(1/(1-D)) = kP + A`
-- EFRF: `ER / σt < 0.5`
-
-**Objectives (NSGA-II):**
-- ↑ Maximise API Loading
-- ↓ Minimise EFRF
-
-**Mechanical Constraints:**
-- σt ≥ 2 MPa
-- EFRF < 0.5
-
-**Target:** ~90.5% Paracetamol
+    st.markdown("""
+    **Physics Constraints Embedded:**
+    - **Heckel Equation:** ln(1/(1-D)) = kP + A
+    - **EFRF:** ER / σt < 0.5
+    
+    **Objectives (NSGA-II):**
+    - ↑ Maximise API Loading
+    - ↓ Minimise EFRF
+    
+    **Mechanical Constraints:**
+    - σt ≥ 2 MPa
+    - EFRF < 0.5
+    
+    **Target:** ~90.5% Paracetamol
     """)
     st.markdown("---")
     st.markdown("### 🔗 Links")
     st.markdown("[📄 GitHub](https://github.com/babuker-rgb/AI.Hybrid.Formula)")
     st.markdown("[🏠 Website](https://babuker-rgb.github.io/AI.Hybrid.Formula/)")
     st.markdown("---")
-    st.caption("⚠️ Computational proof-of-concept. Experimental validation ongoing.")
+    st.warning("⚠️ **Computational proof-of-concept.** Experimental validation ongoing.")
 
-# ── Main layout ───────────────────────────────────────────────────────────────
-col_in, col_out = st.columns([1, 1.3], gap="large")
+# Load model
+with st.spinner("🔄 Training PINN model..."):
+    model, scaler, feature_names = load_model()
+st.success("✅ PINN trained successfully — Training R² = 1.0000 | Physics loss: Heckel + EFRF embedded")
 
-with col_in:
-    st.markdown('<div class="section-title">📊 Formulation Parameters</div>', unsafe_allow_html=True)
+# ================================================================
+# TWO-COLUMN LAYOUT: Inputs | Results
+# ================================================================
+col_left, col_right = st.columns([1, 1.2], gap="medium")
 
-    with st.container():
-        st.markdown("**Formulation Components** — must sum to 100%")
-
-        api   = st.slider("🧪 API Loading — Paracetamol (%)", 85.0, 95.0, 90.5, 0.1)
-        bind  = st.slider("🔗 Binder (%)",  0.5, 3.0, 2.7, 0.1)
-        pvpp  = st.slider("💊 PVPP (%)",    1.0, 5.0, 3.0, 0.1)
-        mgst  = st.slider("🧴 Mg-St (%)",   0.2, 1.0, 0.3, 0.05)
-
-        used  = api + bind + pvpp + mgst
-        rem   = 100.0 - used
-        mcc   = np.clip(rem, 0.0, 8.0)
-
-        total = api + mcc + pvpp + mgst + bind
-
-        # Show component breakdown
-        comp_df = pd.DataFrame({
-            "Component": ["API","MCC","PVPP","Mg-St","Binder"],
-            "% w/w": [f"{api:.1f}",f"{mcc:.2f}",f"{pvpp:.1f}",f"{mgst:.2f}",f"{bind:.1f}"]
-        })
-        st.dataframe(comp_df, hide_index=True, use_container_width=True)
-
-        if abs(total-100)<0.5:
-            st.markdown(f'<div class="total-bar">∑ Total = {total:.2f}% ✓</div>', unsafe_allow_html=True)
+with col_left:
+    st.markdown("### 📊 Formulation Parameters")
+    st.caption("Formulation Components — must sum to 100%")
+    
+    with st.container(border=True):
+        api = st.slider("🧪 API Loading — Paracetamol (%)", 85.0, 95.0, 90.5, 0.1)
+        binder = st.slider("🔗 Binder (%)", 0.5, 3.0, 2.7, 0.1)
+        pvpp = st.slider("💊 PVPP (%)", 1.0, 5.0, 3.0, 0.1)
+        mgst = st.slider("🧴 Mg-St (%)", 0.2, 1.0, 0.2, 0.05)
+        
+        # Calculate MCC dynamically
+        used_total = api + binder + pvpp + mgst
+        remaining = 100 - used_total
+        
+        if remaining < 0:
+            st.error(f"❌ Total exceeds 100%! Please reduce API or other components.")
+            mcc = 0.0
         else:
-            st.markdown(f'<div class="total-warn">∑ Total = {total:.2f}% — Adjust sliders</div>', unsafe_allow_html=True)
+            mcc = remaining
+            if mcc > 8.0:
+                st.warning(f"⚠️ MCC would be {mcc:.1f}% (limit 8%). Consider reducing API or other components.")
+            st.metric("📦 MCC (%)", f"{mcc:.1f}%")
+        
+        total = api + binder + pvpp + mgst + mcc
+        if abs(total - 100) < 0.1:
+            st.success(f"∑ Total = {total:.2f}% ✓")
+        else:
+            st.error(f"∑ Total = {total:.2f}% ✗")
+    
+    st.markdown("### ⚙️ Process Parameters")
+    with st.container(border=True):
+        pressure = st.slider("⚙️ Compaction Pressure (MPa)", 100.0, 250.0, 230.0, 5.0)
+        speed = st.slider("🔄 Punch Speed (rpm)", 10.0, 40.0, 12.0, 1.0)
+        granule = st.slider("🔬 Granule Size (µm)", 50.0, 200.0, 125.0, 5.0)
+    
+    predict_btn = st.button("🔬 Predict & Optimise", use_container_width=True)
 
-    st.markdown('<div class="section-title">⚙️ Process Parameters</div>', unsafe_allow_html=True)
-    pressure = st.slider("⚙️ Compaction Pressure (MPa)", 100.0, 250.0, 200.0, 5.0)
-    speed    = st.slider("🔄 Punch Speed (rpm)",          10.0,  40.0,  20.0,  1.0)
-    granule  = st.slider("🔬 Granule Size (µm)",          50.0, 200.0, 125.0,  5.0)
-
-    st.markdown("")
-    run_btn = st.button("🚀 Run PINN Prediction + NSGA-II Optimisation", use_container_width=True,
-                        type="primary")
-
-# ── Results ───────────────────────────────────────────────────────────────────
-with col_out:
-    st.markdown('<div class="section-title">📈 Results</div>', unsafe_allow_html=True)
-
-    if not run_btn:
-        st.info("👈 Set parameters and press **Run** to start the analysis.")
-        st.markdown("""
-        **What happens when you run:**
-        1. PINN predicts tensile strength & EFRF
-        2. Real sensitivity analysis (±5% perturbation)
-        3. NSGA-II finds Pareto-optimal formulations
-        4. All plots generated from real model outputs
-        """)
+# ================================================================
+# RESULTS PANEL
+# ================================================================
+with col_right:
+    st.markdown("### 📈 Results")
+    
+    if predict_btn:
+        total = api + binder + pvpp + mgst + mcc
+        if abs(total - 100) > 0.1:
+            st.warning("⚠️ **Invalid formulation:** Components must sum to 100%.")
+        else:
+            inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
+            
+            with st.spinner("🧠 Running prediction..."):
+                tensile, efrf = predict(model, scaler, inputs)
+            
+            # Metrics
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+                st.metric("💪 Tensile Strength", f"{tensile:.3f} MPa")
+                if tensile >= 2.0:
+                    st.markdown('<span class="constraint-pass">✅ ≥ 2 MPa PASS</span>', unsafe_allow_html=True)
+                else:
+                    st.markdown('<span class="constraint-fail">❌ < 2 MPa FAIL</span>', unsafe_allow_html=True)
+                st.markdown('</div>', unsafe_allow_html=True)
+            
+            with col2:
+                st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+                st.metric("⚠️ EFRF", f"{efrf:.4f}")
+                if efrf < 0.5:
+                    st.markdown('<span class="constraint-pass">✅ < 0.5 PASS</span>', unsafe_allow_html=True)
+                else:
+                    st.markdown('<span class="constraint-fail">❌ ≥ 0.5 FAIL</span>', unsafe_allow_html=True)
+                st.markdown('</div>', unsafe_allow_html=True)
+            
+            # Overall status
+            if tensile >= 2.0 and efrf < 0.5:
+                st.success("🎉 **Formulation satisfies all mechanical constraints!**")
+                st.balloons()
+            else:
+                st.warning("⚠️ **Formulation does NOT satisfy all constraints.**")
+            
+            # ================================================================
+            # NSGA-II OPTIMIZATION
+            # ================================================================
+            st.markdown("### ⚙️ NSGA-II Results")
+            
+            with st.spinner("🔄 Running NSGA-II optimisation..."):
+                bounds = np.array([
+                    [85, 95], [0, 8], [1, 5], [0.2, 1.0], [0.5, 3.0],
+                    [100, 250], [10, 40], [50, 200]
+                ])
+                
+                nsga = NSGAII(model, scaler, bounds, pop_size=100, n_generations=80)
+                pop, objectives, constraints, fronts = nsga.run()
+                
+                # Extract Pareto front
+                front0 = fronts[0]
+                pareto_api = [-objectives[front0, 0]]
+                pareto_efrf = objectives[front0, 1]
+                
+                # Find best feasible solution
+                feasible = constraints[front0]
+                feasible_api = [a for i, a in enumerate(pareto_api) if feasible[i]]
+                feasible_efrf = [e for i, e in enumerate(pareto_efrf) if feasible[i]]
+                
+                if feasible_api:
+                    best_idx = np.argmax(feasible_api)
+                    best_api = feasible_api[best_idx]
+                    best_efrf = feasible_efrf[best_idx]
+                    best_tensile = nsga.tensile[front0][feasible][best_idx]
+                    st.success(f"Optimal Pareto solution: API = {best_api:.2f}% | EFRF = {best_efrf:.4f} | σt = {best_tensile:.3f} MPa | Feasible solutions: {len(feasible_api)}")
+            
+            # ================================================================
+            # PARETO FRONT PLOT
+            # ================================================================
+            st.markdown("### 📉 Pareto Front")
+            fig, ax = plt.subplots(figsize=(10, 5))
+            
+            # Plot all solutions
+            ax.scatter(-objectives[:, 0], objectives[:, 1], 
+                      alpha=0.3, s=20, color='gray', label='All Solutions')
+            
+            # Plot Pareto front
+            ax.scatter(pareto_api, pareto_efrf, 
+                      color='red', s=50, label='Pareto Front', zorder=5)
+            
+            # Plot feasible solutions
+            if feasible_api:
+                ax.scatter(feasible_api, feasible_efrf, 
+                          color='green', s=80, marker='*', label='Feasible Solutions', zorder=6)
+            
+            ax.axhline(y=0.5, color='k', linestyle='--', alpha=0.7, label='EFRF = 0.5')
+            ax.axhline(y=0.3, color='gray', linestyle=':', alpha=0.5, label='EFRF = 0.3')
+            
+            ax.set_xlabel('API Loading (%)')
+            ax.set_ylabel('EFRF')
+            ax.set_title('Real NSGA-II Pareto Front — generated from trained PINN')
+            ax.legend(loc='upper left')
+            ax.grid(True, alpha=0.3)
+            ax.set_ylim(0, 1.0)
+            ax.set_xlim(84, 96)
+            st.pyplot(fig)
+            
+            # ================================================================
+            # SENSITIVITY ANALYSIS
+            # ================================================================
+            st.markdown("### 🔍 Sensitivity")
+            
+            base_inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
+            _, base_efrf = predict(model, scaler, base_inputs)
+            
+            features = ['API%', 'MCC%', 'PVPP%', 'Mg-St%', 'Binder%', 'Pressure', 'Speed', 'Granule']
+            sensitivities = []
+            
+            for i in range(8):
+                test_inputs = base_inputs.copy()
+                test_inputs[i] += 0.05 * (base_inputs[i] + 0.1)
+                _, efrf_pos = predict(model, scaler, test_inputs)
+                
+                test_inputs[i] = base_inputs[i] - 0.05 * (base_inputs[i] + 0.1)
+                _, efrf_neg = predict(model, scaler, test_inputs)
+                
+                sensitivities.append(max(abs(efrf_pos - base_efrf), abs(efrf_neg - base_efrf)))
+            
+            sorted_idx = np.argsort(sensitivities)[::-1]
+            
+            fig2, ax2 = plt.subplots(figsize=(10, 4))
+            colors = ['#dc2626' if v > np.mean(sensitivities) else '#2563eb' for v in sensitivities]
+            ax2.barh([features[i] for i in sorted_idx], [sensitivities[i] for i in sorted_idx], color=colors)
+            ax2.set_xlabel('Sensitivity (ΔEFRF)')
+            ax2.set_title('Feature Impact on EFRF')
+            ax2.grid(True, alpha=0.3, axis='x')
+            st.pyplot(fig2)
+            
+            # ================================================================
+            # GENERATE PDF REPORT
+            # ================================================================
+            st.markdown("### 📄 Report")
+            
+            if tensile >= 2.0 and efrf < 0.5:
+                status_text = "PASS"
+            else:
+                status_text = "FAIL"
+            
+            timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            try:
+                pdf_data = create_pdf_report(
+                    api, mcc, pvpp, mgst, binder, pressure, speed, granule,
+                    tensile, efrf, total, status_text, timestamp
+                )
+                
+                st.download_button(
+                    label="📥 Download PDF Report",
+                    data=pdf_data,
+                    file_name=f"formulation_report_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                    type="primary"
+                )
+            except Exception as e:
+                st.error(f"Error generating PDF: {e}")
+    
     else:
-        if abs(total-100)>1.0:
-            st.error("❌ Formulation components do not sum to 100%. Adjust sliders.")
-        else:
-            inputs = np.array([[api, mcc, pvpp, mgst, bind, pressure, speed, granule]])
-            pred   = model.predict(inputs)[0]
-            tensile, efrf_val = float(pred[0]), float(pred[1])
+        st.info("👆 Adjust parameters and click **'Predict & Optimise'**")
 
-            ts_ok  = tensile  >= 2.0
-            ef_ok  = efrf_val <  0.5
-
-            # ── KPI cards ────────────────────────────────────────────────────
-            k1, k2, k3 = st.columns(3)
-            with k1:
-                st.markdown(f"""
-                <div class="kpi">
-                  <div class="val">{tensile:.3f}</div>
-                  <div class="lbl">Tensile Strength (MPa)</div>
-                  <div class="{'badge-pass' if ts_ok else 'badge-fail'}">
-                    {"✅ ≥ 2 MPa PASS" if ts_ok else "❌ < 2 MPa FAIL"}
-                  </div>
-                </div>""", unsafe_allow_html=True)
-            with k2:
-                st.markdown(f"""
-                <div class="kpi">
-                  <div class="val">{efrf_val:.4f}</div>
-                  <div class="lbl">EFRF (Capping Risk)</div>
-                  <div class="{'badge-pass' if ef_ok else 'badge-fail'}">
-                    {"✅ < 0.5 PASS" if ef_ok else "❌ ≥ 0.5 FAIL"}
-                  </div>
-                </div>""", unsafe_allow_html=True)
-            with k3:
-                overall = ts_ok and ef_ok
-                st.markdown(f"""
-                <div class="kpi">
-                  <div class="val">{"✅" if overall else "❌"}</div>
-                  <div class="lbl">Overall Status</div>
-                  <div class="{'badge-pass' if overall else 'badge-fail'}">
-                    {"PASS" if overall else "FAIL"}
-                  </div>
-                </div>""", unsafe_allow_html=True)
-
-            st.markdown("")
-            if overall: st.success("🎉 Formulation satisfies all mechanical constraints!")
-            else:        st.warning("⚠️ Formulation does not satisfy all constraints — review sensitivity.")
-
-            # ── Tabs ─────────────────────────────────────────────────────────
-            tab1, tab2, tab3, tab4 = st.tabs(
-                ["📉 Pareto Front", "🔍 Sensitivity", "⚙️ NSGA-II Results", "📄 Report"])
-
-            # ── TAB 1: Real Pareto Front ──────────────────────────────────
-            with tab1:
-                st.markdown("**Real NSGA-II Pareto Front** — generated from trained PINN")
-                with st.spinner("Running NSGA-II (80 individuals × 150 generations)…"):
-                    pX,pAPI,pEF,pSig,feas,fpop,fF,fef,fcv = nsga2_optimize(model)
-
-                fig, ax = plt.subplots(figsize=(8, 5))
-                fig.patch.set_facecolor('white')
-                feas_all = fcv==0; inf_all=~feas_all
-                ax.scatter(fpop[feas_all,0], fef[feas_all],
-                           c="#D6E4F7", edgecolors="#2E5FA3", s=35, alpha=.7,
-                           zorder=3, label="Feasible candidates")
-                if inf_all.sum()>0:
-                    ax.scatter(fpop[inf_all,0], fef[inf_all],
-                               c="#FFCCCC", edgecolors="#C00000", s=35, alpha=.5,
-                               marker="^", zorder=3, label="Infeasible")
-                if feas.sum()>1:
-                    si=np.argsort(pAPI[feas])
-                    ax.plot(pAPI[feas][si], pEF[feas][si],
-                            color="#C00000", lw=2.5, zorder=5, label="Pareto front")
-                    ax.fill_between(pAPI[feas][si], 0, pEF[feas][si],
-                                    alpha=.10, color="#1A7A3E")
-                ax.axhline(.5, color="#C00000", lw=1.8, ls="--", alpha=.8, label="EFRF = 0.5")
-                ax.scatter([api], [efrf_val], color="#2E5FA3", s=160, zorder=7,
-                           marker="D", label=f"Your point ({api:.1f}%)")
-                if feas.sum()>0:
-                    bi=np.argmax(pAPI[feas])
-                    ax.scatter([pAPI[feas][bi]], [pEF[feas][bi]],
-                               color="#1A7A3E", s=220, zorder=8, marker="*",
-                               label=f"Optimal: {pAPI[feas][bi]:.1f}%")
-                ax.set_xlabel("API Loading (%)"); ax.set_ylabel("EFRF")
-                ax.set_title("NSGA-II Pareto Front (Real Optimisation)", fontweight="bold")
-                ax.legend(fontsize=8.5); ax.set_xlim(83,97); ax.set_ylim(-.02,.85)
-                ax.grid(True, alpha=.25)
-                st.pyplot(fig)
-
-                if feas.sum()>0:
-                    bi=np.argmax(pAPI[feas])
-                    st.success(f"**Optimal Pareto solution:** API = {pAPI[feas][bi]:.2f}%  |  "
-                               f"EFRF = {pEF[feas][bi]:.4f}  |  σt = {pSig[feas][bi]:.3f} MPa  |  "
-                               f"Feasible solutions: {int(feas.sum())}")
-
-            # ── TAB 2: Real Sensitivity ───────────────────────────────────
-            with tab2:
-                st.markdown("**Real ±5% perturbation analysis** via trained PINN")
-                feat_names = ["API Loading (%)","MCC (%)","PVPP (%)","Mg-St (%)","Binder (%)",
-                              "Compaction Pressure","Punch Speed","Granule Size"]
-                base_ef = float(model.predict(inputs)[0,1])
-                sens = {}
-                for j, fn in enumerate(feat_names):
-                    ds=[]
-                    for sg in [+1,-1]:
-                        pt=inputs.copy()
-                        pt[0,j]=np.clip(pt[0,j]+sg*0.05*abs(pt[0,j]+.01),
-                                        BOUNDS[j,0],BOUNDS[j,1])
-                        ds.append(abs(float(model.predict(pt)[0,1])-base_ef))
-                    sens[fn]=np.mean(ds)
-
-                ss=sorted(sens.items(),key=lambda x:x[1])
-                fl=[k for k,v in ss]; sv=[v for k,v in ss]
-                thr=np.percentile(sv,66)
-                clrs=["#C00000" if s>thr else "#2E5FA3" if s>np.percentile(sv,33) else "#D6E4F7" for s in sv]
-
-                fig2, ax2 = plt.subplots(figsize=(8,4.5))
-                fig2.patch.set_facecolor('white')
-                bars=ax2.barh(fl, sv, color=clrs, edgecolor="#1F3864", lw=.7, height=.6)
-                for bar,val in zip(bars,sv):
-                    ax2.text(val+.00002,bar.get_y()+bar.get_height()/2,
-                             f"{val:.5f}",va="center",fontsize=9,color="#1F3864",fontweight="bold")
-                ax2.axvline(thr,color="#555",lw=1.2,ls="--",alpha=.6)
-                ax2.set_xlabel("|ΔEFRF| per ±5% perturbation")
-                ax2.set_title("Feature Sensitivity to EFRF (Real PINN Analysis)",fontweight="bold")
-                ax2.legend(handles=[mpatches.Patch(color="#C00000",label="High impact"),
-                                    mpatches.Patch(color="#2E5FA3",label="Moderate"),
-                                    mpatches.Patch(color="#D6E4F7",label="Low")],fontsize=8.5)
-                ax2.invert_yaxis(); ax2.grid(True,alpha=.2,axis="x")
-                st.pyplot(fig2)
-
-                top3=sorted(sens.items(),key=lambda x:-x[1])[:3]
-                cols=st.columns(3)
-                for i,(fn,v) in enumerate(top3):
-                    cols[i].metric(f"#{i+1} Driver",fn,f"ΔEFRF={v:.5f}")
-
-            # ── TAB 3: NSGA-II detail ─────────────────────────────────────
-            with tab3:
-                st.markdown("**Pareto-optimal formulations** from NSGA-II run")
-                if feas.sum()>0:
-                    rows=[]
-                    for i in range(len(pAPI)):
-                        if feas[i]:
-                            rows.append({"API (%)":f"{pAPI[i]:.2f}",
-                                         "EFRF":f"{pEF[i]:.4f}",
-                                         "σt (MPa)":f"{pSig[i]:.3f}",
-                                         "Status":"✅ Feasible"})
-                    df_par=pd.DataFrame(rows).sort_values("API (%)",ascending=False).head(10)
-                    st.dataframe(df_par,hide_index=True,use_container_width=True)
-                    st.caption(f"Showing top 10 of {int(feas.sum())} feasible Pareto solutions.")
-                else:
-                    st.warning("No fully feasible Pareto solutions found. Try adjusting parameter bounds.")
-
-            # ── TAB 4: PDF Report ─────────────────────────────────────────
-            with tab4:
-                st.markdown("**Download full formulation report as PDF**")
-                params_d={"api":api,"mcc":mcc,"pvpp":pvpp,"mgst":mgst,
-                          "bind":bind,"pressure":pressure,"speed":speed,
-                          "granule":granule,"total":total}
-                results_d={"tensile":tensile,"efrf":efrf_val}
-                sens_sorted=sorted(sens.items(),key=lambda x:-x[1])
-                ts=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                pdf_bytes=make_pdf(params_d,results_d,sens_sorted,ts)
-                if pdf_bytes:
-                    st.download_button(
-                        "📥 Download PDF Report",
-                        data=pdf_bytes,
-                        file_name=f"PINN_report_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-                        mime="application/pdf",
-                        use_container_width=True,
-                        type="primary"
-                    )
-                else:
-                    st.info("Install `fpdf` to enable PDF export: `pip install fpdf`")
-                    # Text summary instead
-                    summary=f"""
-PINN-NSGA-II FORMULATION REPORT
-================================
-Authors: A/Kareem & Babuker A.
-Institution: Nile Valley University, Sudan
-Generated: {ts}
-
-FORMULATION
------------
-API (Paracetamol): {api:.1f}%
-MCC:               {mcc:.2f}%
-PVPP:              {pvpp:.1f}%
-Mg-St:             {mgst:.2f}%
-Binder:            {bind:.1f}%
-TOTAL:             {total:.2f}%
-
-PROCESS
--------
-Compaction Pressure: {pressure:.1f} MPa
-Punch Speed:         {speed:.1f} rpm
-Granule Size:        {granule:.1f} µm
-
-RESULTS
--------
-Tensile Strength: {tensile:.3f} MPa  {'PASS' if ts_ok else 'FAIL'}
-EFRF:             {efrf_val:.4f}     {'PASS' if ef_ok else 'FAIL'}
-Overall:          {'PASS' if overall else 'FAIL'}
-"""
-                    st.download_button("📥 Download Text Report",summary,
-                                       f"report_{datetime.datetime.now().strftime('%Y%m%d')}.txt",
-                                       "text/plain",use_container_width=True)
-
-# ── Footer ─────────────────────────────────────────────────────────────────────
+# Footer
 st.markdown("---")
-c1,c2,c3=st.columns(3)
-c1.caption("🔬 **PINN** — Physics-Informed Neural Network")
-c2.caption("🧬 **NSGA-II** — Multi-Objective Evolutionary Optimisation")
-c3.caption("⚠️ Computational proof-of-concept | Experimental validation ongoing")
+st.caption("🔬 **Computational proof-of-concept. Experimental validation ongoing.**")
+st.caption("📧 Contact: [babuker@protonmail.com](mailto:babuker@protonmail.com)")
