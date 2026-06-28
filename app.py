@@ -123,7 +123,7 @@ def generate_data(n_samples=100, random_state=42):
 
 
 # ================================================================
-# 3. PDF REPORT GENERATION
+# 3. PDF REPORT GENERATION (Fixed for Unicode compatibility)
 # ================================================================
 
 def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule, 
@@ -133,7 +133,7 @@ def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
     pdf = FPDF()
     pdf.add_page()
     
-    # Set font
+    # Set font (using standard fonts that support basic characters)
     pdf.set_font("Arial", "B", 16)
     
     # Title
@@ -175,7 +175,7 @@ def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
     params = [
         ("Compaction Pressure", f"{pressure:.1f} MPa"),
         ("Punch Speed", f"{speed:.1f} rpm"),
-        ("Granule Size", f"{granule:.1f} µm"),
+        ("Granule Size", f"{granule:.1f} um"),
     ]
     for p, v in params:
         pdf.cell(60, 6, p, 1, 0, "L")
@@ -188,11 +188,12 @@ def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
     pdf.cell(0, 8, "3. Prediction Results", ln=True)
     pdf.set_font("Arial", "", 10)
     
-    tensile_status = "✅ PASS" if tensile >= 2.0 else "❌ FAIL"
-    efrf_status = "✅ PASS" if efrf < 0.5 else "❌ FAIL"
+    # Replace special characters with text equivalents to avoid Unicode errors
+    tensile_status = "PASS" if tensile >= 2.0 else "FAIL"
+    efrf_status = "PASS" if efrf < 0.5 else "FAIL"
     
     results = [
-        ("Tensile Strength", f"{tensile:.3f} MPa", "≥ 2 MPa", tensile_status),
+        ("Tensile Strength", f"{tensile:.3f} MPa", ">= 2 MPa", tensile_status),
         ("EFRF", f"{efrf:.4f}", "< 0.5", efrf_status),
     ]
     
@@ -216,10 +217,10 @@ def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
     
     if tensile >= 2.0 and efrf < 0.5:
         pdf.set_text_color(0, 128, 0)
-        pdf.cell(0, 8, "✅ FORMULATION SATISFIES ALL CONSTRAINTS", ln=True, align="C")
+        pdf.cell(0, 8, "PASS - Formulation Satisfies All Constraints", ln=True, align="C")
     else:
         pdf.set_text_color(255, 0, 0)
-        pdf.cell(0, 8, "❌ FORMULATION DOES NOT SATISFY ALL CONSTRAINTS", ln=True, align="C")
+        pdf.cell(0, 8, "FAIL - Formulation Does NOT Satisfy All Constraints", ln=True, align="C")
     
     pdf.set_text_color(0, 0, 0)
     pdf.ln(5)
@@ -540,30 +541,34 @@ with col_right:
             
             # Determine overall status
             if tensile >= 2.0 and efrf < 0.5:
-                status_text = "✅ PASS"
+                status_text = "PASS"
             else:
-                status_text = "❌ FAIL"
+                status_text = "FAIL"
             
             # Get current timestamp
             timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             
             # Create PDF
-            pdf_data = create_pdf_report(
-                api, mcc, pvpp, mgst, binder, pressure, speed, granule,
-                tensile, efrf, total, status_text, timestamp
-            )
-            
-            # Download button
-            st.download_button(
-                label="📥 Download Signed PDF Report",
-                data=pdf_data,
-                file_name=f"formulation_report_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                mime="application/pdf",
-                use_container_width=True,
-                type="primary"
-            )
-            
-            st.caption("🔏 This PDF includes a digital signature section for approval.")
+            try:
+                pdf_data = create_pdf_report(
+                    api, mcc, pvpp, mgst, binder, pressure, speed, granule,
+                    tensile, efrf, total, status_text, timestamp
+                )
+                
+                # Download button
+                st.download_button(
+                    label="📥 Download Signed PDF Report",
+                    data=pdf_data,
+                    file_name=f"formulation_report_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                    type="primary"
+                )
+                
+                st.caption("🔏 This PDF includes a digital signature section for approval.")
+            except Exception as e:
+                st.error(f"Error generating PDF: {e}")
+                st.info("Please try again or contact support.")
     
     else:
         st.info("👆 Adjust parameters to 100% total and click **'Predict & Optimize'**")
