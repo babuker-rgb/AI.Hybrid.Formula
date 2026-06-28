@@ -407,7 +407,7 @@ class NSGAII:
 
 
 # ================================================================
-# 4. PDF REPORT GENERATION
+# 4. PDF REPORT GENERATION (fixed for Unicode)
 # ================================================================
 
 def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule, 
@@ -791,7 +791,7 @@ with col_right:
                 st.warning("⚠️ **Formulation does NOT satisfy all constraints.**")
             
             # ================================================================
-            # NSGA-II OPTIMIZATION
+            # NSGA-II OPTIMIZATION (FIXED)
             # ================================================================
             st.markdown("### ⚙️ NSGA-II Results")
             
@@ -816,16 +816,19 @@ with col_right:
                 
                 if feasible_api:
                     best_idx = np.argmax(feasible_api)
-                    best_api = feasible_api[best_idx]
-                    best_efrf = feasible_efrf[best_idx]
-                    best_tensile = nsga.tensile[front0][feasible][best_idx]
+                    # Convert to Python float to avoid numpy array formatting issues
+                    best_api = float(feasible_api[best_idx])
+                    best_efrf = float(feasible_efrf[best_idx])
+                    # Ensure tensile is a scalar
+                    tensile_values = nsga.tensile[front0][feasible]
+                    best_tensile = float(tensile_values[best_idx])
                     st.success(f"Optimal Pareto solution: API = {best_api:.2f}% | EFRF = {best_efrf:.4f} | σt = {best_tensile:.3f} MPa | Feasible solutions: {len(feasible_api)}")
                 else:
                     # If no feasible solutions, show best non-dominated solution
                     best_idx = 0
-                    best_api = pareto_api[best_idx]
-                    best_efrf = pareto_efrf[best_idx]
-                    best_tensile = nsga.tensile[front0][0]
+                    best_api = float(pareto_api[best_idx])
+                    best_efrf = float(pareto_efrf[best_idx])
+                    best_tensile = float(nsga.tensile[front0][0])
                     st.warning(f"No feasible solutions found. Best non-dominated: API = {best_api:.2f}% | EFRF = {best_efrf:.4f} | σt = {best_tensile:.3f} MPa")
             
             # ================================================================
