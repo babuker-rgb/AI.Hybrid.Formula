@@ -384,45 +384,56 @@ with col_left:
     st.markdown("**All components must sum to 100%**")
     
     with st.container(border=True):
-        # Create sliders for each component
-        api = st.slider("🧪 API Loading (%)", 85.0, 95.0, 90.5, 0.1)
-        binder = st.slider("🔗 Binder (%)", 0.5, 3.0, 2.7, 0.1)
-        pvpp = st.slider("💊 PVPP (%)", 1.0, 5.0, 3.0, 0.1)
-        mgst = st.slider("🧴 Mg-St (%)", 0.2, 1.0, 0.2, 0.05)
+        # Formulation Components
+        st.markdown("#### Formulation Components")
+        api = st.slider("🧪 API Loading (%)", 85.0, 95.0, 90.5, 0.1,
+                       help="Active Pharmaceutical Ingredient (Paracetamol)")
         
-        # Calculate the remaining percentage for MCC
+        binder = st.slider("🔗 Binder (%)", 0.5, 3.0, 2.7, 0.1,
+                          help="Binder for tablet cohesion")
+        
+        pvpp = st.slider("💊 PVPP (%)", 1.0, 5.0, 3.0, 0.1,
+                        help="Superdisintegrant for rapid disintegration")
+        
+        mgst = st.slider("🧴 Mg-St (%)", 0.2, 1.0, 0.2, 0.05,
+                        help="Lubricant for tablet ejection")
+        
+        # Calculate MCC dynamically
         used_total = api + binder + pvpp + mgst
         remaining = 100 - used_total
-        
-        # MCC slider with dynamic max
-        mcc_max = min(remaining, 8.0)
-        mcc_min = max(0.0, remaining - 8.0)
         
         if remaining < 0:
             st.error(f"❌ Total exceeds 100%! Please reduce API or other components.")
             mcc = 0.0
         else:
-            # If remaining is within MCC range, allow full adjustment
+            mcc_max = min(remaining, 8.0)
+            mcc_min = max(0.0, remaining - 8.0)
+            
             if remaining <= 8.0:
                 mcc = st.slider("📦 MCC (%)", 0.0, float(remaining), float(remaining), 0.1,
                                help="Microcrystalline Cellulose - filler")
             else:
-                # If remaining > 8%, MCC can only go up to 8%
                 mcc = st.slider("📦 MCC (%)", 0.0, 8.0, 8.0, 0.1,
                                help="Microcrystalline Cellulose - filler (limited to 8%)")
-                st.warning(f"⚠️ Remaining filler would be {remaining:.1f}%, but MCC limited to 8%. Reduce API or other components.")
+                st.warning(f"⚠️ Remaining filler would be {remaining:.1f}%, but MCC limited to 8%.")
         
-        # Calculate total and show validation
+        # Calculate and display total
         total = api + binder + pvpp + mgst + mcc
         st.metric("**Total Formulation**", f"{total:.1f}%", 
                   delta="✅ Valid" if abs(total - 100) < 0.1 else "❌ Invalid")
         
-        # Show MCC status
-        if abs(total - 100) < 0.1:
-            if mcc < 0.5:
-                st.info("ℹ️ Low MCC content. Formulation is mostly API.")
-            elif mcc > 6.0:
-                st.info("ℹ️ High MCC content. Good for compaction.")
+        # Process Parameters
+        st.markdown("---")
+        st.markdown("#### Process Parameters")
+        
+        pressure = st.slider("⚙️ Compaction Pressure (MPa)", 100.0, 250.0, 230.0, 5.0,
+                            help="Compression force applied during tableting")
+        
+        speed = st.slider("🔄 Punch Speed (rpm)", 10.0, 40.0, 12.0, 1.0,
+                         help="Speed of tablet press punch")
+        
+        granule = st.slider("🔬 Granule Size (µm)", 50.0, 200.0, 125.0, 5.0,
+                           help="Average particle size of granules")
     
     predict_btn = st.button("🔬 Predict & Optimize", use_container_width=True)
 
@@ -477,6 +488,14 @@ with col_right:
                 "%": [f"{api:.1f}%", f"{mcc:.1f}%", f"{pvpp:.1f}%", f"{mgst:.2f}%", f"{binder:.1f}%", f"{total:.1f}%"]
             }
             st.dataframe(pd.DataFrame(summary_data), hide_index=True, use_container_width=True)
+            
+            # Process Parameters Summary
+            st.markdown("### ⚙️ Process Parameters")
+            process_data = {
+                "Parameter": ["Compaction Pressure", "Punch Speed", "Granule Size"],
+                "Value": [f"{pressure:.1f} MPa", f"{speed:.1f} rpm", f"{granule:.1f} µm"]
+            }
+            st.dataframe(pd.DataFrame(process_data), hide_index=True, use_container_width=True)
             
             # Pareto Front
             st.markdown("### 📉 Pareto Front")
@@ -581,8 +600,13 @@ with st.sidebar:
     This tool implements a Physics-Informed Neural Network 
     coupled with multi-objective optimization.
     
-    **All formulation components must sum to 100%:**
+    **Formulation Components (must sum to 100%):**
     - API + MCC + PVPP + Mg-St + Binder = 100%
+    
+    **Process Parameters:**
+    - Compaction Pressure: 100-250 MPa
+    - Punch Speed: 10-40 rpm
+    - Granule Size: 50-200 µm
     
     **Constraints:**
     - 💪 σₜ ≥ 2 MPa
