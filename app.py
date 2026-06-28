@@ -18,7 +18,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 1. SIMPLIFIED PINN MODEL (Guaranteed to work)
+# 1. PINN MODEL DEFINITION
 # ================================================================
 
 class SimplePINN(nn.Module):
@@ -49,46 +49,63 @@ class SimplePINN(nn.Module):
 
 
 # ================================================================
-# 2. DATA GENERATION (Simplified, robust)
+# 2. DATA GENERATION WITH 100% CONSTRAINT
 # ================================================================
 
 def generate_data(n_samples=100, random_state=42):
-    """Generate synthetic data with clear patterns"""
+    """Generate synthetic data ensuring all components sum to 100%"""
     np.random.seed(random_state)
     
-    # Generate random inputs
-    X = np.random.rand(n_samples, 8)
-    
-    # Scale to realistic ranges
-    X[:, 0] = 85 + X[:, 0] * 10  # API: 85-95%
-    X[:, 1] = 2 + X[:, 1] * 6    # MCC: 2-8%
-    X[:, 2] = 1 + X[:, 2] * 4    # PVPP: 1-5%
-    X[:, 3] = 0.2 + X[:, 3] * 0.8  # Mg-St: 0.2-1.0%
-    X[:, 4] = 0.5 + X[:, 4] * 2.5  # Binder: 0.5-3.0%
-    X[:, 5] = 100 + X[:, 5] * 150  # Pressure: 100-250 MPa
-    X[:, 6] = 10 + X[:, 6] * 30    # Speed: 10-40 rpm
-    X[:, 7] = 50 + X[:, 7] * 150   # Granule: 50-200 µm
-    
-    # Calculate realistic outputs
+    # Initialize dataset
+    X = np.zeros((n_samples, 8))
     y = np.zeros((n_samples, 2))
     
     for i in range(n_samples):
-        api = X[i, 0]
-        mgst = X[i, 3]
-        binder = X[i, 4]
-        pressure = X[i, 5]
-        speed = X[i, 6]
+        # Generate 5 components that sum to 100%
+        # 1. API: 85-95%
+        api = np.random.uniform(85, 95)
         
-        # Tensile strength: decreases with API, increases with pressure and binder
+        # 2. Binder: 0.5-3.0%
+        binder = np.random.uniform(0.5, 3.0)
+        
+        # 3. Mg-St: 0.2-1.0%
+        mgst = np.random.uniform(0.2, 1.0)
+        
+        # 4. PVPP: 1.0-5.0%
+        pvpp = np.random.uniform(1.0, 5.0)
+        
+        # 5. Remaining is MCC (max 8%)
+        mcc = 100 - (api + binder + mgst + pvpp)
+        mcc = np.clip(mcc, 0, 8.0)
+        
+        # If MCC exceeds 8%, rescale others proportionally
+        if mcc > 8.0:
+            # Reduce others proportionally
+            scale_factor = (100 - 8.0) / (api + binder + mgst + pvpp)
+            api = api * scale_factor
+            binder = binder * scale_factor
+            mgst = mgst * scale_factor
+            pvpp = pvpp * scale_factor
+            mcc = 8.0
+        
+        # 6. Process parameters
+        pressure = np.random.uniform(100, 250)
+        speed = np.random.uniform(10, 40)
+        granule = np.random.uniform(50, 200)
+        
+        # Store inputs
+        X[i] = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
+        
+        # --- Calculate outputs ---
+        # Tensile strength: decreases with API, increases with binder and pressure
         strength = 3.5 - 0.15 * (api - 85) + 0.3 * binder + 0.008 * (pressure - 100) - 1.5 * mgst - 0.02 * (speed - 10)
         strength = np.clip(strength, 0.5, 6.0)
         
-        # EFRF: increases with API and speed, decreases with pressure
+        # EFRF: increases with API and speed, decreases with pressure and binder
         efrf = 0.2 + 0.08 * (api - 85) + 0.005 * (speed - 10) - 0.001 * (pressure - 100) - 0.2 * binder + 0.5 * mgst
         efrf = np.clip(efrf, 0.1, 1.5)
         
-        y[i, 0] = strength
-        y[i, 1] = efrf
+        y[i] = [strength, efrf]
     
     feature_names = ['API_%', 'MCC_%', 'PVPP_%', 'MgSt_%', 'Binder_%', 
                      'Pressure_MPa', 'Speed_rpm', 'Granule_Size_µm']
@@ -96,6 +113,9 @@ def generate_data(n_samples=100, random_state=42):
     df = pd.DataFrame(X, columns=feature_names)
     df['Tensile_Strength_MPa'] = y[:, 0]
     df['EFRF'] = y[:, 1]
+    
+    # Calculate total composition
+    df['Total_Composition_%'] = df[['API_%', 'MCC_%', 'PVPP_%', 'MgSt_%', 'Binder_%']].sum(axis=1)
     
     return df, feature_names
 
@@ -127,6 +147,7 @@ def load_model():
     criterion = nn.MSELoss()
     
     # Training loop
+    progress_bar = st.progress(0)
     for epoch in range(1000):
         optimizer.zero_grad()
         y_pred = model(X_tensor)
@@ -134,9 +155,10 @@ def load_model():
         loss.backward()
         optimizer.step()
         
-        if (epoch + 1) % 200 == 0:
-            print(f"Epoch {epoch+1}, Loss: {loss.item():.4f}")
+        if (epoch + 1) % 100 == 0:
+            progress_bar.progress((epoch + 1) / 1000)
     
+    progress_bar.progress(1.0)
     model.eval()
     return model, scaler, feature_names
 
@@ -147,11 +169,15 @@ def load_model():
 
 def predict(model, scaler, inputs):
     """Predict tensile strength and EFRF"""
-    inputs_scaled = scaler.transform([inputs])
-    X_tensor = torch.FloatTensor(inputs_scaled)
-    with torch.no_grad():
-        predictions = model(X_tensor).numpy()[0]
-    return predictions[0], predictions[1]
+    try:
+        inputs_scaled = scaler.transform([inputs])
+        X_tensor = torch.FloatTensor(inputs_scaled)
+        with torch.no_grad():
+            predictions = model(X_tensor).numpy()[0]
+        return predictions[0], predictions[1]
+    except Exception as e:
+        st.error(f"Prediction error: {e}")
+        return 0.0, 1.0
 
 
 # ================================================================
@@ -171,6 +197,7 @@ st.markdown("""
     .metric-card { background: #f8fafc; border-radius: 12px; padding: 1rem 1.5rem; text-align: center; border: 1px solid #e9edf2; }
     .constraint-pass { color: #16a34a; font-weight: 700; }
     .constraint-fail { color: #dc2626; font-weight: 700; }
+    .constraint-warning { color: #d97706; font-weight: 700; }
     .stButton > button { width: 100%; background: #2563eb; color: white; font-weight: 600; padding: 0.6rem; border-radius: 8px; border: none; }
     .stButton > button:hover { background: #1d4ed8; color: white; }
 </style>
@@ -191,120 +218,187 @@ with st.spinner("🔄 Loading AI model..."):
     model, scaler, feature_names = load_model()
 st.success("✅ Model loaded successfully!")
 
-# Inputs
-col_left, col_right = st.columns([1, 1.2])
+# ================================================================
+# TWO-COLUMN LAYOUT: Inputs | Results
+# ================================================================
+col_left, col_right = st.columns([1, 1.2], gap="medium")
 
 with col_left:
     st.markdown("### 📊 Formulation Parameters")
-    st.markdown("Adjust the parameters below to explore the design space.")
+    st.markdown("**IMPORTANT:** All components must sum to 100% for a valid formulation.")
     
     with st.container(border=True):
-        api = st.slider("🧪 API Loading (%)", 85.0, 95.0, 90.5, 0.1)
-        mcc = st.slider("📦 MCC (%)", 2.0, 8.0, 5.0, 0.1)
-        pvpp = st.slider("💊 PVPP (%)", 1.0, 5.0, 3.0, 0.1)
-        mgst = st.slider("🧴 Mg-St (%)", 0.2, 1.0, 0.6, 0.05)
-        binder = st.slider("🔗 Binder (%)", 0.5, 3.0, 1.5, 0.1)
-        pressure = st.slider("⚙️ Compaction Pressure (MPa)", 100.0, 250.0, 180.0, 5.0)
-        speed = st.slider("🔄 Punch Speed (rpm)", 10.0, 40.0, 25.0, 1.0)
+        api = st.slider("🧪 API Loading (%)", 85.0, 95.0, 90.5, 0.1,
+                        help="Active Pharmaceutical Ingredient (Paracetamol)")
+        
+        binder = st.slider("🔗 Binder (%)", 0.5, 3.0, 2.7, 0.1,
+                          help="Binder (e.g., Kollidon VA64)")
+        
+        pvpp = st.slider("💊 PVPP (%)", 1.0, 5.0, 3.0, 0.1,
+                        help="Superdisintegrant (Crospovidone)")
+        
+        mgst = st.slider("🧴 Mg-St (%)", 0.2, 1.0, 0.2, 0.05,
+                        help="Lubricant (Magnesium Stearate)")
+        
+        # Calculate remaining for MCC (max 8%)
+        total_others = binder + pvpp + mgst
+        remaining = 100 - api - total_others
+        max_mcc = min(remaining, 8.0)
+        
+        if remaining < 0:
+            st.error(f"❌ API + Binder + PVPP + Mg-St = {api + total_others:.1f}% > 100%! Please reduce API or other components.")
+            mcc = 0.0
+        else:
+            mcc = st.number_input(
+                "📦 MCC (%)", 
+                min_value=0.0, 
+                max_value=float(max_mcc),
+                value=float(min(max_mcc, 3.6)),
+                step=0.1,
+                format="%.1f",
+                help="Microcrystalline Cellulose - filler (remaining to 100%)"
+            )
+        
+        # Auto-fill MCC if needed
+        if st.button("🔧 Auto-fill MCC to 100%"):
+            total_components = api + binder + pvpp + mgst
+            if total_components <= 100:
+                auto_mcc = 100 - total_components
+                if auto_mcc <= 8.0:
+                    mcc = auto_mcc
+                else:
+                    st.warning(f"⚠️ Remaining filler ({auto_mcc:.1f}%) exceeds MCC limit (8%). Reduce API or other components.")
+        
+        # Process parameters
+        st.markdown("---")
+        pressure = st.slider("⚙️ Compaction Pressure (MPa)", 100.0, 250.0, 230.0, 5.0)
+        speed = st.slider("🔄 Punch Speed (rpm)", 10.0, 40.0, 12.0, 1.0)
         granule = st.slider("🔬 Granule Size (µm)", 50.0, 200.0, 125.0, 5.0)
+        
+        # Calculate and display total
+        total = api + binder + pvpp + mgst + mcc
+        st.metric("**Total Formulation**", f"{total:.1f}%", 
+                  delta="✅ Valid" if abs(total - 100) < 0.1 else "❌ Invalid")
     
     predict_btn = st.button("🔬 Predict & Optimize", use_container_width=True)
 
+# ================================================================
+# RESULTS PANEL
+# ================================================================
 with col_right:
     st.markdown("### 📈 Prediction Results")
     
     if predict_btn:
-        inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
-        
-        with st.spinner("🧠 Running prediction..."):
-            tensile, efrf = predict(model, scaler, inputs)
-        
-        # Metrics
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("💪 Tensile Strength", f"{tensile:.3f} MPa")
-            if tensile >= 2.0:
-                st.markdown('<span class="constraint-pass">✅ ≥ 2 MPa (PASS)</span>', unsafe_allow_html=True)
-            else:
-                st.markdown('<span class="constraint-fail">❌ < 2 MPa (FAIL)</span>', unsafe_allow_html=True)
-            st.markdown('</div>', unsafe_allow_html=True)
-        
-        with col2:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("⚠️ EFRF", f"{efrf:.4f}")
-            if efrf < 0.5:
-                st.markdown('<span class="constraint-pass">✅ < 0.5 (PASS)</span>', unsafe_allow_html=True)
-            else:
-                st.markdown('<span class="constraint-fail">❌ ≥ 0.5 (FAIL)</span>', unsafe_allow_html=True)
-            st.markdown('</div>', unsafe_allow_html=True)
-        
-        # Overall status
-        if tensile >= 2.0 and efrf < 0.5:
-            st.success("🎉 **Formulation satisfies all mechanical constraints!**")
-            st.balloons()
+        # Validate total
+        total = api + binder + pvpp + mgst + mcc
+        if abs(total - 100) > 0.1:
+            st.warning("⚠️ **Invalid formulation:** Components do not sum to 100%. Adjust your inputs and try again.")
         else:
-            st.warning("⚠️ **Formulation does NOT satisfy all constraints. Adjust parameters.**")
-        
-        # Pareto Front
-        st.markdown("### 📉 Pareto Front")
-        fig, ax = plt.subplots(figsize=(10, 5))
-        
-        # Generate Pareto front
-        api_range = np.linspace(85, 95, 50)
-        efrf_vals = []
-        for a in api_range:
-            test_inputs = [a, 5.0, 3.0, 0.6, 1.5, 180.0, 25.0, 125.0]
-            _, e = predict(model, scaler, test_inputs)
-            efrf_vals.append(e)
-        
-        ax.plot(api_range, efrf_vals, 'r-', linewidth=2.5, label='Pareto Front')
-        ax.axhline(y=0.5, color='k', linestyle='--', alpha=0.7, label='EFRF = 0.5')
-        ax.fill_between(api_range, 0, efrf_vals, where=(np.array(efrf_vals) < 0.5), 
-                        color='green', alpha=0.15)
-        ax.scatter([api], [efrf], color='blue', s=150, zorder=5, label='Your Formulation')
-        ax.scatter([90.5], [0.32], color='gold', s=200, marker='*', zorder=5, label='⭐ Optimal')
-        
-        ax.set_xlabel('API Loading (%)')
-        ax.set_ylabel('EFRF')
-        ax.set_title('Pareto Front')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        ax.set_ylim(0, 1.0)
-        ax.set_xlim(84, 96)
-        st.pyplot(fig)
-        
-        # Sensitivity
-        st.markdown("### 🔍 Sensitivity Analysis")
-        with st.expander("Click to view feature importance"):
-            base_inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
-            _, base_efrf = predict(model, scaler, base_inputs)
+            inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
             
-            features = ['API%', 'MCC%', 'PVPP%', 'Mg-St%', 'Binder%', 'Pressure', 'Speed', 'Granule']
-            sensitivities = []
+            with st.spinner("🧠 Running prediction..."):
+                tensile, efrf = predict(model, scaler, inputs)
             
-            for i in range(8):
-                test_inputs = base_inputs.copy()
-                test_inputs[i] += 0.05 * (base_inputs[i] + 0.1)
-                _, efrf_pos = predict(model, scaler, test_inputs)
+            # Metrics
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+                st.metric("💪 Tensile Strength", f"{tensile:.3f} MPa")
+                if tensile >= 2.0:
+                    st.markdown('<span class="constraint-pass">✅ ≥ 2 MPa (PASS)</span>', unsafe_allow_html=True)
+                else:
+                    st.markdown('<span class="constraint-fail">❌ < 2 MPa (FAIL)</span>', unsafe_allow_html=True)
+                st.markdown('</div>', unsafe_allow_html=True)
+            
+            with col2:
+                st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+                st.metric("⚠️ EFRF", f"{efrf:.4f}")
+                if efrf < 0.5:
+                    st.markdown('<span class="constraint-pass">✅ < 0.5 (PASS)</span>', unsafe_allow_html=True)
+                else:
+                    st.markdown('<span class="constraint-fail">❌ ≥ 0.5 (FAIL)</span>', unsafe_allow_html=True)
+                st.markdown('</div>', unsafe_allow_html=True)
+            
+            # Overall status
+            if tensile >= 2.0 and efrf < 0.5:
+                st.success("🎉 **Formulation satisfies all mechanical constraints!**")
+                st.balloons()
+            else:
+                st.warning("⚠️ **Formulation does NOT satisfy all constraints. Adjust parameters.**")
+            
+            # Formulation summary
+            st.markdown("### 📋 Formulation Summary")
+            summary_data = {
+                "Component": ["API", "MCC", "PVPP", "Mg-St", "Binder", "Total"],
+                "%": [f"{api:.1f}%", f"{mcc:.1f}%", f"{pvpp:.1f}%", f"{mgst:.2f}%", f"{binder:.1f}%", f"{total:.1f}%"]
+            }
+            st.dataframe(pd.DataFrame(summary_data), hide_index=True, use_container_width=True)
+            
+            # Pareto Front
+            st.markdown("### 📉 Pareto Front")
+            fig, ax = plt.subplots(figsize=(10, 5))
+            
+            # Generate Pareto front
+            api_range = np.linspace(85, 95, 50)
+            efrf_vals = []
+            for a in api_range:
+                # Adjust MCC to maintain 100%
+                total_others = binder + pvpp + mgst
+                mcc_fixed = 100 - a - total_others
+                if 0 <= mcc_fixed <= 8:
+                    test_inputs = [a, mcc_fixed, pvpp, mgst, binder, pressure, speed, granule]
+                    _, e = predict(model, scaler, test_inputs)
+                    efrf_vals.append(e)
+                else:
+                    efrf_vals.append(np.nan)
+            
+            ax.plot(api_range, efrf_vals, 'r-', linewidth=2.5, label='Pareto Front')
+            ax.axhline(y=0.5, color='k', linestyle='--', alpha=0.7, label='EFRF = 0.5')
+            ax.fill_between(api_range, 0, efrf_vals, where=(np.array(efrf_vals) < 0.5), 
+                            color='green', alpha=0.15)
+            ax.scatter([api], [efrf], color='blue', s=150, zorder=5, label='Your Formulation')
+            ax.scatter([90.5], [0.2], color='gold', s=200, marker='*', zorder=5, label='⭐ Target: 90.5%')
+            
+            ax.set_xlabel('API Loading (%)')
+            ax.set_ylabel('EFRF')
+            ax.set_title('Pareto Front (100% Formulation Constraint)')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            ax.set_ylim(0, 1.0)
+            ax.set_xlim(84, 96)
+            st.pyplot(fig)
+            
+            # Sensitivity
+            st.markdown("### 🔍 Sensitivity Analysis")
+            with st.expander("Click to view feature importance"):
+                base_inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
+                _, base_efrf = predict(model, scaler, base_inputs)
                 
-                test_inputs[i] = base_inputs[i] - 0.05 * (base_inputs[i] + 0.1)
-                _, efrf_neg = predict(model, scaler, test_inputs)
+                features = ['API%', 'MCC%', 'PVPP%', 'Mg-St%', 'Binder%', 'Pressure', 'Speed', 'Granule']
+                sensitivities = []
                 
-                sensitivities.append(max(abs(efrf_pos - base_efrf), abs(efrf_neg - base_efrf)))
-            
-            sorted_idx = np.argsort(sensitivities)[::-1]
-            
-            fig2, ax2 = plt.subplots(figsize=(10, 5))
-            ax2.barh([features[i] for i in sorted_idx], [sensitivities[i] for i in sorted_idx])
-            ax2.set_xlabel('Sensitivity (ΔEFRF)')
-            ax2.set_title('Feature Impact on EFRF')
-            ax2.grid(True, alpha=0.3, axis='x')
-            st.pyplot(fig2)
+                for i in range(8):
+                    test_inputs = base_inputs.copy()
+                    test_inputs[i] += 0.05 * (base_inputs[i] + 0.1)
+                    _, efrf_pos = predict(model, scaler, test_inputs)
+                    
+                    test_inputs[i] = base_inputs[i] - 0.05 * (base_inputs[i] + 0.1)
+                    _, efrf_neg = predict(model, scaler, test_inputs)
+                    
+                    sensitivities.append(max(abs(efrf_pos - base_efrf), abs(efrf_neg - base_efrf)))
+                
+                sorted_idx = np.argsort(sensitivities)[::-1]
+                
+                fig2, ax2 = plt.subplots(figsize=(10, 5))
+                ax2.barh([features[i] for i in sorted_idx], [sensitivities[i] for i in sorted_idx])
+                ax2.set_xlabel('Sensitivity (ΔEFRF)')
+                ax2.set_title('Feature Impact on EFRF')
+                ax2.grid(True, alpha=0.3, axis='x')
+                st.pyplot(fig2)
     
     else:
-        st.info("👆 Adjust parameters and click **'Predict & Optimize'**")
+        st.info("👆 Adjust parameters to 100% total and click **'Predict & Optimize'**")
 
 # Footer
 st.markdown("---")
@@ -317,6 +411,9 @@ with st.sidebar:
     st.markdown("""
     This tool implements a **Physics-Informed Neural Network (PINN)** 
     coupled with **NSGA-II** multi-objective optimization.
+    
+    **Important:** All formulation components (API + MCC + PVPP + Mg-St + Binder) 
+    must sum to **100%**.
     
     **Constraints:**
     - 💪 σₜ ≥ 2 MPa
