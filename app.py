@@ -766,7 +766,7 @@ def plot_sensitivity_matplotlib(features, sensitivities):
 
 st.set_page_config(
     page_title="Hybrid AI Framework",
-    page_icon="🧬",
+    page_icon="🧬" "🧠",
     layout="wide"
 )
 
@@ -811,13 +811,13 @@ st.markdown("""
 st.markdown("""
 <div style="text-align: center; padding: 1rem 0;">
     <span class="hybrid-signal">🧠</span>
-    <span class="hybrid-signal-plus">+</span>
+    <span class="hybrid-signal-plus">&</span>
     <span class="hybrid-signal">🧬</span>
 </div>
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="main-header">', unsafe_allow_html=True)
-st.title("🧬 Hybrid AI Framework for Tablet Optimisation")
+st.title("🧬 Hybrid AI Framework for Tablet Optimisation 🧠")
 st.markdown("### Physics-Informed Neural Network (PINN) coupled with NSGA-II Multi-Objective Optimisation")
 st.caption("A/Kareem & Babuker A. · Postgraduate College, Nile Valley University, Atbara, Sudan")
 st.markdown('</div>', unsafe_allow_html=True)
