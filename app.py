@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 2.2 (3D Pareto Surface Added)
+Version: 2.3 (3D Pareto Fixed)
 """
 
 import streamlit as st
@@ -413,7 +413,7 @@ class NSGAII:
 # ================================================================
 
 def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule, 
-                      tensile, efrf, total, status, timestamp, best_solutions_df=None):
+                      tensile, efrf, total, status, timestamp):
     """Generate a professional PDF report with formulation and results."""
     
     pdf = FPDF()
@@ -590,7 +590,7 @@ def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
 
 
 # ================================================================
-# 5. 3D PARETO SURFACE VISUALIZATION
+# 5. 3D PARETO SURFACE VISUALIZATION (FIXED)
 # ================================================================
 
 def create_3d_pareto_surface(objectives, constraints, fronts, nsga, best_solution=None):
@@ -616,7 +616,7 @@ def create_3d_pareto_surface(objectives, constraints, fronts, nsga, best_solutio
             size=3,
             color='#d1d5db',
             opacity=0.5,
-            symbol='circle'
+            symbol='circle'   # valid
         ),
         name='All Solutions',
         hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<br>Tensile: %{z:.3f} MPa<extra></extra>'
@@ -662,7 +662,7 @@ def create_3d_pareto_surface(objectives, constraints, fronts, nsga, best_solutio
             hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<br>Tensile: %{z:.3f} MPa<extra></extra>'
         ))
         
-        # 3. Feasible solutions (satisfying constraints) - green stars
+        # 3. Feasible solutions (satisfying constraints) - using 'diamond' instead of 'star'
         feasible = constraints[front0]
         feasible_indices = [i for i, f in enumerate(feasible) if f]
         if feasible_indices:
@@ -678,7 +678,7 @@ def create_3d_pareto_surface(objectives, constraints, fronts, nsga, best_solutio
                 marker=dict(
                     size=10,
                     color='#28a745',
-                    symbol='star',
+                    symbol='diamond',   # FIXED: valid symbol
                     line=dict(color='white', width=1)
                 ),
                 name=f'Feasible Solutions ({len(feasible_indices)})',
@@ -922,7 +922,6 @@ with col_right:
             # 2. SMART DIGITAL TWIN ALERTS (DYNAMIC)
             # ================================================================
             if tensile >= 2.0 and efrf < 0.5:
-                # ✅ SAFE ZONE - All constraints satisfied
                 st.success(f"""
                 🎉 **Formulation satisfies all mechanical constraints!**
                 
@@ -934,7 +933,6 @@ with col_right:
                 """)
                 
             elif tensile < 2.0 and efrf >= 0.5:
-                # 🚨 CRITICAL ZONE - Both constraints violated
                 st.error(f"""
                 🚨 **CRITICAL FAILURE: Formulation Infeasible!**
                 
@@ -948,7 +946,6 @@ with col_right:
                 """)
                 
             elif tensile < 2.0:
-                # ⚠️ WARNING - Tensile Strength too low
                 st.warning(f"""
                 ⚠️ **WARNING: Insufficient Mechanical Strength!**
                 
@@ -962,7 +959,6 @@ with col_right:
                 """)
                 
             elif efrf >= 0.5:
-                # 🚨 ALERT - High capping risk
                 st.error(f"""
                 🚨 **RISK DETECTED: High Elastic Decompression Strain!**
                 
@@ -975,7 +971,6 @@ with col_right:
                 - Decrease lubricant (Mg-St) to improve cohesion
                 """)
             else:
-                # Fallback (should never happen)
                 st.info("⚠️ Please check your formulation parameters.")
             
             # ================================================================
@@ -1004,7 +999,6 @@ with col_right:
                     feasible_indices = [i for i, f in enumerate(feasible) if f]
                     
                     if len(feasible_indices) > 0:
-                        # There is at least one feasible solution
                         feasible_api_values = [pareto_api[i] for i in feasible_indices]
                         best_idx_local = int(np.argmax(feasible_api_values))
                         best_idx = feasible_indices[best_idx_local]
@@ -1019,10 +1013,8 @@ with col_right:
                             f"σt = {best_tensile:.3f} MPa | "
                             f"Feasible solutions: {len(feasible_indices)}"
                         )
-                        # Store best solution for 3D plot
                         best_solution = (best_api, best_efrf, best_tensile)
                     else:
-                        # No feasible solutions found
                         best_idx = int(np.argmin(pareto_efrf))
                         best_api = float(pareto_api[best_idx])
                         best_efrf = float(pareto_efrf[best_idx])
@@ -1246,7 +1238,7 @@ with col_right:
             plt.close()
             
             # ================================================================
-            # 7. 3D PARETO SURFACE (PLOTLY)
+            # 7. 3D PARETO SURFACE (PLOTLY) - FIXED
             # ================================================================
             st.markdown("### 🌐 3D Pareto Surface")
             
