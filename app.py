@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 2.9 (Fully Fixed Interactive Plots)
+Version: 3.0 (Fully Stable - Plotly with Fallback)
 """
 
 import streamlit as st
@@ -24,9 +24,16 @@ from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 from fpdf import FPDF
 import datetime
 import warnings
-import plotly.graph_objects as go
-import plotly.express as px
 warnings.filterwarnings('ignore')
+
+# Try to import plotly, with fallback to matplotlib if fails
+try:
+    import plotly.graph_objects as go
+    import plotly.express as px
+    PLOTLY_AVAILABLE = True
+except ImportError:
+    PLOTLY_AVAILABLE = False
+    st.warning("⚠️ Plotly not available. Using Matplotlib for visualizations.")
 
 # ================================================================
 # 1. PINN MODEL DEFINITION
@@ -700,7 +707,61 @@ def train_and_evaluate_baselines(X_train, X_test, y_train, y_test):
 
 
 # ================================================================
-# 8. STREAMLIT UI
+# 8. PLOTLY FALLBACK FUNCTIONS
+# ================================================================
+
+def plot_pareto_matplotlib(pareto_api, pareto_efrf, api, efrf):
+    """Fallback Pareto front plot using matplotlib"""
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    ax.scatter(pareto_api, pareto_efrf, c='red', s=50, alpha=0.7, label='Pareto Front')
+    
+    # Sort for line
+    sorted_idx = np.argsort(pareto_api)
+    ax.plot(np.array(pareto_api)[sorted_idx], np.array(pareto_efrf)[sorted_idx], 
+            'r-', linewidth=2, alpha=0.7)
+    
+    ax.axhline(y=0.5, color='k', linestyle='--', alpha=0.7, label='EFRF = 0.5 (Limit)')
+    ax.scatter([api], [efrf], c='blue', s=100, marker='D', edgecolors='white', 
+               label='Your Formulation')
+    ax.scatter([90.5], [0.25], c='gold', s=150, marker='*', edgecolors='orange',
+               label='⭐ Target: 90.5%')
+    
+    ax.set_xlabel('API Loading (%)')
+    ax.set_ylabel('Capping Risk (EFRF)')
+    ax.set_title('Pareto Front (Matplotlib)')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim(84, 96)
+    ax.set_ylim(0, 1.0)
+    
+    return fig
+
+
+def plot_sensitivity_matplotlib(features, sensitivities):
+    """Fallback sensitivity plot using matplotlib"""
+    fig, ax = plt.subplots(figsize=(10, 5))
+    
+    sorted_idx = np.argsort(sensitivities)[::-1]
+    sorted_names = [features[i] for i in sorted_idx]
+    sorted_values = [sensitivities[i] for i in sorted_idx]
+    
+    colors = ['#e74c3c' if v > np.mean(sensitivities) else '#2ecc71' for v in sorted_values]
+    
+    ax.barh(sorted_names, sorted_values, color=colors)
+    ax.axvline(x=np.mean(sensitivities), color='gray', linestyle='--', 
+               label=f'Average: {np.mean(sensitivities):.4f}')
+    
+    ax.set_xlabel('Sensitivity (ΔEFRF)')
+    ax.set_title('Feature Sensitivity Analysis')
+    ax.grid(True, alpha=0.3, axis='x')
+    ax.legend()
+    
+    return fig
+
+
+# ================================================================
+# 9. STREAMLIT UI
 # ================================================================
 
 st.set_page_config(
@@ -708,6 +769,13 @@ st.set_page_config(
     page_icon="🧬",
     layout="wide"
 )
+
+# Add cache-control headers
+st.markdown("""
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="0" />
+""", unsafe_allow_html=True)
 
 # Custom CSS
 st.markdown("""
@@ -832,7 +900,7 @@ with col_left:
     predict_btn = st.button("🔬 Predict & Optimise", use_container_width=True)
 
 # ================================================================
-# RESULTS PANEL (WITH SMART DIGITAL TWIN ALERTS)
+# RESULTS PANEL
 # ================================================================
 with col_right:
     st.markdown("### 📈 Predictive Results & Mechanical Assessment")
@@ -934,7 +1002,7 @@ with col_right:
                     pareto_api = -objectives[front0, 0]
                     pareto_efrf = objectives[front0, 1]
                     
-                    # Find feasible solutions (those satisfying constraints)
+                    # Find feasible solutions
                     feasible = constraints[front0]
                     feasible_indices = [i for i, f in enumerate(feasible) if f]
                     
@@ -970,7 +1038,7 @@ with col_right:
                     best_solution = None
             
             # ================================================================
-            # 4. INTERACTIVE PARETO FRONT (PLOTLY - FIXED)
+            # 4. PARETO FRONT PLOT (Plotly with Fallback to Matplotlib)
             # ================================================================
             st.markdown("### 📉 Interactive Pareto Front")
             
@@ -978,99 +1046,100 @@ with col_right:
                 front0 = fronts[0]
                 pareto_api = -objectives[front0, 0]
                 pareto_efrf = objectives[front0, 1]
-                pareto_tensile = nsga.tensile[front0]
                 
-                # Create DataFrame
-                plot_df = pd.DataFrame({
-                    'API Loading (%)': pareto_api,
-                    'Capping Risk (EFRF)': pareto_efrf,
-                    'Tensile Strength (MPa)': pareto_tensile
-                }).dropna().sort_values(by='API Loading (%)')
-                
-                if not plot_df.empty:
-                    fig_p = go.Figure()
-                    
-                    # Pareto points
-                    fig_p.add_trace(go.Scatter(
-                        x=plot_df['API Loading (%)'],
-                        y=plot_df['Capping Risk (EFRF)'],
-                        mode='markers',
-                        marker=dict(
-                            size=10,
-                            color=plot_df['Tensile Strength (MPa)'],
-                            colorscale='Viridis',
-                            showscale=True,
-                            colorbar=dict(title="Tensile Strength (MPa)"),
-                            line=dict(color='white', width=1)
-                        ),
-                        text=plot_df['Tensile Strength (MPa)'],
-                        hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<br>Tensile: %{text:.3f} MPa<extra></extra>',
-                        name='Pareto Solutions'
-                    ))
-                    
-                    # Pareto line
-                    fig_p.add_trace(go.Scatter(
-                        x=plot_df['API Loading (%)'],
-                        y=plot_df['Capping Risk (EFRF)'],
-                        mode='lines',
-                        line=dict(color='#dc3545', width=2),
-                        name='Pareto Front',
-                        hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
-                    ))
-                    
-                    # Critical limit
-                    fig_p.add_hline(y=0.5, line_dash="dash", line_color="#e74c3c", 
-                                   annotation_text="EFRF = 0.5 (Limit)", 
-                                   annotation_position="top right")
-                    
-                    # Your formulation
-                    if 'api' in locals() and 'efrf' in locals():
-                        fig_p.add_trace(go.Scatter(
-                            x=[api], y=[efrf],
-                            mode='markers+text',
-                            marker=dict(
-                                color='#007bff', size=16, symbol='diamond',
-                                line=dict(color='white', width=2)
-                            ),
-                            text=[f"Your<br>({api:.1f}%, {efrf:.4f})"],
-                            textposition="top center",
-                            name='Your Formulation',
-                            hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
-                        ))
-                    
-                    # Target (90.5%)
-                    target_api = 90.5
+                if PLOTLY_AVAILABLE:
                     try:
-                        target_efrf = float(np.interp(target_api, plot_df['API Loading (%)'].values, plot_df['Capping Risk (EFRF)'].values))
-                    except:
-                        target_efrf = 0.25
-                    
-                    fig_p.add_trace(go.Scatter(
-                        x=[target_api], y=[target_efrf],
-                        mode='markers+text',
-                        marker=dict(
-                            color='#ffc107', size=18, symbol='star',
-                            line=dict(color='#ff6b00', width=2)
-                        ),
-                        text=[f"⭐ Target<br>90.5% API"],
-                        textposition="bottom center",
-                        name='Target (90.5%)',
-                        hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
-                    ))
-                    
-                    fig_p.update_layout(
-                        title=dict(text="Multi-Objective Pareto Front (PINN + NSGA-II)", font=dict(size=18)),
-                        xaxis=dict(title='API Loading (%)', range=[84, 96], gridcolor='lightgray'),
-                        yaxis=dict(title='Capping Risk (EFRF)', range=[0, 1.0], gridcolor='lightgray'),
-                        hovermode='closest',
-                        legend=dict(x=0.02, y=0.98, bgcolor='rgba(255,255,255,0.85)', bordercolor='black', borderwidth=1),
-                        height=550,
-                        plot_bgcolor='white'
-                    )
-                    
-                    st.plotly_chart(fig_p, use_container_width=True)
+                        pareto_tensile = nsga.tensile[front0]
+                        plot_df = pd.DataFrame({
+                            'API Loading (%)': pareto_api,
+                            'Capping Risk (EFRF)': pareto_efrf,
+                            'Tensile Strength (MPa)': pareto_tensile
+                        }).dropna().sort_values(by='API Loading (%)')
+                        
+                        if not plot_df.empty:
+                            fig_p = go.Figure()
+                            
+                            # Pareto points
+                            fig_p.add_trace(go.Scatter(
+                                x=plot_df['API Loading (%)'],
+                                y=plot_df['Capping Risk (EFRF)'],
+                                mode='markers',
+                                marker=dict(
+                                    size=10,
+                                    color=plot_df['Tensile Strength (MPa)'],
+                                    colorscale='Viridis',
+                                    showscale=True,
+                                    colorbar=dict(title="Tensile Strength (MPa)"),
+                                    line=dict(color='white', width=1)
+                                ),
+                                text=plot_df['Tensile Strength (MPa)'],
+                                hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<br>Tensile: %{text:.3f} MPa<extra></extra>',
+                                name='Pareto Solutions'
+                            ))
+                            
+                            # Pareto line
+                            fig_p.add_trace(go.Scatter(
+                                x=plot_df['API Loading (%)'],
+                                y=plot_df['Capping Risk (EFRF)'],
+                                mode='lines',
+                                line=dict(color='#dc3545', width=2),
+                                name='Pareto Front'
+                            ))
+                            
+                            # Critical limit
+                            fig_p.add_hline(y=0.5, line_dash="dash", line_color="#e74c3c", 
+                                           annotation_text="EFRF = 0.5 (Limit)", 
+                                           annotation_position="top right")
+                            
+                            # Your formulation
+                            if 'api' in locals() and 'efrf' in locals():
+                                fig_p.add_trace(go.Scatter(
+                                    x=[api], y=[efrf],
+                                    mode='markers+text',
+                                    marker=dict(color='#007bff', size=16, symbol='diamond', line=dict(color='white', width=2)),
+                                    text=[f"Your<br>({api:.1f}%, {efrf:.4f})"],
+                                    textposition="top center",
+                                    name='Your Formulation'
+                                ))
+                            
+                            # Target (90.5%)
+                            target_api = 90.5
+                            try:
+                                target_efrf = float(np.interp(target_api, plot_df['API Loading (%)'].values, plot_df['Capping Risk (EFRF)'].values))
+                            except:
+                                target_efrf = 0.25
+                            
+                            fig_p.add_trace(go.Scatter(
+                                x=[target_api], y=[target_efrf],
+                                mode='markers+text',
+                                marker=dict(color='#ffc107', size=18, symbol='star', line=dict(color='#ff6b00', width=2)),
+                                text=[f"⭐ Target<br>90.5% API"],
+                                textposition="bottom center",
+                                name='Target (90.5%)'
+                            ))
+                            
+                            fig_p.update_layout(
+                                title=dict(text="Multi-Objective Pareto Front (PINN + NSGA-II)", font=dict(size=18)),
+                                xaxis=dict(title='API Loading (%)', range=[84, 96], gridcolor='lightgray'),
+                                yaxis=dict(title='Capping Risk (EFRF)', range=[0, 1.0], gridcolor='lightgray'),
+                                hovermode='closest',
+                                legend=dict(x=0.02, y=0.98, bgcolor='rgba(255,255,255,0.85)', bordercolor='black', borderwidth=1),
+                                height=550,
+                                plot_bgcolor='white'
+                            )
+                            
+                            st.plotly_chart(fig_p, use_container_width=True)
+                        else:
+                            st.warning("⚠️ No Pareto data available. Using Matplotlib fallback.")
+                            fig = plot_pareto_matplotlib(pareto_api, pareto_efrf, api, efrf)
+                            st.pyplot(fig)
+                    except Exception as e:
+                        st.warning(f"⚠️ Plotly error: {e}. Using Matplotlib fallback.")
+                        fig = plot_pareto_matplotlib(pareto_api, pareto_efrf, api, efrf)
+                        st.pyplot(fig)
                 else:
-                    st.warning("⚠️ No Pareto data available.")
+                    fig = plot_pareto_matplotlib(pareto_api, pareto_efrf, api, efrf)
+                    st.pyplot(fig)
             else:
                 st.warning("⚠️ No Pareto front found.")
             
@@ -1097,7 +1166,7 @@ with col_right:
                 st.dataframe(best_df.style.highlight_max(color='lightgreen', subset=['API (%)']), use_container_width=True)
             
             # ================================================================
-            # 6. INTERACTIVE SENSITIVITY ANALYSIS (PLOTLY - FIXED)
+            # 6. SENSITIVITY ANALYSIS (Plotly with Fallback to Matplotlib)
             # ================================================================
             st.markdown("### 🔍 Interactive Sensitivity Analysis")
             
@@ -1118,94 +1187,66 @@ with col_right:
                 
                 sensitivities.append(max(abs(efrf_pos - base_efrf), abs(efrf_neg - base_efrf)))
             
-            # Sort for tornado plot
-            sorted_idx = np.argsort(sensitivities)[::-1]
-            sorted_names = [features[i] for i in sorted_idx]
-            sorted_values = [sensitivities[i] for i in sorted_idx]
-            
-            # Create interactive tornado plot using Plotly
-            fig_tornado = go.Figure()
-            
-            # Color mapping: red for highest, green for lowest
-            colors = ['#e74c3c' if v > np.mean(sensitivities) else '#2ecc71' for v in sorted_values]
-            
-            fig_tornado.add_trace(go.Bar(
-                y=sorted_names,
-                x=sorted_values,
-                orientation='h',
-                marker=dict(
-                    color=colors,
-                    line=dict(color='white', width=0.5)
-                ),
-                text=[f"{v:.4f}" for v in sorted_values],
-                textposition='outside',
-                textfont=dict(size=11, color='black', family='Arial'),
-                hovertemplate='<b>%{y}</b><br>Sensitivity: %{x:.4f}<extra></extra>'
-            ))
-            
-            # Add average line
-            avg_sens = np.mean(sorted_values) if sorted_values else 0
-            fig_tornado.add_vline(
-                x=avg_sens,
-                line_dash="dash",
-                line_color="#e74c3c",
-                line_width=2,
-                annotation_text=f"Average: {avg_sens:.4f}",
-                annotation_position="top right"
-            )
-            
-            # Update layout
-            fig_tornado.update_layout(
-                title=dict(
-                    text="Feature Sensitivity Analysis — Impact on Capping Risk (EFRF)",
-                    font=dict(size=18, color='#2c3e50')
-                ),
-                xaxis=dict(
-                    title='Sensitivity (ΔEFRF)',
-                    gridcolor='lightgray',
-                    title_font=dict(size=14)
-                ),
-                yaxis=dict(
-                    title='Parameters',
-                    gridcolor='lightgray',
-                    title_font=dict(size=14),
-                    categoryorder='array',
-                    categoryarray=sorted_names
-                ),
-                height=450,
-                margin=dict(l=100, r=80, b=50, t=60),
-                plot_bgcolor='white',
-                hovermode='y unified'
-            )
-            
-            # Add annotation for most influential feature
-            if sorted_values:
-                max_idx = np.argmax(sensitivities)
-                max_feature = features[max_idx]
-                max_sens = sensitivities[max_idx]
-                fig_tornado.add_annotation(
-                    x=0.02,
-                    y=1.08,
-                    xref="paper",
-                    yref="paper",
-                    text=f"💡 Most influential: {max_feature} (ΔEFRF = {max_sens:.4f})",
-                    showarrow=False,
-                    font=dict(size=12, color='#dc3545', family='Arial')
-                )
-            
-            st.plotly_chart(fig_tornado, use_container_width=True)
+            if PLOTLY_AVAILABLE:
+                try:
+                    sorted_idx = np.argsort(sensitivities)[::-1]
+                    sorted_names = [features[i] for i in sorted_idx]
+                    sorted_values = [sensitivities[i] for i in sorted_idx]
+                    
+                    colors = ['#e74c3c' if v > np.mean(sensitivities) else '#2ecc71' for v in sorted_values]
+                    
+                    fig_tornado = go.Figure()
+                    fig_tornado.add_trace(go.Bar(
+                        y=sorted_names,
+                        x=sorted_values,
+                        orientation='h',
+                        marker=dict(color=colors, line=dict(color='white', width=0.5)),
+                        text=[f"{v:.4f}" for v in sorted_values],
+                        textposition='outside',
+                        textfont=dict(size=11, color='black'),
+                        hovertemplate='<b>%{y}</b><br>Sensitivity: %{x:.4f}<extra></extra>'
+                    ))
+                    
+                    avg_sens = np.mean(sorted_values) if sorted_values else 0
+                    fig_tornado.add_vline(x=avg_sens, line_dash="dash", line_color="#e74c3c", line_width=2,
+                                         annotation_text=f"Avg: {avg_sens:.4f}", annotation_position="top right")
+                    
+                    fig_tornado.update_layout(
+                        title=dict(text="Feature Sensitivity Analysis — Impact on Capping Risk (EFRF)", font=dict(size=18)),
+                        xaxis=dict(title='Sensitivity (ΔEFRF)', gridcolor='lightgray'),
+                        yaxis=dict(title='Parameters', gridcolor='lightgray', categoryorder='array', categoryarray=sorted_names),
+                        height=450,
+                        margin=dict(l=100, r=80, b=50, t=60),
+                        plot_bgcolor='white',
+                        hovermode='y unified'
+                    )
+                    
+                    if sorted_values:
+                        max_idx = np.argmax(sensitivities)
+                        fig_tornado.add_annotation(
+                            x=0.02, y=1.08, xref="paper", yref="paper",
+                            text=f"💡 Most influential: {features[max_idx]} (ΔEFRF = {sensitivities[max_idx]:.4f})",
+                            showarrow=False,
+                            font=dict(size=12, color='#dc3545')
+                        )
+                    
+                    st.plotly_chart(fig_tornado, use_container_width=True)
+                except Exception as e:
+                    st.warning(f"⚠️ Plotly error: {e}. Using Matplotlib fallback.")
+                    fig = plot_sensitivity_matplotlib(features, sensitivities)
+                    st.pyplot(fig)
+            else:
+                fig = plot_sensitivity_matplotlib(features, sensitivities)
+                st.pyplot(fig)
             
             # ================================================================
-            # 7. MODEL PERFORMANCE COMPARISON (WITH CHARTS - 4 COLORS)
+            # 7. MODEL PERFORMANCE COMPARISON
             # ================================================================
             st.markdown("### 📊 Model Performance Comparison")
             
-            # Train baselines and get results
             with st.spinner("Training baseline models..."):
-                # Train baseline models
                 baseline_df = train_and_evaluate_baselines(X_train, X_test, y_train, y_test)
                 
-                # Compute PINN performance on test set
                 X_test_scaled = scaler.transform(X_test)
                 X_test_tensor = torch.FloatTensor(X_test_scaled)
                 with torch.no_grad():
@@ -1216,7 +1257,6 @@ with col_right:
                 rmse_pinn = np.sqrt(mean_squared_error(y_test, y_pred_pinn_tensile))
                 mae_pinn = mean_absolute_error(y_test, y_pred_pinn_tensile)
                 
-                # Create results DataFrame
                 pinn_result = {
                     'Model': 'PINN (Proposed)',
                     'R²': r2_pinn,
@@ -1225,11 +1265,9 @@ with col_right:
                     'Physics Consistency': '✅ Enforced'
                 }
                 
-                # Combine
                 all_results = [pinn_result] + baseline_df.to_dict('records')
                 df_results = pd.DataFrame(all_results)
                 
-                # Display table
                 st.dataframe(
                     df_results.style.highlight_max(subset=['R²'], color='lightgreen')
                                .highlight_min(subset=['RMSE', 'MAE'], color='lightcoral'),
@@ -1237,20 +1275,14 @@ with col_right:
                     hide_index=True
                 )
                 
-                # ============================================================
-                # Create Comparison Charts with 4 distinct colors
-                # ============================================================
                 st.markdown("#### 📈 Visual Comparison")
                 
-                # Define 4 distinct colors for 4 models
                 colors = ['#2ecc71', '#3498db', '#f39c12', '#9b59b6']
-                
                 fig_charts, axes = plt.subplots(1, 3, figsize=(15, 5))
                 plt.style.use('seaborn-v0_8-darkgrid')
                 
                 models = df_results['Model'].tolist()
                 
-                # R² Chart
                 axes[0].bar(models, df_results['R²'], color=colors)
                 axes[0].set_ylim(0, 1)
                 axes[0].set_title('R² Score (Higher is Better)', fontsize=12)
@@ -1259,7 +1291,6 @@ with col_right:
                 for i, v in enumerate(df_results['R²']):
                     axes[0].text(i, v + 0.02, f'{v:.2f}', ha='center', fontweight='bold')
                 
-                # RMSE Chart
                 axes[1].bar(models, df_results['RMSE'], color=colors)
                 axes[1].set_title('RMSE (Lower is Better)', fontsize=12)
                 axes[1].set_ylabel('RMSE (MPa)')
@@ -1267,7 +1298,6 @@ with col_right:
                 for i, v in enumerate(df_results['RMSE']):
                     axes[1].text(i, v + 0.02, f'{v:.2f}', ha='center', fontweight='bold')
                 
-                # MAE Chart
                 axes[2].bar(models, df_results['MAE'], color=colors)
                 axes[2].set_title('MAE (Lower is Better)', fontsize=12)
                 axes[2].set_ylabel('MAE (MPa)')
