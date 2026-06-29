@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 2.8 (Interactive Plotly + True Physics Loss)
+Version: 2.9 (Fully Fixed Interactive Plots)
 """
 
 import streamlit as st
@@ -24,8 +24,8 @@ from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 from fpdf import FPDF
 import datetime
 import warnings
-import plotly.express as px
 import plotly.graph_objects as go
+import plotly.express as px
 warnings.filterwarnings('ignore')
 
 # ================================================================
@@ -970,7 +970,7 @@ with col_right:
                     best_solution = None
             
             # ================================================================
-            # 4. INTERACTIVE PARETO FRONT (PLOTLY)
+            # 4. INTERACTIVE PARETO FRONT (PLOTLY - FIXED)
             # ================================================================
             st.markdown("### 📉 Interactive Pareto Front")
             
@@ -985,44 +985,94 @@ with col_right:
                     'API Loading (%)': pareto_api,
                     'Capping Risk (EFRF)': pareto_efrf,
                     'Tensile Strength (MPa)': pareto_tensile
-                }).sort_values(by='API Loading (%)')
+                }).dropna().sort_values(by='API Loading (%)')
                 
-                # Pareto scatter plot
-                fig_p = px.scatter(
-                    plot_df, x='API Loading (%)', y='Capping Risk (EFRF)',
-                    color='Tensile Strength (MPa)', color_continuous_scale='Viridis',
-                    labels={'Capping Risk (EFRF)': 'Elastic Failure Risk (EFRF)'},
-                    title="Multi-Objective Pareto Front (PINN + NSGA-II)"
-                )
-                fig_p.update_traces(marker=dict(size=10, edgecolor='white', linewidth=1))
-                
-                # Critical limit line
-                fig_p.add_hline(y=0.5, line_dash="dash", line_color="#e74c3c", annotation_text="Critical Limit (EFRF = 0.5)")
-                
-                # Your formulation
-                if 'api' in locals() and 'efrf' in locals():
+                if not plot_df.empty:
+                    fig_p = go.Figure()
+                    
+                    # Pareto points
                     fig_p.add_trace(go.Scatter(
-                        x=[api], y=[efrf], mode='markers+text',
-                        marker=dict(color='#007bff', size=15, symbol='diamond', line=dict(color='white', width=2)),
-                        name='Your Current Formulation',
-                        text=[f"Current ({api:.1f}%)"], textposition="top center"
+                        x=plot_df['API Loading (%)'],
+                        y=plot_df['Capping Risk (EFRF)'],
+                        mode='markers',
+                        marker=dict(
+                            size=10,
+                            color=plot_df['Tensile Strength (MPa)'],
+                            colorscale='Viridis',
+                            showscale=True,
+                            colorbar=dict(title="Tensile Strength (MPa)"),
+                            line=dict(color='white', width=1)
+                        ),
+                        text=plot_df['Tensile Strength (MPa)'],
+                        hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<br>Tensile: %{text:.3f} MPa<extra></extra>',
+                        name='Pareto Solutions'
                     ))
-                
-                # Target point (90.5%)
-                # Find EFRF at 90.5% from Pareto front (interpolate)
-                target_api = 90.5
-                if len(pareto_api) > 1:
-                    target_efrf = np.interp(target_api, plot_df['API Loading (%)'], plot_df['Capping Risk (EFRF)'])
+                    
+                    # Pareto line
+                    fig_p.add_trace(go.Scatter(
+                        x=plot_df['API Loading (%)'],
+                        y=plot_df['Capping Risk (EFRF)'],
+                        mode='lines',
+                        line=dict(color='#dc3545', width=2),
+                        name='Pareto Front',
+                        hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
+                    ))
+                    
+                    # Critical limit
+                    fig_p.add_hline(y=0.5, line_dash="dash", line_color="#e74c3c", 
+                                   annotation_text="EFRF = 0.5 (Limit)", 
+                                   annotation_position="top right")
+                    
+                    # Your formulation
+                    if 'api' in locals() and 'efrf' in locals():
+                        fig_p.add_trace(go.Scatter(
+                            x=[api], y=[efrf],
+                            mode='markers+text',
+                            marker=dict(
+                                color='#007bff', size=16, symbol='diamond',
+                                line=dict(color='white', width=2)
+                            ),
+                            text=[f"Your<br>({api:.1f}%, {efrf:.4f})"],
+                            textposition="top center",
+                            name='Your Formulation',
+                            hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
+                        ))
+                    
+                    # Target (90.5%)
+                    target_api = 90.5
+                    try:
+                        target_efrf = float(np.interp(target_api, plot_df['API Loading (%)'].values, plot_df['Capping Risk (EFRF)'].values))
+                    except:
+                        target_efrf = 0.25
+                    
+                    fig_p.add_trace(go.Scatter(
+                        x=[target_api], y=[target_efrf],
+                        mode='markers+text',
+                        marker=dict(
+                            color='#ffc107', size=18, symbol='star',
+                            line=dict(color='#ff6b00', width=2)
+                        ),
+                        text=[f"⭐ Target<br>90.5% API"],
+                        textposition="bottom center",
+                        name='Target (90.5%)',
+                        hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
+                    ))
+                    
+                    fig_p.update_layout(
+                        title=dict(text="Multi-Objective Pareto Front (PINN + NSGA-II)", font=dict(size=18)),
+                        xaxis=dict(title='API Loading (%)', range=[84, 96], gridcolor='lightgray'),
+                        yaxis=dict(title='Capping Risk (EFRF)', range=[0, 1.0], gridcolor='lightgray'),
+                        hovermode='closest',
+                        legend=dict(x=0.02, y=0.98, bgcolor='rgba(255,255,255,0.85)', bordercolor='black', borderwidth=1),
+                        height=550,
+                        plot_bgcolor='white'
+                    )
+                    
+                    st.plotly_chart(fig_p, use_container_width=True)
                 else:
-                    target_efrf = 0.25  # fallback
-                fig_p.add_trace(go.Scatter(
-                    x=[target_api], y=[target_efrf], mode='markers+text',
-                    marker=dict(color='#ffc107', size=16, symbol='star', line=dict(color='#ff6b00', width=2)),
-                    name='⭐ Target Optimal (90.5%)',
-                    text=["Target Point"], textposition="bottom center"
-                ))
-                
-                st.plotly_chart(fig_p, use_container_width=True)
+                    st.warning("⚠️ No Pareto data available.")
+            else:
+                st.warning("⚠️ No Pareto front found.")
             
             # ================================================================
             # 5. BEST SOLUTIONS TABLE
@@ -1047,7 +1097,7 @@ with col_right:
                 st.dataframe(best_df.style.highlight_max(color='lightgreen', subset=['API (%)']), use_container_width=True)
             
             # ================================================================
-            # 6. INTERACTIVE SENSITIVITY ANALYSIS (PLOTLY)
+            # 6. INTERACTIVE SENSITIVITY ANALYSIS (PLOTLY - FIXED)
             # ================================================================
             st.markdown("### 🔍 Interactive Sensitivity Analysis")
             
@@ -1075,34 +1125,73 @@ with col_right:
             
             # Create interactive tornado plot using Plotly
             fig_tornado = go.Figure()
+            
+            # Color mapping: red for highest, green for lowest
+            colors = ['#e74c3c' if v > np.mean(sensitivities) else '#2ecc71' for v in sorted_values]
+            
             fig_tornado.add_trace(go.Bar(
                 y=sorted_names,
                 x=sorted_values,
                 orientation='h',
                 marker=dict(
-                    color=sorted_values,
-                    colorscale='RdYlGn_r',
-                    showscale=True,
-                    colorbar=dict(title="Sensitivity")
+                    color=colors,
+                    line=dict(color='white', width=0.5)
                 ),
                 text=[f"{v:.4f}" for v in sorted_values],
                 textposition='outside',
-                textfont=dict(size=10, color='black')
+                textfont=dict(size=11, color='black', family='Arial'),
+                hovertemplate='<b>%{y}</b><br>Sensitivity: %{x:.4f}<extra></extra>'
             ))
-            
-            fig_tornado.update_layout(
-                title="Feature Sensitivity Analysis — Impact on Capping Risk (EFRF)",
-                xaxis_title="Sensitivity (ΔEFRF)",
-                yaxis_title="Parameters",
-                height=500,
-                xaxis=dict(gridcolor='lightgray'),
-                yaxis=dict(gridcolor='lightgray'),
-                margin=dict(l=10, r=10, b=10, t=50)
-            )
             
             # Add average line
             avg_sens = np.mean(sorted_values) if sorted_values else 0
-            fig_tornado.add_vline(x=avg_sens, line_dash="dash", line_color="#e74c3c", annotation_text=f"Avg: {avg_sens:.4f}")
+            fig_tornado.add_vline(
+                x=avg_sens,
+                line_dash="dash",
+                line_color="#e74c3c",
+                line_width=2,
+                annotation_text=f"Average: {avg_sens:.4f}",
+                annotation_position="top right"
+            )
+            
+            # Update layout
+            fig_tornado.update_layout(
+                title=dict(
+                    text="Feature Sensitivity Analysis — Impact on Capping Risk (EFRF)",
+                    font=dict(size=18, color='#2c3e50')
+                ),
+                xaxis=dict(
+                    title='Sensitivity (ΔEFRF)',
+                    gridcolor='lightgray',
+                    title_font=dict(size=14)
+                ),
+                yaxis=dict(
+                    title='Parameters',
+                    gridcolor='lightgray',
+                    title_font=dict(size=14),
+                    categoryorder='array',
+                    categoryarray=sorted_names
+                ),
+                height=450,
+                margin=dict(l=100, r=80, b=50, t=60),
+                plot_bgcolor='white',
+                hovermode='y unified'
+            )
+            
+            # Add annotation for most influential feature
+            if sorted_values:
+                max_idx = np.argmax(sensitivities)
+                max_feature = features[max_idx]
+                max_sens = sensitivities[max_idx]
+                fig_tornado.add_annotation(
+                    x=0.02,
+                    y=1.08,
+                    xref="paper",
+                    yref="paper",
+                    text=f"💡 Most influential: {max_feature} (ΔEFRF = {max_sens:.4f})",
+                    showarrow=False,
+                    font=dict(size=12, color='#dc3545', family='Arial')
+                )
             
             st.plotly_chart(fig_tornado, use_container_width=True)
             
