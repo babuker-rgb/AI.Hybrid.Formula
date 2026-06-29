@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 2.0 (Research Enhanced)
+Version: 2.1 (Smart Digital Twin Alerts)
 """
 
 import streamlit as st
@@ -749,10 +749,10 @@ with col_left:
     predict_btn = st.button("🔬 Predict & Optimise", use_container_width=True)
 
 # ================================================================
-# RESULTS PANEL
+# RESULTS PANEL (WITH SMART DIGITAL TWIN ALERTS)
 # ================================================================
 with col_right:
-    st.markdown("### 📈 Results")
+    st.markdown("### 📈 Predictive Results & Mechanical Assessment")
     
     if predict_btn:
         total = api + binder + pvpp + mgst + mcc
@@ -764,37 +764,81 @@ with col_right:
             with st.spinner("🧠 Running prediction..."):
                 tensile, efrf = predict(model, scaler, inputs)
             
-            # Metrics
+            # ================================================================
+            # 1. METRICS DISPLAY
+            # ================================================================
             col1, col2 = st.columns(2)
-            
             with col1:
-                st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-                st.metric("💪 Tensile Strength", f"{tensile:.3f} MPa")
-                if tensile >= 2.0:
-                    st.markdown('<span class="constraint-pass">✅ ≥ 2 MPa PASS</span>', unsafe_allow_html=True)
-                else:
-                    st.markdown('<span class="constraint-fail">❌ < 2 MPa FAIL</span>', unsafe_allow_html=True)
-                st.markdown('</div>', unsafe_allow_html=True)
-            
+                st.metric("💪 Tensile Strength (σt)", f"{tensile:.3f} MPa")
             with col2:
-                st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-                st.metric("⚠️ EFRF", f"{efrf:.4f}")
-                if efrf < 0.5:
-                    st.markdown('<span class="constraint-pass">✅ < 0.5 PASS</span>', unsafe_allow_html=True)
-                else:
-                    st.markdown('<span class="constraint-fail">❌ ≥ 0.5 FAIL</span>', unsafe_allow_html=True)
-                st.markdown('</div>', unsafe_allow_html=True)
+                st.metric("⚠️ EFRF (Capping Risk)", f"{efrf:.4f}")
             
-            # Overall status
+            st.markdown("---")
+            
+            # ================================================================
+            # 2. SMART DIGITAL TWIN ALERTS (DYNAMIC)
+            # ================================================================
             if tensile >= 2.0 and efrf < 0.5:
-                st.success("🎉 **Formulation satisfies all mechanical constraints!**")
-                st.balloons()
+                # ✅ SAFE ZONE - All constraints satisfied
+                st.success(f"""
+                🎉 **Formulation satisfies all mechanical constraints!**
+                
+                ✅ **Tensile Strength:** {tensile:.3f} MPa (≥ 2 MPa) — **SAFE**
+                ✅ **EFRF:** {efrf:.4f} (< 0.5) — **CONTROLLED**
+                
+                📌 **Recommendation:** This formulation is suitable for high-speed industrial tableting. 
+                Proceed to experimental validation.
+                """)
+                
+            elif tensile < 2.0 and efrf >= 0.5:
+                # 🚨 CRITICAL ZONE - Both constraints violated
+                st.error(f"""
+                🚨 **CRITICAL FAILURE: Formulation Infeasible!**
+                
+                ❌ **Tensile Strength:** {tensile:.3f} MPa (< 2.0 MPa) — **TOO SOFT**
+                ❌ **EFRF:** {efrf:.4f} (≥ 0.5) — **EXTREME CAPPING RISK**
+                
+                📌 **Action Required:**
+                - Increase binder concentration (MCC) to improve strength
+                - Increase compaction pressure to reduce porosity
+                - Reduce Mg-St concentration to improve inter-particle bonding
+                """)
+                
+            elif tensile < 2.0:
+                # ⚠️ WARNING - Tensile Strength too low
+                st.warning(f"""
+                ⚠️ **WARNING: Insufficient Mechanical Strength!**
+                
+                ❌ **Tensile Strength:** {tensile:.3f} MPa (< 2.0 MPa)
+                ✅ **EFRF:** {efrf:.4f} (< 0.5) — **UNDER CONTROL**
+                
+                📌 **Action Required:**
+                - Increase Compaction Pressure
+                - Increase Binder content
+                - Reduce API loading if possible
+                """)
+                
+            elif efrf >= 0.5:
+                # 🚨 ALERT - High capping risk
+                st.error(f"""
+                🚨 **RISK DETECTED: High Elastic Decompression Strain!**
+                
+                ✅ **Tensile Strength:** {tensile:.3f} MPa (≥ 2.0 MPa) — **ADEQUATE**
+                ❌ **EFRF:** {efrf:.4f} (≥ 0.5) — **CAPPING RISK!**
+                
+                📌 **Action Required:**
+                - Lower the punch speed to reduce elastic recovery
+                - Reduce Paracetamol load
+                - Decrease lubricant (Mg-St) to improve cohesion
+                """)
             else:
-                st.warning("⚠️ **Formulation does NOT satisfy all constraints.**")
+                # Fallback (should never happen)
+                st.info("⚠️ Please check your formulation parameters.")
             
             # ================================================================
-            # NSGA-II OPTIMIZATION (FULLY FIXED)
+            # 3. NSGA-II OPTIMIZATION (FULLY FIXED)
             # ================================================================
+            st.markdown("---")
             st.markdown("### ⚙️ NSGA-II Results")
             
             with st.spinner("🔄 Running NSGA-II optimisation..."):
@@ -809,8 +853,8 @@ with col_right:
                 # Extract Pareto front (front 0)
                 if len(fronts) > 0 and len(fronts[0]) > 0:
                     front0 = fronts[0]
-                    pareto_api = -objectives[front0, 0]   # flattened array
-                    pareto_efrf = objectives[front0, 1]   # flattened array
+                    pareto_api = -objectives[front0, 0]
+                    pareto_efrf = objectives[front0, 1]
                     
                     # Find feasible solutions (those satisfying constraints)
                     feasible = constraints[front0]
@@ -818,7 +862,6 @@ with col_right:
                     
                     if len(feasible_indices) > 0:
                         # There is at least one feasible solution
-                        # Find the one with highest API among feasible
                         feasible_api_values = [pareto_api[i] for i in feasible_indices]
                         best_idx_local = int(np.argmax(feasible_api_values))
                         best_idx = feasible_indices[best_idx_local]
@@ -834,7 +877,7 @@ with col_right:
                             f"Feasible solutions: {len(feasible_indices)}"
                         )
                     else:
-                        # No feasible solutions found -> show best non-dominated
+                        # No feasible solutions found
                         best_idx = int(np.argmin(pareto_efrf))
                         best_api = float(pareto_api[best_idx])
                         best_efrf = float(pareto_efrf[best_idx])
@@ -848,7 +891,7 @@ with col_right:
                     st.error("No Pareto front found. Try adjusting NSGA-II parameters.")
             
             # ================================================================
-            # PARETO FRONT PLOT (ENHANCED)
+            # 4. PARETO FRONT PLOT (ENHANCED)
             # ================================================================
             st.markdown("### 📉 Pareto Front")
             
@@ -919,7 +962,6 @@ with col_right:
             
             # Target point (90.5% API)
             if len(fronts) > 0 and len(fronts[0]) > 0:
-                # Approximate EFRF at target
                 target_api = 90.5
                 pareto_api_sorted = np.sort(pareto_api)
                 pareto_efrf_sorted = np.array([pareto_efrf[np.where(pareto_api == a)[0][0]] for a in np.sort(pareto_api)])
@@ -964,7 +1006,7 @@ with col_right:
             plt.close()
             
             # ================================================================
-            # BEST SOLUTIONS TABLE
+            # 5. BEST SOLUTIONS TABLE
             # ================================================================
             st.markdown("### 🏆 Best Pareto Solutions")
             
@@ -974,7 +1016,6 @@ with col_right:
                 pareto_efrf = objectives[front0, 1]
                 pareto_tensile = nsga.tensile[front0]
                 
-                # Create dataframe with top 10 solutions (sorted by API descending)
                 top_n = min(10, len(pareto_api))
                 sorted_indices = np.argsort(pareto_api)[::-1][:top_n]
                 
@@ -987,7 +1028,7 @@ with col_right:
                 st.dataframe(best_df.style.highlight_max(color='lightgreen', subset=['API (%)']), use_container_width=True)
             
             # ================================================================
-            # SENSITIVITY ANALYSIS PLOT (ENHANCED)
+            # 6. SENSITIVITY ANALYSIS PLOT (ENHANCED)
             # ================================================================
             st.markdown("### 🔍 Sensitivity Analysis")
             
@@ -1058,7 +1099,7 @@ with col_right:
             plt.close()
             
             # ================================================================
-            # GENERATE PDF REPORT
+            # 7. GENERATE PDF REPORT
             # ================================================================
             st.markdown("### 📄 Report")
             
