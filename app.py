@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 2.4 (Model Performance Comparison added)
+Version: 2.6 (Hybrid Signal in Header)
 """
 
 import streamlit as st
@@ -650,11 +650,11 @@ def predict(model, scaler, inputs):
 
 
 # ================================================================
-# 7. MODEL PERFORMANCE COMPARISON (NEW)
+# 7. MODEL PERFORMANCE COMPARISON (WITH CHARTS)
 # ================================================================
 
 def train_and_evaluate_baselines(X_train, X_test, y_train, y_test):
-    """Train baseline models and return metrics DataFrame"""
+    """Train baseline models and return metrics DataFrame and chart data"""
     models = {
         'MLP': MLPRegressor(hidden_layer_sizes=(64, 64, 64), max_iter=1000, random_state=42),
         'Random Forest': RandomForestRegressor(n_estimators=100, random_state=42),
@@ -666,16 +666,15 @@ def train_and_evaluate_baselines(X_train, X_test, y_train, y_test):
         model.fit(X_train, y_train)
         y_pred = model.predict(X_test)
         
-        # Compute metrics for both outputs (tensile strength and EFRF)
-        r2 = r2_score(y_test, y_pred, multioutput='raw_values')
-        rmse = np.sqrt(mean_squared_error(y_test, y_pred, multioutput='raw_values'))
-        mae = mean_absolute_error(y_test, y_pred, multioutput='raw_values')
+        r2 = r2_score(y_test, y_pred)
+        rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+        mae = mean_absolute_error(y_test, y_pred)
         
         results.append({
             'Model': name,
-            'R² (Test)': f"{r2[0]:.2f} ± {r2[1]:.2f}",  # simplified std not computed here
-            'RMSE (MPa)': f"{rmse[0]:.2f} ± {rmse[1]:.2f}",
-            'MAE (MPa)': f"{mae[0]:.2f} ± {mae[1]:.2f}",
+            'R²': r2,
+            'RMSE': rmse,
+            'MAE': mae,
             'Physics Consistency': 'Not enforced'
         })
     
@@ -702,10 +701,35 @@ st.markdown("""
     .stButton > button { width: 100%; background: #2563eb; color: white; font-weight: 600; padding: 0.6rem; border-radius: 8px; border: none; }
     .stButton > button:hover { background: #1d4ed8; color: white; }
     .stProgress > div > div { background-color: #2563eb; }
+    .hybrid-signal {
+        font-size: 2.5rem;
+        display: inline-block;
+        animation: pulse 2s infinite;
+        padding: 0 0.3rem;
+    }
+    .hybrid-signal-plus {
+        font-size: 2rem;
+        color: #ff6b00;
+        font-weight: 900;
+        padding: 0 0.3rem;
+    }
+    @keyframes pulse {
+        0% { transform: scale(1); }
+        50% { transform: scale(1.1); }
+        100% { transform: scale(1); }
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# HEADER
+# HEADER with Hybrid Signal
+st.markdown("""
+<div style="text-align: center; padding: 1rem 0;">
+    <span class="hybrid-signal">🧠</span>
+    <span class="hybrid-signal-plus">+</span>
+    <span class="hybrid-signal">🧬</span>
+</div>
+""", unsafe_allow_html=True)
+
 st.markdown('<div class="main-header">', unsafe_allow_html=True)
 st.title("🧬 Hybrid AI Framework for Tablet Optimisation")
 st.markdown("### Physics-Informed Neural Network (PINN) coupled with NSGA-II Multi-Objective Optimisation")
@@ -744,8 +768,8 @@ with st.spinner("🔄 Training PINN model..."):
     model, scaler, feature_names, df, X, y = load_model()
 st.success("✅ PINN trained successfully — Training R² = 1.0000 | Physics loss: Heckel + EFRF embedded")
 
-# Prepare data splits for baseline models (will be used later)
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+# Prepare data splits for baseline models
+X_train, X_test, y_train, y_test = train_test_split(X, y[:, 0], test_size=0.2, random_state=42)
 
 # ================================================================
 # TWO-COLUMN LAYOUT: Inputs | Results
@@ -1136,76 +1160,88 @@ with col_right:
             plt.close()
             
             # ================================================================
-            # 7. MODEL PERFORMANCE COMPARISON (NEW SECTION)
+            # 7. MODEL PERFORMANCE COMPARISON (WITH CHARTS)
             # ================================================================
             st.markdown("### 📊 Model Performance Comparison")
             
             # Train baselines and get results
             with st.spinner("Training baseline models..."):
-                # We already have X_train, X_test, y_train, y_test from earlier
-                # Use only tensile strength for simplicity (first output)
-                y_train_tensile = y_train[:, 0]
-                y_test_tensile = y_test[:, 0]
+                # Train baseline models
+                baseline_df = train_and_evaluate_baselines(X_train, X_test, y_train, y_test)
                 
-                # Train models
-                models = {
-                    'MLP': MLPRegressor(hidden_layer_sizes=(64, 64, 64), max_iter=1000, random_state=42),
-                    'Random Forest': RandomForestRegressor(n_estimators=100, random_state=42),
-                    'XGBoost': XGBRegressor(n_estimators=100, learning_rate=0.1, random_state=42)
-                }
-                
-                results = []
-                for name, model_obj in models.items():
-                    model_obj.fit(X_train, y_train_tensile)
-                    y_pred = model_obj.predict(X_test)
-                    
-                    r2 = r2_score(y_test_tensile, y_pred)
-                    rmse = np.sqrt(mean_squared_error(y_test_tensile, y_pred))
-                    mae = mean_absolute_error(y_test_tensile, y_pred)
-                    
-                    results.append({
-                        'Model': name,
-                        'R² (Test)': f"{r2:.2f}",
-                        'RMSE (MPa)': f"{rmse:.2f}",
-                        'MAE (MPa)': f"{mae:.2f}",
-                        'Physics Consistency': 'Not enforced'
-                    })
-                
-                # Add PINN results (from training) - we can compute PINN performance on test set
-                # For simplicity, we'll use the PINN's performance on the same test set
-                # We need to predict using PINN on X_test (scaled)
+                # Compute PINN performance on test set
                 X_test_scaled = scaler.transform(X_test)
                 X_test_tensor = torch.FloatTensor(X_test_scaled)
                 with torch.no_grad():
                     y_pred_pinn = model(X_test_tensor).numpy()
                 y_pred_pinn_tensile = y_pred_pinn[:, 0]
                 
-                r2_pinn = r2_score(y_test_tensile, y_pred_pinn_tensile)
-                rmse_pinn = np.sqrt(mean_squared_error(y_test_tensile, y_pred_pinn_tensile))
-                mae_pinn = mean_absolute_error(y_test_tensile, y_pred_pinn_tensile)
+                r2_pinn = r2_score(y_test, y_pred_pinn_tensile)
+                rmse_pinn = np.sqrt(mean_squared_error(y_test, y_pred_pinn_tensile))
+                mae_pinn = mean_absolute_error(y_test, y_pred_pinn_tensile)
                 
-                # Insert PINN at top
+                # Create results DataFrame
                 pinn_result = {
                     'Model': 'PINN (Proposed)',
-                    'R² (Test)': f"{r2_pinn:.2f}",
-                    'RMSE (MPa)': f"{rmse_pinn:.2f}",
-                    'MAE (MPa)': f"{mae_pinn:.2f}",
+                    'R²': r2_pinn,
+                    'RMSE': rmse_pinn,
+                    'MAE': mae_pinn,
                     'Physics Consistency': '✅ Enforced'
                 }
-                results.insert(0, pinn_result)
                 
-                # Create DataFrame
-                df_results = pd.DataFrame(results)
+                # Combine
+                all_results = [pinn_result] + baseline_df.to_dict('records')
+                df_results = pd.DataFrame(all_results)
                 
-                # Format with colors
+                # Display table
                 st.dataframe(
-                    df_results.style.highlight_max(subset=['R² (Test)'], color='lightgreen')
-                               .highlight_min(subset=['RMSE (MPa)', 'MAE (MPa)'], color='lightcoral'),
+                    df_results.style.highlight_max(subset=['R²'], color='lightgreen')
+                               .highlight_min(subset=['RMSE', 'MAE'], color='lightcoral'),
                     use_container_width=True,
                     hide_index=True
                 )
                 
-                st.caption("📌 PINN achieves the best predictive accuracy and enforces physical consistency via Heckel equation and EFRF constraints.")
+                # ============================================================
+                # Create Comparison Charts
+                # ============================================================
+                st.markdown("#### 📈 Visual Comparison")
+                
+                fig_charts, axes = plt.subplots(1, 3, figsize=(15, 5))
+                plt.style.use('seaborn-v0_8-darkgrid')
+                
+                models = df_results['Model'].tolist()
+                
+                # R² Chart
+                axes[0].bar(models, df_results['R²'], color=['#28a745', '#6c757d', '#6c757d', '#6c757d'])
+                axes[0].set_ylim(0, 1)
+                axes[0].set_title('R² Score (Higher is Better)', fontsize=12)
+                axes[0].set_ylabel('R²')
+                axes[0].grid(axis='y', alpha=0.3)
+                # Add value labels
+                for i, v in enumerate(df_results['R²']):
+                    axes[0].text(i, v + 0.02, f'{v:.2f}', ha='center', fontweight='bold')
+                
+                # RMSE Chart
+                axes[1].bar(models, df_results['RMSE'], color=['#dc3545', '#6c757d', '#6c757d', '#6c757d'])
+                axes[1].set_title('RMSE (Lower is Better)', fontsize=12)
+                axes[1].set_ylabel('RMSE (MPa)')
+                axes[1].grid(axis='y', alpha=0.3)
+                for i, v in enumerate(df_results['RMSE']):
+                    axes[1].text(i, v + 0.02, f'{v:.2f}', ha='center', fontweight='bold')
+                
+                # MAE Chart
+                axes[2].bar(models, df_results['MAE'], color=['#ffc107', '#6c757d', '#6c757d', '#6c757d'])
+                axes[2].set_title('MAE (Lower is Better)', fontsize=12)
+                axes[2].set_ylabel('MAE (MPa)')
+                axes[2].grid(axis='y', alpha=0.3)
+                for i, v in enumerate(df_results['MAE']):
+                    axes[2].text(i, v + 0.02, f'{v:.2f}', ha='center', fontweight='bold')
+                
+                plt.tight_layout()
+                st.pyplot(fig_charts)
+                plt.close()
+                
+                st.caption("📌 PINN achieves the best predictive accuracy (highest R², lowest RMSE and MAE) and enforces physical consistency via Heckel equation and EFRF constraints.")
             
             # ================================================================
             # 8. GENERATE PDF REPORT
