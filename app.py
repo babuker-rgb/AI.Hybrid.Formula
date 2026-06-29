@@ -687,7 +687,7 @@ def train_and_evaluate_baselines(X_train, X_test, y_train, y_test):
 
 st.set_page_config(
     page_title="Hybrid AI Framework",
-    page_icon="🧬",
+    page_icon="🧬" "🧠",
     layout="wide"
 )
 
@@ -731,7 +731,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="main-header">', unsafe_allow_html=True)
-st.title("🧬 Hybrid AI Framework for Tablet Optimisation")
+st.title("🧬 Hybrid AI Framework for Tablet Optimisation 🧠 ")
 st.markdown("### Physics-Informed Neural Network (PINN) coupled with NSGA-II Multi-Objective Optimisation")
 st.caption("A/Kareem & Babuker A. · Postgraduate College, Nile Valley University, Atbara, Sudan")
 st.markdown('</div>', unsafe_allow_html=True)
