@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 2.2 (3D Interactive Visualizations)
+Version: 2.2 (3D Pareto Surface Added)
 """
 
 import streamlit as st
@@ -12,9 +12,6 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -412,195 +409,7 @@ class NSGAII:
 
 
 # ================================================================
-# 4. 3D VISUALIZATION FUNCTIONS
-# ================================================================
-
-def create_3d_pareto_surface(objectives, constraints, fronts, nsga):
-    """Create 3D Pareto surface plot with plotly"""
-    
-    # Extract data
-    pareto_api = -objectives[:, 0]
-    pareto_efrf = objectives[:, 1]
-    pareto_tensile = nsga.tensile
-    
-    # Create figure
-    fig = go.Figure()
-    
-    # 1. All solutions (grey points)
-    fig.add_trace(go.Scatter3d(
-        x=pareto_api,
-        y=pareto_tensile,
-        z=pareto_efrf,
-        mode='markers',
-        marker=dict(
-            size=4,
-            color='grey',
-            opacity=0.3
-        ),
-        name='All Solutions'
-    ))
-    
-    # 2. Pareto front (red points)
-    if len(fronts) > 0 and len(fronts[0]) > 0:
-        front0 = fronts[0]
-        front_api = -objectives[front0, 0]
-        front_tensile = nsga.tensile[front0]
-        front_efrf = objectives[front0, 1]
-        
-        fig.add_trace(go.Scatter3d(
-            x=front_api,
-            y=front_tensile,
-            z=front_efrf,
-            mode='markers+lines',
-            marker=dict(
-                size=8,
-                color='red',
-                symbol='diamond'
-            ),
-            line=dict(
-                color='red',
-                width=4
-            ),
-            name='Pareto Front'
-        ))
-        
-        # 3. Feasible solutions (green stars)
-        feasible = constraints[front0]
-        feasible_indices = [i for i, f in enumerate(feasible) if f]
-        if feasible_indices:
-            feasible_api = [front_api[i] for i in feasible_indices]
-            feasible_tensile = [front_tensile[i] for i in feasible_indices]
-            feasible_efrf = [front_efrf[i] for i in feasible_indices]
-            
-            fig.add_trace(go.Scatter3d(
-                x=feasible_api,
-                y=feasible_tensile,
-                z=feasible_efrf,
-                mode='markers',
-                marker=dict(
-                    size=12,
-                    color='green',
-                    symbol='star'
-                ),
-                name='Feasible Solutions'
-            ))
-    
-    # Layout
-    fig.update_layout(
-        scene=dict(
-            xaxis_title='API Loading (%)',
-            yaxis_title='Tensile Strength (MPa)',
-            zaxis_title='EFRF',
-            camera=dict(
-                eye=dict(x=1.5, y=1.5, z=1.0)
-            )
-        ),
-        title='3D Pareto Surface — Multi-Objective Optimization',
-        width=800,
-        height=600,
-        hovermode='closest'
-    )
-    
-    return fig
-
-
-def create_3d_sensitivity_surface(model, scaler, base_inputs, feature1_idx, feature2_idx, n_points=30):
-    """Create 3D sensitivity surface for two parameters"""
-    
-    # Create grid
-    f1_range = np.linspace(0.7, 1.3, n_points)
-    f2_range = np.linspace(0.7, 1.3, n_points)
-    f1_grid, f2_grid = np.meshgrid(f1_range, f2_range)
-    
-    efrf_grid = np.zeros_like(f1_grid)
-    tensile_grid = np.zeros_like(f1_grid)
-    
-    features = ['API%', 'MCC%', 'PVPP%', 'Mg-St%', 'Binder%', 'Pressure', 'Speed', 'Granule']
-    f1_name = features[feature1_idx]
-    f2_name = features[feature2_idx]
-    
-    for i in range(n_points):
-        for j in range(n_points):
-            test_inputs = base_inputs.copy()
-            test_inputs[feature1_idx] *= f1_grid[i, j]
-            test_inputs[feature2_idx] *= f2_grid[i, j]
-            tens, efrf = predict(model, scaler, test_inputs)
-            efrf_grid[i, j] = efrf
-            tensile_grid[i, j] = tens
-    
-    # Create figure
-    fig = go.Figure(data=[
-        go.Surface(
-            x=f1_grid,
-            y=f2_grid,
-            z=efrf_grid,
-            colorscale='RdYlGn_r',
-            opacity=0.85,
-            hovertemplate='<b>%s</b>: %{x:.2f}<br><b>%s</b>: %{y:.2f}<br><b>EFRF</b>: %{z:.4f}<extra></extra>' % (f1_name, f2_name)
-        )
-    ])
-    
-    fig.update_layout(
-        scene=dict(
-            xaxis_title=f1_name,
-            yaxis_title=f2_name,
-            zaxis_title='EFRF (Capping Risk)',
-            camera=dict(
-                eye=dict(x=1.5, y=1.5, z=1.0)
-            )
-        ),
-        title=f'3D Sensitivity: Impact of {f1_name} and {f2_name} on EFRF',
-        width=800,
-        height=600
-    )
-    
-    return fig
-
-
-def create_3d_formulation_space(df, feature1_idx, feature2_idx):
-    """Create 3D formulation space visualization"""
-    
-    features = ['API%', 'MCC%', 'PVPP%', 'Mg-St%', 'Binder%', 'Pressure', 'Speed', 'Granule']
-    f1_name = features[feature1_idx]
-    f2_name = features[feature2_idx]
-    
-    fig = go.Figure(data=[
-        go.Scatter3d(
-            x=df[f1_name],
-            y=df[f2_name],
-            z=df['EFRF'],
-            mode='markers',
-            marker=dict(
-                size=8,
-                color=df['Tensile_Strength_MPa'],
-                colorscale='Viridis',
-                colorbar=dict(title='Tensile (MPa)'),
-                showscale=True
-            ),
-            text=df.index,
-            hovertemplate='<b>%s</b>: %{x:.1f}<br><b>%s</b>: %{y:.1f}<br><b>EFRF</b>: %{z:.3f}<br><b>Tensile</b>: %{marker.color:.2f} MPa<extra></extra>' % (f1_name, f2_name)
-        )
-    ])
-    
-    fig.update_layout(
-        scene=dict(
-            xaxis_title=f1_name,
-            yaxis_title=f2_name,
-            zaxis_title='EFRF',
-            camera=dict(
-                eye=dict(x=1.5, y=1.5, z=1.0)
-            )
-        ),
-        title=f'3D Formulation Space: {f1_name} vs {f2_name} vs EFRF',
-        width=800,
-        height=600
-    )
-    
-    return fig
-
-
-# ================================================================
-# 5. PDF REPORT GENERATION (FIXED UNICODE)
+# 4. PDF REPORT GENERATION (FIXED UNICODE)
 # ================================================================
 
 def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule, 
@@ -781,6 +590,149 @@ def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
 
 
 # ================================================================
+# 5. 3D PARETO SURFACE VISUALIZATION
+# ================================================================
+
+def create_3d_pareto_surface(objectives, constraints, fronts, nsga, best_solution=None):
+    """Create an interactive 3D Pareto surface visualization."""
+    
+    import plotly.graph_objects as go
+    
+    # Extract data
+    api = -objectives[:, 0]
+    efrf = objectives[:, 1]
+    tensile = nsga.tensile
+    
+    # Create figure
+    fig = go.Figure()
+    
+    # 1. All solutions (scatter points) - lighter color
+    fig.add_trace(go.Scatter3d(
+        x=api,
+        y=efrf,
+        z=tensile,
+        mode='markers',
+        marker=dict(
+            size=3,
+            color='#d1d5db',
+            opacity=0.5,
+            symbol='circle'
+        ),
+        name='All Solutions',
+        hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<br>Tensile: %{z:.3f} MPa<extra></extra>'
+    ))
+    
+    # 2. Pareto front (front 0)
+    if len(fronts) > 0 and len(fronts[0]) > 0:
+        front0 = fronts[0]
+        pareto_api = -objectives[front0, 0]
+        pareto_efrf = objectives[front0, 1]
+        pareto_tensile = nsga.tensile[front0]
+        
+        # Sort for better line rendering
+        sorted_idx = np.argsort(pareto_api)
+        pareto_api_sorted = pareto_api[sorted_idx]
+        pareto_efrf_sorted = pareto_efrf[sorted_idx]
+        pareto_tensile_sorted = pareto_tensile[sorted_idx]
+        
+        # Pareto line
+        fig.add_trace(go.Scatter3d(
+            x=pareto_api_sorted,
+            y=pareto_efrf_sorted,
+            z=pareto_tensile_sorted,
+            mode='lines',
+            line=dict(color='#dc3545', width=4),
+            name='Pareto Front Line',
+            showlegend=True
+        ))
+        
+        # Pareto points
+        fig.add_trace(go.Scatter3d(
+            x=pareto_api,
+            y=pareto_efrf,
+            z=pareto_tensile,
+            mode='markers',
+            marker=dict(
+                size=7,
+                color='#dc3545',
+                symbol='circle',
+                line=dict(color='white', width=0.5)
+            ),
+            name='Pareto Points',
+            hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<br>Tensile: %{z:.3f} MPa<extra></extra>'
+        ))
+        
+        # 3. Feasible solutions (satisfying constraints) - green stars
+        feasible = constraints[front0]
+        feasible_indices = [i for i, f in enumerate(feasible) if f]
+        if feasible_indices:
+            feasible_api = [pareto_api[i] for i in feasible_indices]
+            feasible_efrf = [pareto_efrf[i] for i in feasible_indices]
+            feasible_tensile = [pareto_tensile[i] for i in feasible_indices]
+            
+            fig.add_trace(go.Scatter3d(
+                x=feasible_api,
+                y=feasible_efrf,
+                z=feasible_tensile,
+                mode='markers',
+                marker=dict(
+                    size=10,
+                    color='#28a745',
+                    symbol='star',
+                    line=dict(color='white', width=1)
+                ),
+                name=f'Feasible Solutions ({len(feasible_indices)})',
+                hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<br>Tensile: %{z:.3f} MPa<extra></extra>'
+            ))
+    
+    # 4. Highlight optimal point (if provided)
+    if best_solution is not None:
+        best_api, best_efrf, best_tensile = best_solution
+        fig.add_trace(go.Scatter3d(
+            x=[best_api],
+            y=[best_efrf],
+            z=[best_tensile],
+            mode='markers',
+            marker=dict(
+                size=16,
+                color='gold',
+                symbol='diamond',
+                line=dict(color='black', width=2)
+            ),
+            name='Optimal Solution',
+            hovertemplate='⭐ Optimal<br>API: %{x:.1f}%<br>EFRF: %{y:.4f}<br>Tensile: %{z:.3f} MPa<extra></extra>'
+        ))
+    
+    # Update layout
+    fig.update_layout(
+        scene=dict(
+            xaxis=dict(title='API Loading (%)', range=[84, 96]),
+            yaxis=dict(title='EFRF (Capping Risk)', range=[0, 1.0]),
+            zaxis=dict(title='Tensile Strength (MPa)', range=[0, 6]),
+            camera=dict(
+                eye=dict(x=1.5, y=1.5, z=1.2)
+            )
+        ),
+        title=dict(
+            text='3D Pareto Surface — API vs EFRF vs Tensile Strength',
+            font=dict(size=18)
+        ),
+        legend=dict(
+            x=0.8,
+            y=0.9,
+            bgcolor='rgba(255,255,255,0.8)',
+            bordercolor='black',
+            borderwidth=1
+        ),
+        margin=dict(l=0, r=0, b=0, t=60),
+        width=800,
+        height=600
+    )
+    
+    return fig
+
+
+# ================================================================
 # 6. TRAIN MODEL
 # ================================================================
 
@@ -940,7 +892,7 @@ with col_left:
     predict_btn = st.button("🔬 Predict & Optimise", use_container_width=True)
 
 # ================================================================
-# RESULTS PANEL (WITH 3D VISUALIZATIONS)
+# RESULTS PANEL (WITH SMART DIGITAL TWIN ALERTS)
 # ================================================================
 with col_right:
     st.markdown("### 📈 Predictive Results & Mechanical Assessment")
@@ -970,6 +922,7 @@ with col_right:
             # 2. SMART DIGITAL TWIN ALERTS (DYNAMIC)
             # ================================================================
             if tensile >= 2.0 and efrf < 0.5:
+                # ✅ SAFE ZONE - All constraints satisfied
                 st.success(f"""
                 🎉 **Formulation satisfies all mechanical constraints!**
                 
@@ -981,6 +934,7 @@ with col_right:
                 """)
                 
             elif tensile < 2.0 and efrf >= 0.5:
+                # 🚨 CRITICAL ZONE - Both constraints violated
                 st.error(f"""
                 🚨 **CRITICAL FAILURE: Formulation Infeasible!**
                 
@@ -994,6 +948,7 @@ with col_right:
                 """)
                 
             elif tensile < 2.0:
+                # ⚠️ WARNING - Tensile Strength too low
                 st.warning(f"""
                 ⚠️ **WARNING: Insufficient Mechanical Strength!**
                 
@@ -1007,6 +962,7 @@ with col_right:
                 """)
                 
             elif efrf >= 0.5:
+                # 🚨 ALERT - High capping risk
                 st.error(f"""
                 🚨 **RISK DETECTED: High Elastic Decompression Strain!**
                 
@@ -1019,10 +975,11 @@ with col_right:
                 - Decrease lubricant (Mg-St) to improve cohesion
                 """)
             else:
+                # Fallback (should never happen)
                 st.info("⚠️ Please check your formulation parameters.")
             
             # ================================================================
-            # 3. NSGA-II OPTIMIZATION
+            # 3. NSGA-II OPTIMIZATION (FULLY FIXED)
             # ================================================================
             st.markdown("---")
             st.markdown("### ⚙️ NSGA-II Results")
@@ -1042,11 +999,12 @@ with col_right:
                     pareto_api = -objectives[front0, 0]
                     pareto_efrf = objectives[front0, 1]
                     
-                    # Find feasible solutions
+                    # Find feasible solutions (those satisfying constraints)
                     feasible = constraints[front0]
                     feasible_indices = [i for i, f in enumerate(feasible) if f]
                     
                     if len(feasible_indices) > 0:
+                        # There is at least one feasible solution
                         feasible_api_values = [pareto_api[i] for i in feasible_indices]
                         best_idx_local = int(np.argmax(feasible_api_values))
                         best_idx = feasible_indices[best_idx_local]
@@ -1061,7 +1019,10 @@ with col_right:
                             f"σt = {best_tensile:.3f} MPa | "
                             f"Feasible solutions: {len(feasible_indices)}"
                         )
+                        # Store best solution for 3D plot
+                        best_solution = (best_api, best_efrf, best_tensile)
                     else:
+                        # No feasible solutions found
                         best_idx = int(np.argmin(pareto_efrf))
                         best_api = float(pareto_api[best_idx])
                         best_efrf = float(pareto_efrf[best_idx])
@@ -1071,119 +1032,52 @@ with col_right:
                             f"API = {best_api:.2f}% | EFRF = {best_efrf:.4f} | "
                             f"σt = {best_tensile:.3f} MPa"
                         )
+                        best_solution = None
                 else:
                     st.error("No Pareto front found. Try adjusting NSGA-II parameters.")
+                    best_solution = None
             
             # ================================================================
-            # 4. 3D PARETO SURFACE
+            # 4. PARETO FRONT PLOT (ENHANCED)
             # ================================================================
-            st.markdown("### 🌐 3D Pareto Surface")
-            
-            fig_3d_pareto = create_3d_pareto_surface(objectives, constraints, fronts, nsga)
-            st.plotly_chart(fig_3d_pareto, use_container_width=True)
-            
-            # ================================================================
-            # 5. 3D SENSITIVITY ANALYSIS
-            # ================================================================
-            st.markdown("### 🌐 3D Sensitivity Analysis")
-            
-            # Let user select which two parameters to analyze
-            features_3d = ['API%', 'MCC%', 'PVPP%', 'Mg-St%', 'Binder%', 'Pressure', 'Speed', 'Granule']
-            
-            col_sens1, col_sens2 = st.columns(2)
-            with col_sens1:
-                feature1_idx = st.selectbox(
-                    "Select first parameter:",
-                    options=range(len(features_3d)),
-                    format_func=lambda i: features_3d[i],
-                    index=0,
-                    key='sens1'
-                )
-            with col_sens2:
-                feature2_idx = st.selectbox(
-                    "Select second parameter:",
-                    options=range(len(features_3d)),
-                    format_func=lambda i: features_3d[i],
-                    index=1,
-                    key='sens2'
-                )
-            
-            if feature1_idx != feature2_idx:
-                base_inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
-                fig_3d_sens = create_3d_sensitivity_surface(
-                    model, scaler, base_inputs, feature1_idx, feature2_idx
-                )
-                st.plotly_chart(fig_3d_sens, use_container_width=True)
-            else:
-                st.warning("Please select two different parameters for sensitivity analysis.")
-            
-            # ================================================================
-            # 6. 3D FORMULATION SPACE
-            # ================================================================
-            st.markdown("### 🌐 3D Formulation Space")
-            
-            # Generate data for visualization
-            df_viz, _ = generate_data(n_samples=150)
-            
-            col_fs1, col_fs2 = st.columns(2)
-            with col_fs1:
-                fs1_idx = st.selectbox(
-                    "Select X-axis:",
-                    options=range(len(features_3d)),
-                    format_func=lambda i: features_3d[i],
-                    index=0,
-                    key='fs1'
-                )
-            with col_fs2:
-                fs2_idx = st.selectbox(
-                    "Select Y-axis:",
-                    options=range(len(features_3d)),
-                    format_func=lambda i: features_3d[i],
-                    index=1,
-                    key='fs2'
-                )
-            
-            if fs1_idx != fs2_idx:
-                fig_3d_form = create_3d_formulation_space(df_viz, fs1_idx, fs2_idx)
-                st.plotly_chart(fig_3d_form, use_container_width=True)
-            else:
-                st.warning("Please select two different parameters for formulation space.")
-            
-            # ================================================================
-            # 7. PARETO FRONT PLOT (2D)
-            # ================================================================
-            st.markdown("### 📉 Pareto Front (2D)")
+            st.markdown("### 📉 Pareto Front")
             
             fig, ax = plt.subplots(figsize=(12, 6), dpi=100)
             plt.style.use('seaborn-v0_8-darkgrid')
             
+            # Plot all solutions
             ax.scatter(
                 -objectives[:, 0], objectives[:, 1],
                 alpha=0.25, s=15, color='#6c757d',
                 label='All Solutions'
             )
             
+            # Plot Pareto front
             if len(fronts) > 0 and len(fronts[0]) > 0:
                 front0 = fronts[0]
                 pareto_api = -objectives[front0, 0]
                 pareto_efrf = objectives[front0, 1]
                 
+                # Sort for smoother line
                 sorted_idx = np.argsort(pareto_api)
                 pareto_api_sorted = pareto_api[sorted_idx]
                 pareto_efrf_sorted = pareto_efrf[sorted_idx]
                 
+                # Pareto front line
                 ax.plot(
                     pareto_api_sorted, pareto_efrf_sorted,
                     color='#dc3545', linewidth=2.5, alpha=0.8,
                     label='Pareto Front', zorder=4
                 )
                 
+                # Pareto points
                 ax.scatter(
                     pareto_api, pareto_efrf,
                     color='#dc3545', s=60, edgecolors='white',
                     linewidth=0.8, zorder=5, label='Pareto Points'
                 )
                 
+                # Feasible solutions
                 feasible = constraints[front0]
                 feasible_indices = [i for i, f in enumerate(feasible) if f]
                 if feasible_indices:
@@ -1197,6 +1091,7 @@ with col_right:
                         zorder=6
                     )
             
+            # Highlight your formulation
             if 'api' in locals() and 'efrf' in locals():
                 ax.scatter(
                     [api], [efrf],
@@ -1212,6 +1107,7 @@ with col_right:
                     bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='#007bff', alpha=0.7)
                 )
             
+            # Target point (90.5% API)
             if len(fronts) > 0 and len(fronts[0]) > 0:
                 target_api = 90.5
                 pareto_api_sorted = np.sort(pareto_api)
@@ -1231,12 +1127,15 @@ with col_right:
                     bbox=dict(boxstyle='round,pad=0.3', facecolor='#fff3cd', edgecolor='#ffc107', alpha=0.8)
                 )
             
+            # Threshold lines
             ax.axhline(y=0.5, color='#e74c3c', linestyle='--', alpha=0.7, linewidth=2, label='EFRF = 0.5 (Limit)')
             ax.axhline(y=0.3, color='#f39c12', linestyle=':', alpha=0.5, linewidth=1.5, label='EFRF = 0.3 (Optimal)')
             
+            # Feasible region shading
             ax.fill_between([84, 96], 0.5, 1.0, color='#e74c3c', alpha=0.08, label='Infeasible Region')
             ax.fill_between([84, 96], 0, 0.5, color='#28a745', alpha=0.08, label='Feasible Region')
             
+            # Labels and title
             ax.set_xlabel('API Loading (%)', fontsize=13, fontweight='bold', color='#2c3e50')
             ax.set_ylabel('EFRF (Capping Risk)', fontsize=13, fontweight='bold', color='#2c3e50')
             ax.set_title('NSGA-II Pareto Front — Optimisation Results', fontsize=16, fontweight='bold', color='#2c3e50', pad=15)
@@ -1246,6 +1145,7 @@ with col_right:
             ax.set_xlim(84, 96)
             ax.set_ylim(0, 1.0)
             
+            # Watermark
             ax.text(0.98, 0.02, 'Generated by Hybrid AI Framework', transform=ax.transAxes, fontsize=8, color='gray', alpha=0.4, ha='right', va='bottom')
             
             plt.tight_layout()
@@ -1253,7 +1153,7 @@ with col_right:
             plt.close()
             
             # ================================================================
-            # 8. BEST SOLUTIONS TABLE
+            # 5. BEST SOLUTIONS TABLE
             # ================================================================
             st.markdown("### 🏆 Best Pareto Solutions")
             
@@ -1275,7 +1175,92 @@ with col_right:
                 st.dataframe(best_df.style.highlight_max(color='lightgreen', subset=['API (%)']), use_container_width=True)
             
             # ================================================================
-            # 9. GENERATE PDF REPORT
+            # 6. SENSITIVITY ANALYSIS PLOT (ENHANCED)
+            # ================================================================
+            st.markdown("### 🔍 Sensitivity Analysis")
+            
+            # Prepare data
+            base_inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
+            _, base_efrf = predict(model, scaler, base_inputs)
+            
+            features = ['API%', 'MCC%', 'PVPP%', 'Mg-St%', 'Binder%', 'Pressure', 'Speed', 'Granule']
+            sensitivities = []
+            
+            for i in range(8):
+                test_inputs = base_inputs.copy()
+                test_inputs[i] += 0.05 * (base_inputs[i] + 0.1)
+                _, efrf_pos = predict(model, scaler, test_inputs)
+                
+                test_inputs[i] = base_inputs[i] - 0.05 * (base_inputs[i] + 0.1)
+                _, efrf_neg = predict(model, scaler, test_inputs)
+                
+                sensitivities.append(max(abs(efrf_pos - base_efrf), abs(efrf_neg - base_efrf)))
+            
+            # Sort for tornado plot
+            sorted_idx = np.argsort(sensitivities)[::-1]
+            sorted_names = [features[i] for i in sorted_idx]
+            sorted_values = [sensitivities[i] for i in sorted_idx]
+            
+            # Create enhanced tornado plot
+            fig2, ax2 = plt.subplots(figsize=(12, 6), dpi=100)
+            plt.style.use('seaborn-v0_8-darkgrid')
+            
+            # Color gradient based on values
+            max_val = max(sorted_values) if sorted_values else 1
+            colors = plt.cm.RdYlGn_r(np.array(sorted_values) / (max_val + 0.001))
+            
+            bars = ax2.barh(sorted_names, sorted_values, color=colors, edgecolor='white', linewidth=0.8)
+            
+            # Add value labels
+            for bar, val in zip(bars, sorted_values):
+                width = bar.get_width()
+                ax2.text(
+                    width + 0.002, bar.get_y() + bar.get_height()/2,
+                    f'{val:.4f}',
+                    va='center', ha='left', fontsize=10, fontweight='bold'
+                )
+            
+            # Average line
+            avg_sens = np.mean(sorted_values) if sorted_values else 0
+            ax2.axvline(x=avg_sens, color='#e74c3c', linestyle='--', alpha=0.7, linewidth=1.5, label=f'Average: {avg_sens:.4f}')
+            
+            ax2.set_xlabel('Sensitivity (ΔEFRF)', fontsize=13, fontweight='bold', color='#2c3e50')
+            ax2.set_ylabel('Parameters', fontsize=13, fontweight='bold', color='#2c3e50')
+            ax2.set_title('Feature Sensitivity Analysis — Impact on Capping Risk (EFRF)', fontsize=16, fontweight='bold', color='#2c3e50', pad=15)
+            
+            ax2.grid(True, alpha=0.25, linestyle='--', axis='x')
+            ax2.legend(loc='lower right', fontsize=10, frameon=True, shadow=True)
+            
+            # Interpretation note
+            if sorted_values:
+                max_feature = sorted_names[0]
+                max_sens = sorted_values[0]
+                note = f"💡 Most influential: {max_feature} (ΔEFRF = {max_sens:.4f})"
+                ax2.text(0.02, 0.98, note, transform=ax2.transAxes, fontsize=11,
+                        fontweight='bold', color='#dc3545',
+                        bbox=dict(boxstyle='round,pad=0.4', facecolor='white', edgecolor='#dc3545', alpha=0.8),
+                        va='top')
+            
+            plt.tight_layout()
+            st.pyplot(fig2)
+            plt.close()
+            
+            # ================================================================
+            # 7. 3D PARETO SURFACE (PLOTLY)
+            # ================================================================
+            st.markdown("### 🌐 3D Pareto Surface")
+            
+            try:
+                import plotly.graph_objects as go
+                fig_3d = create_3d_pareto_surface(objectives, constraints, fronts, nsga, best_solution)
+                st.plotly_chart(fig_3d, use_container_width=True)
+            except ImportError:
+                st.warning("Plotly not installed. Please install plotly to view 3D visualization.")
+            except Exception as e:
+                st.error(f"Error creating 3D plot: {e}")
+            
+            # ================================================================
+            # 8. GENERATE PDF REPORT
             # ================================================================
             st.markdown("### 📄 Report")
             
