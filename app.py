@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 2.6 (Hybrid Signal in Header)
+Version: 2.7 (4-Color Visual Comparison)
 """
 
 import streamlit as st
@@ -687,7 +687,7 @@ def train_and_evaluate_baselines(X_train, X_test, y_train, y_test):
 
 st.set_page_config(
     page_title="Hybrid AI Framework",
-    page_icon="🧬" "🧠",
+    page_icon="🧬",
     layout="wide"
 )
 
@@ -731,7 +731,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="main-header">', unsafe_allow_html=True)
-st.title("🧬 Hybrid AI Framework for Tablet Optimisation 🧠")
+st.title("🧬 Hybrid AI Framework for Tablet Optimisation")
 st.markdown("### Physics-Informed Neural Network (PINN) coupled with NSGA-II Multi-Objective Optimisation")
 st.caption("A/Kareem & Babuker A. · Postgraduate College, Nile Valley University, Atbara, Sudan")
 st.markdown('</div>', unsafe_allow_html=True)
@@ -1160,7 +1160,7 @@ with col_right:
             plt.close()
             
             # ================================================================
-            # 7. MODEL PERFORMANCE COMPARISON (WITH CHARTS)
+            # 7. MODEL PERFORMANCE COMPARISON (WITH CHARTS - 4 COLORS)
             # ================================================================
             st.markdown("### 📊 Model Performance Comparison")
             
@@ -1202,9 +1202,13 @@ with col_right:
                 )
                 
                 # ============================================================
-                # Create Comparison Charts
+                # Create Comparison Charts with 4 distinct colors
                 # ============================================================
                 st.markdown("#### 📈 Visual Comparison")
+                
+                # Define 4 distinct colors for 4 models
+                colors = ['#2ecc71', '#3498db', '#f39c12', '#9b59b6']
+                # Color names for reference in legend (optional, but bars will be colored)
                 
                 fig_charts, axes = plt.subplots(1, 3, figsize=(15, 5))
                 plt.style.use('seaborn-v0_8-darkgrid')
@@ -1212,17 +1216,16 @@ with col_right:
                 models = df_results['Model'].tolist()
                 
                 # R² Chart
-                axes[0].bar(models, df_results['R²'], color=['#28a745', '#6c757d', '#6c757d', '#6c757d'])
+                axes[0].bar(models, df_results['R²'], color=colors)
                 axes[0].set_ylim(0, 1)
                 axes[0].set_title('R² Score (Higher is Better)', fontsize=12)
                 axes[0].set_ylabel('R²')
                 axes[0].grid(axis='y', alpha=0.3)
-                # Add value labels
                 for i, v in enumerate(df_results['R²']):
                     axes[0].text(i, v + 0.02, f'{v:.2f}', ha='center', fontweight='bold')
                 
                 # RMSE Chart
-                axes[1].bar(models, df_results['RMSE'], color=['#dc3545', '#6c757d', '#6c757d', '#6c757d'])
+                axes[1].bar(models, df_results['RMSE'], color=colors)
                 axes[1].set_title('RMSE (Lower is Better)', fontsize=12)
                 axes[1].set_ylabel('RMSE (MPa)')
                 axes[1].grid(axis='y', alpha=0.3)
@@ -1230,7 +1233,7 @@ with col_right:
                     axes[1].text(i, v + 0.02, f'{v:.2f}', ha='center', fontweight='bold')
                 
                 # MAE Chart
-                axes[2].bar(models, df_results['MAE'], color=['#ffc107', '#6c757d', '#6c757d', '#6c757d'])
+                axes[2].bar(models, df_results['MAE'], color=colors)
                 axes[2].set_title('MAE (Lower is Better)', fontsize=12)
                 axes[2].set_ylabel('MAE (MPa)')
                 axes[2].grid(axis='y', alpha=0.3)
