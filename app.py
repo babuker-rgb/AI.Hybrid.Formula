@@ -725,7 +725,7 @@ st.markdown("""
 st.markdown("""
 <div style="text-align: center; padding: 1rem 0;">
     <span class="hybrid-signal">🧠</span>
-    <span class="hybrid-signal-plus">+</span>
+    <span class="hybrid-signal-plus">&</span>
     <span class="hybrid-signal">🧬</span>
 </div>
 """, unsafe_allow_html=True)
