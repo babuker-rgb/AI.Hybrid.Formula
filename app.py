@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Flexible Experiments
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 8.1 (Fixed Input Range Protection)
+Version: 8.2 (Fully Fixed Session State)
 """
 
 import streamlit as st
@@ -21,6 +21,46 @@ from fpdf import FPDF
 import datetime
 import warnings
 warnings.filterwarnings('ignore')
+
+# ================================================================
+# 0. FORCE RESET SESSION STATE (BEFORE ANY UI ELEMENTS)
+# ================================================================
+
+# This MUST be the first thing after imports to prevent slider errors
+if 'pressure' not in st.session_state or not isinstance(st.session_state.pressure, (int, float)):
+    st.session_state.pressure = 230.0
+elif st.session_state.pressure < 100 or st.session_state.pressure > 250:
+    st.session_state.pressure = 230.0
+
+if 'speed' not in st.session_state or not isinstance(st.session_state.speed, (int, float)):
+    st.session_state.speed = 12.0
+elif st.session_state.speed < 5 or st.session_state.speed > 40:
+    st.session_state.speed = 12.0
+
+if 'mgst' not in st.session_state or not isinstance(st.session_state.mgst, (int, float)):
+    st.session_state.mgst = 0.20
+elif st.session_state.mgst < 0.05 or st.session_state.mgst > 1.0:
+    st.session_state.mgst = 0.20
+
+if 'api' not in st.session_state or not isinstance(st.session_state.api, (int, float)):
+    st.session_state.api = 90.5
+elif st.session_state.api < 85 or st.session_state.api > 95:
+    st.session_state.api = 90.5
+
+if 'binder' not in st.session_state or not isinstance(st.session_state.binder, (int, float)):
+    st.session_state.binder = 2.7
+elif st.session_state.binder < 0.5 or st.session_state.binder > 3.0:
+    st.session_state.binder = 2.7
+
+if 'pvpp' not in st.session_state or not isinstance(st.session_state.pvpp, (int, float)):
+    st.session_state.pvpp = 3.0
+elif st.session_state.pvpp < 1.0 or st.session_state.pvpp > 5.0:
+    st.session_state.pvpp = 3.0
+
+if 'granule' not in st.session_state or not isinstance(st.session_state.granule, (int, float)):
+    st.session_state.granule = 125.0
+elif st.session_state.granule < 50 or st.session_state.granule > 200:
+    st.session_state.granule = 125.0
 
 # ================================================================
 # 1. TRUE PINN MODEL
@@ -392,22 +432,6 @@ def get_experiments():
 # ================================================================
 
 st.set_page_config(page_title="True PINN Framework", page_icon="🧬", layout="wide")
-
-# ---- SAFETY: Reset invalid session state values ----
-if 'pressure' not in st.session_state or st.session_state.pressure < 100 or st.session_state.pressure > 250:
-    st.session_state.pressure = 230.0
-if 'speed' not in st.session_state or st.session_state.speed < 5 or st.session_state.speed > 40:
-    st.session_state.speed = 12.0
-if 'mgst' not in st.session_state or st.session_state.mgst < 0.05 or st.session_state.mgst > 1.0:
-    st.session_state.mgst = 0.20
-if 'api' not in st.session_state or st.session_state.api < 85 or st.session_state.api > 95:
-    st.session_state.api = 90.5
-if 'binder' not in st.session_state or st.session_state.binder < 0.5 or st.session_state.binder > 3.0:
-    st.session_state.binder = 2.7
-if 'pvpp' not in st.session_state or st.session_state.pvpp < 1.0 or st.session_state.pvpp > 5.0:
-    st.session_state.pvpp = 3.0
-if 'granule' not in st.session_state or st.session_state.granule < 50 or st.session_state.granule > 200:
-    st.session_state.granule = 125.0
 
 # ---- Custom CSS ----
 st.markdown("""
