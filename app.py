@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 17.0 (Industrial Targets & Stability)
+Version: 17.1 (Industrial Targets Removed)
 """
 
 import streamlit as st
@@ -85,7 +85,6 @@ class TruePINN(nn.Module):
     def __init__(self, input_dim=8, output_dim=3):
         super(TruePINN, self).__init__()
 
-        # Main neural network with BatchNorm and Dropout for regularization
         self.network = nn.Sequential(
             nn.Linear(input_dim, 128),
             nn.BatchNorm1d(128),
@@ -105,14 +104,13 @@ class TruePINN(nn.Module):
             nn.Linear(32, output_dim)
         )
 
-        # Formulation-dependent Heckel parameters
         self.k_network = nn.Sequential(
             nn.Linear(input_dim, 32),
             nn.Tanh(),
             nn.Linear(32, 16),
             nn.Tanh(),
             nn.Linear(16, 1),
-            nn.Softplus()  # k > 0
+            nn.Softplus()
         )
 
         self.A_network = nn.Sequential(
@@ -220,7 +218,7 @@ class TruePINN(nn.Module):
 
 
 # ================================================================
-# 2. DATA GENERATION (Targeted Sampling)
+# 2. DATA GENERATION
 # ================================================================
 
 def generate_pinn_data(n_samples=600, random_state=42):
@@ -306,7 +304,7 @@ def generate_pinn_data(n_samples=600, random_state=42):
 
 
 # ================================================================
-# 3. NSGA-II (Numerically Stable)
+# 3. NSGA-II IMPLEMENTATION
 # ================================================================
 
 class NSGAII:
@@ -971,7 +969,7 @@ with col_right:
             elif efrf >= 0.35:
                 st.error(f"🚨 High capping risk – EFRF = {efrf:.4f} (must be < 0.35).")
 
-            # ---- Formulation Feasibility Indicator (Basic) ----
+            # ---- Formulation Feasibility Indicator ----
             st.markdown("### ✅ Formulation Feasibility")
 
             tensile_pass = tensile >= 2.0
@@ -1033,48 +1031,6 @@ with col_right:
                         <span style="color: #721c24; font-size: 0.85rem;">Adjust parameters</span>
                     </div>
                     """, unsafe_allow_html=True)
-
-            st.markdown("---")
-
-            # ---- INDUSTRIAL TARGETS COMPARISON (NEW) ----
-            st.markdown("### 🏭 Industrial Targets Comparison")
-
-            # Define recommended targets
-            targets = {
-                'Tensile Strength (MPa)': {'min': 2.5, 'max': 5.0, 'value': tensile, 'unit': 'MPa'},
-                'EFRF': {'min': 0.10, 'max': 0.35, 'value': efrf, 'unit': ''},
-                'Density': {'min': 0.85, 'max': 0.98, 'value': density, 'unit': ''},
-                'API Loading (%)': {'min': 90.0, 'max': 91.0, 'value': api, 'unit': '%'}  # target ~90.5
-            }
-
-            # Build comparison table
-            target_df = pd.DataFrame({
-                'Property': [],
-                'Recommended Range': [],
-                'Current Value': [],
-                'Status': []
-            })
-
-            for prop, info in targets.items():
-                val = info['value']
-                low = info['min']
-                high = info['max']
-                in_range = low <= val <= high
-                status = "✅ PASS" if in_range else "❌ FAIL"
-                target_df = pd.concat([target_df, pd.DataFrame({
-                    'Property': [prop],
-                    'Recommended Range': [f"{low:.2f} – {high:.2f}" + (f" {info['unit']}" if info['unit'] else "")],
-                    'Current Value': [f"{val:.3f}" if isinstance(val, float) else f"{val:.1f}"],
-                    'Status': [status]
-                })], ignore_index=True)
-
-            st.dataframe(target_df.style.applymap(
-                lambda x: 'background-color: #d4edda' if 'PASS' in str(x) else ('background-color: #f8d7da' if 'FAIL' in str(x) else ''),
-                subset=['Status']
-            ), use_container_width=True, hide_index=True)
-
-            # Additional info
-            st.caption("🎯 Industrial recommended ranges based on typical tablet quality standards.")
 
             st.markdown("---")
 
