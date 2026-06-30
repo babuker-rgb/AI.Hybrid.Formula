@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Flexible Experiments
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 8.5 (Definitive Session State Fix)
+Version: 9.0 (Fully Functional Experiment Buttons)
 """
 
 import streamlit as st
@@ -23,10 +23,9 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. DEFINITIVE SESSION STATE INITIALIZATION
+# 0. SESSION STATE INITIALIZATION
 # ================================================================
 
-# Define all default values
 DEFAULTS = {
     'api': 90.5,
     'binder': 2.7,
@@ -37,7 +36,6 @@ DEFAULTS = {
     'granule': 125.0
 }
 
-# Define valid ranges
 RANGES = {
     'api': (85.0, 95.0),
     'binder': (0.5, 3.0),
@@ -48,27 +46,22 @@ RANGES = {
     'granule': (50.0, 200.0)
 }
 
-# Helper function to get safe session state value
-def get_safe_state(key):
-    """Get session state value or default, ensuring it's within range"""
-    if key not in st.session_state:
-        st.session_state[key] = DEFAULTS[key]
-        return DEFAULTS[key]
-    
-    try:
-        val = float(st.session_state[key])
-        min_val, max_val = RANGES[key]
-        if val < min_val or val > max_val:
+def safe_initialize():
+    """Initialize session state with defaults and ensure valid values."""
+    for key in DEFAULTS:
+        if key not in st.session_state:
             st.session_state[key] = DEFAULTS[key]
-            return DEFAULTS[key]
-        return val
-    except (ValueError, TypeError):
-        st.session_state[key] = DEFAULTS[key]
-        return DEFAULTS[key]
+        else:
+            try:
+                val = float(st.session_state[key])
+                min_val, max_val = RANGES[key]
+                if val < min_val or val > max_val:
+                    st.session_state[key] = DEFAULTS[key]
+            except (ValueError, TypeError):
+                st.session_state[key] = DEFAULTS[key]
 
-# Initialize all session state values safely BEFORE any UI
-for key in DEFAULTS:
-    get_safe_state(key)
+# Run initialization before any UI
+safe_initialize()
 
 # ================================================================
 # 1. TRUE PINN MODEL
@@ -505,12 +498,13 @@ col_left, col_right = st.columns([1, 1.2], gap="medium")
 with col_left:
     st.markdown("### 📊 Formulation Parameters")
     with st.container(border=True):
-        # Use safe session state values directly
-        api = st.slider("🧪 API Loading (%)", 85.0, 95.0, get_safe_state('api'), 0.1, key="api_slider")
-        binder = st.slider("🔗 Binder (%)", 0.5, 3.0, get_safe_state('binder'), 0.1, key="binder_slider")
-        pvpp = st.slider("💊 PVPP (%)", 1.0, 5.0, get_safe_state('pvpp'), 0.1, key="pvpp_slider")
-        mgst = st.slider("🧴 Mg-St (%)", 0.05, 1.0, get_safe_state('mgst'), 0.01, key="mgst_slider")
+        # Sliders directly bound to session state via key
+        api = st.slider("🧪 API Loading (%)", 85.0, 95.0, step=0.1, key="api")
+        binder = st.slider("🔗 Binder (%)", 0.5, 3.0, step=0.1, key="binder")
+        pvpp = st.slider("💊 PVPP (%)", 1.0, 5.0, step=0.1, key="pvpp")
+        mgst = st.slider("🧴 Mg-St (%)", 0.05, 1.0, step=0.01, key="mgst")
 
+        # MCC calculation
         used_total = api + binder + pvpp + mgst
         remaining = 100 - used_total
         if remaining < 0:
@@ -530,20 +524,11 @@ with col_left:
 
     st.markdown("### ⚙️ Process Parameters")
     with st.container(border=True):
-        pressure = st.slider("⚙️ Compaction Pressure (MPa)", 100.0, 250.0, get_safe_state('pressure'), 1.0, key="pressure_slider")
-        speed = st.slider("🔄 Punch Speed (rpm)", 5.0, 40.0, get_safe_state('speed'), 0.5, key="speed_slider")
-        granule = st.slider("🔬 Granule Size (µm)", 50.0, 200.0, get_safe_state('granule'), 1.0, key="granule_slider")
+        pressure = st.slider("⚙️ Compaction Pressure (MPa)", 100.0, 250.0, step=1.0, key="pressure")
+        speed = st.slider("🔄 Punch Speed (rpm)", 5.0, 40.0, step=0.5, key="speed")
+        granule = st.slider("🔬 Granule Size (µm)", 50.0, 200.0, step=1.0, key="granule")
 
     predict_btn = st.button("🔬 Predict & Optimise", use_container_width=True)
-
-# ---- Update session state from sliders ----
-st.session_state.api = api
-st.session_state.binder = binder
-st.session_state.pvpp = pvpp
-st.session_state.mgst = mgst
-st.session_state.pressure = pressure
-st.session_state.speed = speed
-st.session_state.granule = granule
 
 # ================================================================
 # RESULTS PANEL
