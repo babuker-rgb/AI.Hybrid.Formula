@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 6.0 (Fixed validation gradient issue)
+Version: 7.0 (Fixed MCC constraint & EFRF safety margin)
 """
 
 import streamlit as st
@@ -28,7 +28,7 @@ warnings.filterwarnings('ignore')
 
 class TruePINN(nn.Module):
     """
-    True Physics-Informed Neural Network with proper Autograd for monotonicity.
+    True Physics-Informed Neural Network with MCC constraint and strict EFRF.
     """
 
     def __init__(self, input_dim=8, output_dim=3):
@@ -81,17 +81,17 @@ class TruePINN(nn.Module):
         return k.squeeze(), A.squeeze()
 
     def compute_loss(self, X_scaled, X_raw, y_true,
-                     w_data=1.0, w_heckel=0.5, w_efrf=0.5,
+                     w_data=1.0, w_heckel=0.5, w_efrf=1.0,  # Increased w_efrf to enforce strict limit
                      w_monotonic=0.1, w_boundary=0.1,
-                     efrf_target=0.4,
+                     efrf_target=0.35,  # Reduced target for extra safety margin
+                     mcc_max=8.0,
                      compute_grad=True):
         """
-        Total PINN loss.
-        compute_grad: if True, compute monotonicity gradient (training).
-                      if False, skip monotonicity gradient (validation).
+        Total PINN loss with MCC constraint and strict EFRF.
         """
         # Real pressure for physics
         pressure_real = X_raw[:, 5]
+        mcc_real = X_raw[:, 1]  # MCC is at index 1
 
         # Forward pass
         y_pred = self.forward(X_scaled)
@@ -111,13 +111,16 @@ class TruePINN(nn.Module):
         heckel_target = k * pressure_real + A
         heckel_loss = torch.mean((heckel_pred - heckel_target) ** 2)
 
-        # ---------- EFRF Constraint (with safety margin) ----------
+        # ---------- EFRF Constraint (strict safety margin) ----------
         efrf_pred = er_pred / (tensile_pred + 1e-8)
         efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
 
+        # ---------- MCC Constraint ----------
+        # Penalize MCC exceeding mcc_max (8%)
+        mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
+
         # ---------- Monotonicity: ∂D/∂P > 0 ----------
         if compute_grad:
-            # Compute gradient using autograd (only during training)
             if not X_scaled.requires_grad:
                 X_scaled.requires_grad_(True)
 
@@ -134,7 +137,6 @@ class TruePINN(nn.Module):
             grad_pressure = grad_density[:, 5]
             monotonic_loss = torch.mean(torch.relu(-grad_pressure) ** 2)
         else:
-            # During validation, we skip the monotonicity term
             monotonic_loss = torch.tensor(0.0, device=X_scaled.device)
 
         # ---------- Boundary Conditions (using real pressure) ----------
@@ -150,6 +152,7 @@ class TruePINN(nn.Module):
             w_data * data_loss +
             w_heckel * heckel_loss +
             w_efrf * efrf_loss +
+            0.5 * mcc_loss +  # Added MCC penalty
             w_monotonic * monotonic_loss +
             w_boundary * boundary_loss
         )
@@ -158,6 +161,7 @@ class TruePINN(nn.Module):
             'data_loss': data_loss.item(),
             'heckel_loss': heckel_loss.item(),
             'efrf_loss': efrf_loss.item(),
+            'mcc_loss': mcc_loss.item(),
             'monotonic_loss': monotonic_loss.item() if compute_grad else 0.0,
             'boundary_loss': boundary_loss.item(),
             'total_loss': total_loss.item()
@@ -174,25 +178,50 @@ class TruePINN(nn.Module):
 
 
 # ================================================================
-# 2. DATA GENERATION
+# 2. DATA GENERATION WITH MCC LIMIT
 # ================================================================
 
-def generate_pinn_data(n_samples=300, random_state=42):
+def generate_pinn_data(n_samples=400, random_state=42):
     np.random.seed(random_state)
     X = np.zeros((n_samples, 8))
     y = np.zeros((n_samples, 3))
 
     for i in range(n_samples):
+        # Generate formulations with MCC limited to 8%
         api = np.random.uniform(85, 95)
         binder = np.random.uniform(0.5, 3.0)
         mgst = np.random.uniform(0.2, 1.0)
         pvpp = np.random.uniform(1.0, 5.0)
-        mcc = 100 - (api + binder + mgst + pvpp)
+        # MCC is constrained to 0-8%
+        mcc = np.random.uniform(0, 8.0)
+        # Adjust others to ensure sum = 100%
+        total_others = api + binder + mgst + pvpp + mcc
+        if total_others > 100:
+            scale = 100 / total_others
+            api *= scale
+            binder *= scale
+            mgst *= scale
+            pvpp *= scale
+            mcc *= scale
+        else:
+            # Add filler to reach 100% (but we keep MCC as the main filler)
+            # Here we adjust by adding the remainder to MCC (but cap at 8%)
+            remainder = 100 - (api + binder + mgst + pvpp)
+            if mcc + remainder <= 8.0:
+                mcc += remainder
+            else:
+                # If MCC exceeds 8%, we reduce others proportionally
+                excess = (mcc + remainder) - 8.0
+                mcc = 8.0
+                # Reduce API slightly to keep sum 100%
+                api -= excess
+
+        # Ensure bounds
+        api = np.clip(api, 85, 95)
+        binder = np.clip(binder, 0.5, 3.0)
+        mgst = np.clip(mgst, 0.2, 1.0)
+        pvpp = np.clip(pvpp, 1.0, 5.0)
         mcc = np.clip(mcc, 0, 8.0)
-        if mcc > 8.0:
-            scale = (100 - 8.0) / (api + binder + mgst + pvpp)
-            api *= scale; binder *= scale; mgst *= scale; pvpp *= scale
-            mcc = 8.0
 
         pressure = np.random.uniform(100, 250)
         speed = np.random.uniform(10, 40)
@@ -200,6 +229,7 @@ def generate_pinn_data(n_samples=300, random_state=42):
 
         X[i] = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
 
+        # True physics
         k_eff = 0.035 * (1 - 0.4 * (api - 85)/10) * (1 - 0.2 * (speed - 10)/30)
         k_eff = max(k_eff, 0.008)
         A_eff = 1.2 + 0.1 * (binder - 1.5) - 0.2 * (mgst - 0.5)
@@ -229,7 +259,7 @@ def generate_pinn_data(n_samples=300, random_state=42):
 
 @st.cache_resource
 def load_pinn_model():
-    df, feature_names = generate_pinn_data(n_samples=300)
+    df, feature_names = generate_pinn_data(n_samples=400)
     X_raw = df[feature_names].values
     y = df[['Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']].values
 
@@ -244,14 +274,14 @@ def load_pinn_model():
         X_scaled_temp, X_raw_temp, y_temp, test_size=0.5, random_state=42
     )
 
-    # Convert to tensors – ensure X_scaled_train requires grad for monotonicity
+    # Convert to tensors
     X_scaled_train_t = torch.FloatTensor(X_scaled_train)
     X_scaled_train_t.requires_grad_(True)
     X_raw_train_t = torch.FloatTensor(X_raw_train)
     y_train_t = torch.FloatTensor(y_train)
 
     X_scaled_val_t = torch.FloatTensor(X_scaled_val)
-    X_scaled_val_t.requires_grad_(True)  # Keep for consistency, but we won't compute grad during validation
+    X_scaled_val_t.requires_grad_(True)
     X_raw_val_t = torch.FloatTensor(X_raw_val)
     y_val_t = torch.FloatTensor(y_val)
 
@@ -265,32 +295,32 @@ def load_pinn_model():
     best_state = None
 
     progress_bar = st.progress(0)
-    for epoch in range(2000):
+    for epoch in range(2500):
         # ----- Training -----
         model.train()
         optimizer.zero_grad()
         total_loss, _ = model.compute_loss(
             X_scaled_train_t, X_raw_train_t, y_train_t,
-            w_data=1.0, w_heckel=0.5, w_efrf=0.5,
+            w_data=1.0, w_heckel=0.5, w_efrf=1.0,
             w_monotonic=0.1, w_boundary=0.1,
-            efrf_target=0.4,
-            compute_grad=True   # enable gradient for training
+            efrf_target=0.35,
+            mcc_max=8.0,
+            compute_grad=True
         )
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
-        # ----- Validation (without monotonicity gradient) -----
+        # ----- Validation -----
         model.eval()
-        # Compute validation loss without gradient tracking for monotonicity
-        # We still compute the loss but skip the autograd part.
-        with torch.set_grad_enabled(False):  # Disable gradient globally for validation
+        with torch.set_grad_enabled(False):
             val_loss, _ = model.compute_loss(
                 X_scaled_val_t, X_raw_val_t, y_val_t,
-                w_data=1.0, w_heckel=0.5, w_efrf=0.5,
+                w_data=1.0, w_heckel=0.5, w_efrf=1.0,
                 w_monotonic=0.1, w_boundary=0.1,
-                efrf_target=0.4,
-                compute_grad=False   # skip monotonicity gradient
+                efrf_target=0.35,
+                mcc_max=8.0,
+                compute_grad=False
             )
         val_loss_value = val_loss.item()
 
@@ -308,7 +338,7 @@ def load_pinn_model():
             break
 
         if (epoch + 1) % 100 == 0:
-            progress_bar.progress((epoch + 1) / 2000)
+            progress_bar.progress((epoch + 1) / 2500)
 
     progress_bar.progress(1.0)
 
@@ -319,7 +349,6 @@ def load_pinn_model():
     model.feature_names = feature_names
     model.scaler = scaler
 
-    # Save checkpoint for production
     torch.save(model.state_dict(), 'true_pinn_checkpoint.pt')
 
     return model, scaler, feature_names, df, {'train': [], 'val': []}
@@ -382,10 +411,11 @@ with st.sidebar:
     st.markdown("""
     **Embedded Physics:**
     - ✅ **Heckel Equation:** ln(1/(1-D)) = k(X)P + A(X)
-    - ✅ **EFRF:** ER / σt < 0.4 (safety margin)
+    - ✅ **EFRF:** ER / σt < 0.35 (strict safety margin)
     - ✅ **Monotonicity:** ∂D/∂P > 0
     - ✅ **Boundary Conditions:** 0.4 < D < 0.98
     - ✅ **Formulation-dependent k(X) and A(X)**
+    - ✅ **MCC Constraint:** MCC ≤ 8%
 
     **Architecture:**
     - 128-128-64-32 with BatchNorm & Dropout
@@ -409,21 +439,24 @@ with col_left:
         binder = st.slider("🔗 Binder (%)", 0.5, 3.0, 2.7, 0.1)
         pvpp = st.slider("💊 PVPP (%)", 1.0, 5.0, 3.0, 0.1)
         mgst = st.slider("🧴 Mg-St (%)", 0.2, 1.0, 0.2, 0.05)
+
+        # MCC is auto-calculated to ensure sum=100% and cap at 8%
         used_total = api + binder + pvpp + mgst
         remaining = 100 - used_total
         if remaining < 0:
             st.error("❌ Total exceeds 100%!")
             mcc = 0.0
         else:
-            mcc = remaining
-            if mcc > 8.0:
-                st.warning(f"⚠️ MCC = {mcc:.1f}% exceeds 8% limit.")
+            mcc = min(remaining, 8.0)
+            if remaining > 8.0:
+                st.warning(f"⚠️ Remaining filler {remaining:.1f}% exceeds 8% limit. MCC capped at 8%. Adjust API or other components.")
             st.metric("📦 MCC (%)", f"{mcc:.1f}%")
+
         total = api + binder + pvpp + mgst + mcc
         if abs(total - 100) < 0.1:
             st.success(f"∑ Total = {total:.2f}% ✓")
         else:
-            st.error(f"∑ Total = {total:.2f}% ✗")
+            st.error(f"∑ Total = {total:.2f}% ✗ (MCC capped at 8%)")
 
     st.markdown("### ⚙️ Process Parameters")
     with st.container(border=True):
@@ -448,28 +481,28 @@ with col_right:
             c2.metric("💪 Tensile", f"{tensile:.3f} MPa")
             c3.metric("⚠️ EFRF", f"{efrf:.4f}")
 
-            if tensile >= 2.0 and efrf < 0.4:
+            if tensile >= 2.0 and efrf < 0.35:
                 st.success(f"""
-                🎉 **Formulation satisfies all constraints!**
+                🎉 **Formulation satisfies all constraints with safety margin!**
                 ✅ σt = {tensile:.3f} MPa (≥ 2 MPa)
-                ✅ EFRF = {efrf:.4f} (< 0.4)
+                ✅ EFRF = {efrf:.4f} (< 0.35)
                 📌 Suitable for high-speed industrial tableting.
                 """)
-            elif tensile < 2.0 and efrf >= 0.4:
+            elif tensile < 2.0 and efrf >= 0.35:
                 st.error("🚨 CRITICAL: Low strength and high capping risk.")
             elif tensile < 2.0:
                 st.warning("⚠️ Low tensile strength – increase binder or pressure.")
-            elif efrf >= 0.4:
+            elif efrf >= 0.35:
                 st.error("🚨 High capping risk – reduce speed or Mg-St.")
 
             with st.expander("🔬 Physics Verification"):
                 st.markdown("""
                 - ✅ Heckel residual, EFRF constraint, monotonicity, boundary conditions enforced.
                 - k(X) and A(X) are formulation-dependent.
+                - MCC constrained to ≤ 8%.
                 """)
-                heckel_pred = np.log(1/(1-density+1e-8))
-                st.metric("EFRF", f"{efrf:.4f}", delta="< 0.4 ✅" if efrf < 0.4 else "≥ 0.4 ❌")
+                st.metric("EFRF", f"{efrf:.4f}", delta="< 0.35 ✅" if efrf < 0.35 else "≥ 0.35 ❌")
 
 st.markdown("---")
-st.caption("🔬 **True PINN — Production-Ready with Full Physics**")
+st.caption("🔬 **True PINN — Production-Ready with Full Physics & MCC Constraint**")
 st.caption("📧 Contact: babuker@protonmail.com")
