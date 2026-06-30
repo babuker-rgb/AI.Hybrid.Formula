@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Flexible Experiments
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 8.3 (Ultimate Session State Fix)
+Version: 8.4 (Fixed Experiment Buttons)
 """
 
 import streamlit as st
@@ -23,10 +23,9 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. ULTIMATE SESSION STATE RESET (before any UI)
+# 0. SESSION STATE RESET
 # ================================================================
 
-# Define default values
 DEFAULTS = {
     'api': 90.5,
     'binder': 2.7,
@@ -37,7 +36,6 @@ DEFAULTS = {
     'granule': 125.0
 }
 
-# Define valid ranges
 RANGES = {
     'api': (85.0, 95.0),
     'binder': (0.5, 3.0),
@@ -48,16 +46,10 @@ RANGES = {
     'granule': (50.0, 200.0)
 }
 
-# Helper to clamp values
-def clamp(val, min_val, max_val):
-    return max(min_val, min(val, max_val))
-
-# Reset all session state values to safe defaults
 for key in DEFAULTS:
     if key not in st.session_state:
         st.session_state[key] = DEFAULTS[key]
     else:
-        # Ensure value is numeric and within range
         try:
             val = float(st.session_state[key])
             min_val, max_val = RANGES[key]
@@ -71,14 +63,9 @@ for key in DEFAULTS:
 # ================================================================
 
 class TruePINN(nn.Module):
-    """
-    True Physics-Informed Neural Network with MCC constraint and strict EFRF.
-    """
-
     def __init__(self, input_dim=8, output_dim=3):
         super(TruePINN, self).__init__()
 
-        # Main network
         self.network = nn.Sequential(
             nn.Linear(input_dim, 128),
             nn.BatchNorm1d(128),
@@ -98,7 +85,6 @@ class TruePINN(nn.Module):
             nn.Linear(32, output_dim)
         )
 
-        # Physics parameter networks (formulation-dependent)
         self.k_network = nn.Sequential(
             nn.Linear(input_dim, 32),
             nn.Tanh(),
@@ -130,39 +116,28 @@ class TruePINN(nn.Module):
                      efrf_target=0.35,
                      mcc_max=8.0,
                      compute_grad=True):
-        """
-        Total PINN loss with MCC constraint and strict EFRF.
-        """
-        # Real pressure for physics
         pressure_real = X_raw[:, 5]
         mcc_real = X_raw[:, 1]
 
-        # Forward pass
         y_pred = self.forward(X_scaled)
         density_pred = y_pred[:, 0]
         tensile_pred = y_pred[:, 1]
         er_pred = y_pred[:, 2]
 
-        # Formulation-dependent Heckel parameters
         k, A = self.get_heckel_params(X_scaled)
 
-        # ---------- Data Loss ----------
         data_loss = nn.MSELoss()(y_pred, y_true)
 
-        # ---------- Heckel Residual ----------
         D_clamped = torch.clamp(density_pred, 0.01, 0.99)
         heckel_pred = torch.log(1.0 / (1.0 - D_clamped))
         heckel_target = k * pressure_real + A
         heckel_loss = torch.mean((heckel_pred - heckel_target) ** 2)
 
-        # ---------- EFRF Constraint ----------
         efrf_pred = er_pred / (tensile_pred + 1e-8)
         efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
 
-        # ---------- MCC Constraint ----------
         mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
 
-        # ---------- Monotonicity ----------
         if compute_grad:
             if not X_scaled.requires_grad:
                 X_scaled.requires_grad_(True)
@@ -182,7 +157,6 @@ class TruePINN(nn.Module):
         else:
             monotonic_loss = torch.tensor(0.0, device=X_scaled.device)
 
-        # ---------- Boundary Conditions ----------
         mask_low = (pressure_real < 120).float()
         mask_high = (pressure_real > 230).float()
         boundary_loss = (
@@ -190,7 +164,6 @@ class TruePINN(nn.Module):
             torch.mean(mask_high * torch.relu(density_pred - 0.98) ** 2)
         )
 
-        # ---------- Total Loss ----------
         total_loss = (
             w_data * data_loss +
             w_heckel * heckel_loss +
@@ -437,7 +410,6 @@ def get_experiments():
 
 st.set_page_config(page_title="True PINN Framework", page_icon="🧬", layout="wide")
 
-# ---- Custom CSS ----
 st.markdown("""
 <style>
     .main-header { text-align: center; padding: 0.5rem 0; }
@@ -505,13 +477,9 @@ cols = st.columns(len(experiments))
 for i, (name, params) in enumerate(experiments.items()):
     with cols[i]:
         if st.button(f"📌 {name}", key=f"exp_{i}", use_container_width=True):
-            st.session_state.api = params['api']
-            st.session_state.binder = params['binder']
-            st.session_state.pvpp = params['pvpp']
-            st.session_state.mgst = params['mgst']
-            st.session_state.pressure = params['pressure']
-            st.session_state.speed = params['speed']
-            st.session_state.granule = params['granule']
+            # Update all session state values
+            for key in params:
+                st.session_state[key] = params[key]
             st.rerun()
         st.caption(params['description'])
 
@@ -525,11 +493,11 @@ col_left, col_right = st.columns([1, 1.2], gap="medium")
 with col_left:
     st.markdown("### 📊 Formulation Parameters")
     with st.container(border=True):
-        # Use session state values safely
-        api = st.slider("🧪 API Loading (%)", 85.0, 95.0, float(st.session_state.api), 0.1, key="slider_api")
-        binder = st.slider("🔗 Binder (%)", 0.5, 3.0, float(st.session_state.binder), 0.1, key="slider_binder")
-        pvpp = st.slider("💊 PVPP (%)", 1.0, 5.0, float(st.session_state.pvpp), 0.1, key="slider_pvpp")
-        mgst = st.slider("🧴 Mg-St (%)", 0.05, 1.0, float(st.session_state.mgst), 0.01, key="slider_mgst")
+        # Sliders read directly from session state
+        api = st.slider("🧪 API Loading (%)", 85.0, 95.0, st.session_state.api, 0.1, key="api")
+        binder = st.slider("🔗 Binder (%)", 0.5, 3.0, st.session_state.binder, 0.1, key="binder")
+        pvpp = st.slider("💊 PVPP (%)", 1.0, 5.0, st.session_state.pvpp, 0.1, key="pvpp")
+        mgst = st.slider("🧴 Mg-St (%)", 0.05, 1.0, st.session_state.mgst, 0.01, key="mgst")
 
         used_total = api + binder + pvpp + mgst
         remaining = 100 - used_total
@@ -550,20 +518,11 @@ with col_left:
 
     st.markdown("### ⚙️ Process Parameters")
     with st.container(border=True):
-        pressure = st.slider("⚙️ Compaction Pressure (MPa)", 100.0, 250.0, float(st.session_state.pressure), 1.0, key="slider_pressure")
-        speed = st.slider("🔄 Punch Speed (rpm)", 5.0, 40.0, float(st.session_state.speed), 0.5, key="slider_speed")
-        granule = st.slider("🔬 Granule Size (µm)", 50.0, 200.0, float(st.session_state.granule), 1.0, key="slider_granule")
+        pressure = st.slider("⚙️ Compaction Pressure (MPa)", 100.0, 250.0, st.session_state.pressure, 1.0, key="pressure")
+        speed = st.slider("🔄 Punch Speed (rpm)", 5.0, 40.0, st.session_state.speed, 0.5, key="speed")
+        granule = st.slider("🔬 Granule Size (µm)", 50.0, 200.0, st.session_state.granule, 1.0, key="granule")
 
     predict_btn = st.button("🔬 Predict & Optimise", use_container_width=True)
-
-# ---- Update session state from sliders ----
-st.session_state.api = api
-st.session_state.binder = binder
-st.session_state.pvpp = pvpp
-st.session_state.mgst = mgst
-st.session_state.pressure = pressure
-st.session_state.speed = speed
-st.session_state.granule = granule
 
 # ================================================================
 # RESULTS PANEL
