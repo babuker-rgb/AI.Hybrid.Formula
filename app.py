@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 16.2 (NSGA-II Numerical Stability Fix)
+Version: 17.0 (Industrial Targets & Stability)
 """
 
 import streamlit as st
@@ -138,9 +138,6 @@ class TruePINN(nn.Module):
                      efrf_target=0.35,
                      mcc_max=8.0,
                      compute_grad=True):
-        """
-        Compute total PINN loss with all physics constraints.
-        """
         pressure_real = X_raw[:, 5]
         mcc_real = X_raw[:, 1]
 
@@ -151,26 +148,20 @@ class TruePINN(nn.Module):
 
         k, A = self.get_heckel_params(X_scaled)
 
-        # 1. Data loss
         data_loss = nn.MSELoss()(y_pred, y_true)
 
-        # 2. Heckel equation residual
         D_clamped = torch.clamp(density_pred, 0.01, 0.99)
         heckel_pred = torch.log(1.0 / (1.0 - D_clamped))
         heckel_target = k * pressure_real + A
         heckel_loss = torch.mean((heckel_pred - heckel_target) ** 2)
 
-        # 3. EFRF constraint (strict safety margin)
         efrf_pred = er_pred / (tensile_pred + 1e-8)
         efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
 
-        # 4. MCC constraint
         mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
 
-        # 5. Density penalty (max 1.0)
         density_penalty = torch.mean(torch.relu(density_pred - 0.99) ** 2)
 
-        # 6. Monotonicity constraint
         if compute_grad:
             if not X_scaled.requires_grad:
                 X_scaled.requires_grad_(True)
@@ -190,7 +181,6 @@ class TruePINN(nn.Module):
         else:
             monotonic_loss = torch.tensor(0.0, device=X_scaled.device)
 
-        # 7. Boundary conditions
         mask_low = (pressure_real < 120).float()
         mask_high = (pressure_real > 230).float()
         boundary_loss = (
@@ -198,7 +188,6 @@ class TruePINN(nn.Module):
             torch.mean(mask_high * torch.relu(density_pred - 0.98) ** 2)
         )
 
-        # Total loss
         total_loss = (
             w_data * data_loss +
             w_heckel * heckel_loss +
@@ -223,7 +212,6 @@ class TruePINN(nn.Module):
         return total_loss, loss_dict
 
     def predict(self, X_scaled):
-        """Predict density, tensile strength, and elastic recovery."""
         self.eval()
         with torch.no_grad():
             if not isinstance(X_scaled, torch.Tensor):
@@ -236,10 +224,6 @@ class TruePINN(nn.Module):
 # ================================================================
 
 def generate_pinn_data(n_samples=600, random_state=42):
-    """
-    Generate synthetic data with targeted sampling around optimal region.
-    Uses 50% random + 50% targeted around the optimum.
-    """
     np.random.seed(random_state)
     X = np.zeros((n_samples, 8))
     y = np.zeros((n_samples, 3))
@@ -248,7 +232,6 @@ def generate_pinn_data(n_samples=600, random_state=42):
 
     for i in range(n_samples):
         if i < n_random:
-            # Random sampling across entire design space
             api = np.random.uniform(85, 95)
             binder = np.random.uniform(0.5, 3.0)
             mgst = np.random.uniform(0.2, 1.0)
@@ -258,7 +241,6 @@ def generate_pinn_data(n_samples=600, random_state=42):
             granule = np.random.uniform(50, 200)
             mcc = np.random.uniform(0, 8.0)
         else:
-            # Targeted sampling around optimum (API 90.5, binder 2.8, etc.)
             api = np.random.normal(90.5, 1.5)
             api = np.clip(api, 85, 95)
             binder = np.random.normal(2.8, 0.4)
@@ -275,7 +257,6 @@ def generate_pinn_data(n_samples=600, random_state=42):
             granule = np.clip(granule, 50, 200)
             mcc = 8.0
 
-        # Ensure sum = 100%
         total_others = api + binder + mgst + pvpp + mcc
         if total_others > 100:
             scale = 100 / total_others
@@ -301,7 +282,6 @@ def generate_pinn_data(n_samples=600, random_state=42):
 
         X[i] = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
 
-        # True physics models
         k_eff = 0.035 * (1 - 0.4 * (api - 85)/10) * (1 - 0.2 * (speed - 10)/30)
         k_eff = max(k_eff, 0.008)
         A_eff = 1.2 + 0.1 * (binder - 1.5) - 0.2 * (mgst - 0.5)
@@ -326,16 +306,10 @@ def generate_pinn_data(n_samples=600, random_state=42):
 
 
 # ================================================================
-# 3. NSGA-II IMPLEMENTATION (NUMERICAL STABILITY FIX)
+# 3. NSGA-II (Numerically Stable)
 # ================================================================
 
 class NSGAII:
-    """
-    Non-dominated Sorting Genetic Algorithm II for multi-objective optimization.
-    Objectives: Maximize API loading, Minimize EFRF.
-    Constraints: σt ≥ 2 MPa, EFRF < 0.35.
-    """
-    
     def __init__(self, model, scaler, bounds, pop_size=100, n_generations=60):
         self.model = model
         self.scaler = scaler
@@ -364,7 +338,6 @@ class NSGAII:
             try:
                 api, binder, mgst, pvpp, pressure, speed, granule = population[i, 0], population[i, 4], population[i, 3], population[i, 2], population[i, 5], population[i, 6], population[i, 7]
                 
-                # Ensure 100% and MCC constraint
                 used = api + binder + mgst + pvpp
                 if used > 100:
                     scale = 100 / used
@@ -391,20 +364,16 @@ class NSGAII:
                 tensile = pred[1]
                 er = pred[2]
                 
-                # Numerical stability: prevent division by zero and extreme values
                 if tensile < 0.01:
                     tensile = 0.01
-                    efrf = 100.0  # Very high penalty
+                    efrf = 100.0
                 else:
                     efrf = er / tensile
-                    # Clip EFRF to reasonable range
                     efrf = max(0.0, min(efrf, 10.0))
                 
-                # Check feasibility with stricter tolerance
                 constraints[i] = (tensile >= 1.99 and efrf < 0.36)
-
-                objectives[i, 0] = -api      # Minimize negative API = Maximize API
-                objectives[i, 1] = efrf      # Minimize EFRF
+                objectives[i, 0] = -api
+                objectives[i, 1] = efrf
                 tensile_strengths[i] = tensile
 
                 population[i, 0] = api
@@ -413,8 +382,7 @@ class NSGAII:
                 population[i, 3] = mgst
                 population[i, 4] = binder
                 
-            except Exception as e:
-                # If evaluation fails, set as infeasible with high values
+            except Exception:
                 objectives[i, 0] = 100.0
                 objectives[i, 1] = 100.0
                 constraints[i] = False
@@ -549,10 +517,8 @@ class NSGAII:
             self.tensile = tensile
             fronts, ranks = self._fast_non_dominated_sort(objectives, constraints)
             self.fronts = fronts
-            
             if gen == self.n_generations - 1:
                 break
-                
             crowding = np.zeros(self.pop_size)
             for front in fronts:
                 dist = self._crowding_distance(objectives, front)
@@ -599,8 +565,6 @@ class NSGAII:
             self.population = np.array(new_pop)
             self.objectives = np.array(new_obj)
             self.constraints = np.array(new_const)
-            
-        # Final evaluation
         objectives, constraints, tensile, pop = self._evaluate(self.population)
         self.population = pop
         self.objectives = objectives
@@ -651,7 +615,6 @@ def load_pinn_model():
 
     progress_bar = st.progress(0)
     for epoch in range(2500):
-        # Training
         model.train()
         optimizer.zero_grad()
         total_loss, _ = model.compute_loss(
@@ -664,7 +627,6 @@ def load_pinn_model():
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
-        # Validation
         model.eval()
         with torch.set_grad_enabled(False):
             val_loss, _ = model.compute_loss(
@@ -705,7 +667,7 @@ def load_pinn_model():
 
 
 # ================================================================
-# 5. PREDICTION (WITH NUMERICAL STABILITY)
+# 5. PREDICTION
 # ================================================================
 
 def predict_pinn(model, scaler, inputs):
@@ -715,14 +677,11 @@ def predict_pinn(model, scaler, inputs):
         with torch.no_grad():
             pred = model(X_tensor).numpy()[0]
         density, tensile, er = pred[0], pred[1], pred[2]
-        
-        # Numerical stability
         if tensile < 0.01:
             efrf = 10.0
         else:
             efrf = er / tensile
             efrf = max(0.0, min(efrf, 10.0))
-        
         return density, tensile, er, efrf
     except Exception as e:
         st.error(f"Prediction error: {e}")
@@ -741,7 +700,6 @@ def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
             pareto_efrf = objectives[front0, 1]
             feasible = constraints[front0]
 
-            # Filter out extreme values
             valid_mask = (pareto_api >= 85) & (pareto_api <= 95) & (pareto_efrf >= 0) & (pareto_efrf <= 2)
             pareto_api = pareto_api[valid_mask]
             pareto_efrf = pareto_efrf[valid_mask]
@@ -753,14 +711,12 @@ def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
             plot_df = pd.DataFrame({'API': pareto_api, 'EFRF': pareto_efrf}).dropna().sort_values('API')
             fig = go.Figure()
 
-            # All solutions
             fig.add_trace(go.Scatter(
                 x=-objectives[:, 0], y=objectives[:, 1],
                 mode='markers', marker=dict(size=3, color='gray', opacity=0.3),
                 name='All Solutions'
             ))
 
-            # Pareto front
             fig.add_trace(go.Scatter(
                 x=plot_df['API'], y=plot_df['EFRF'],
                 mode='lines+markers',
@@ -769,7 +725,6 @@ def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
                 name='Pareto Front'
             ))
 
-            # Feasible solutions
             feasible_indices = [i for i, f in enumerate(feasible) if f]
             if feasible_indices:
                 feasible_api = [pareto_api[i] for i in feasible_indices]
@@ -780,7 +735,6 @@ def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
                     name=f'Feasible ({len(feasible_indices)})'
                 ))
 
-            # Your formulation
             if api and efrf and 85 <= api <= 95 and 0 <= efrf <= 2:
                 fig.add_trace(go.Scatter(
                     x=[api], y=[efrf],
@@ -799,8 +753,7 @@ def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
                 hovermode='closest'
             )
             return fig
-    except Exception as e:
-        st.warning(f"Plotly error: {e}")
+    except Exception:
         return None
     return None
 
@@ -838,8 +791,7 @@ def plot_sensitivity_plotly(inputs, model, scaler):
             height=450
         )
         return fig
-    except Exception as e:
-        st.warning(f"Sensitivity error: {e}")
+    except Exception:
         return None
 
 
@@ -1019,7 +971,7 @@ with col_right:
             elif efrf >= 0.35:
                 st.error(f"🚨 High capping risk – EFRF = {efrf:.4f} (must be < 0.35).")
 
-            # ---- Formulation Feasibility Indicator ----
+            # ---- Formulation Feasibility Indicator (Basic) ----
             st.markdown("### ✅ Formulation Feasibility")
 
             tensile_pass = tensile >= 2.0
@@ -1084,6 +1036,48 @@ with col_right:
 
             st.markdown("---")
 
+            # ---- INDUSTRIAL TARGETS COMPARISON (NEW) ----
+            st.markdown("### 🏭 Industrial Targets Comparison")
+
+            # Define recommended targets
+            targets = {
+                'Tensile Strength (MPa)': {'min': 2.5, 'max': 5.0, 'value': tensile, 'unit': 'MPa'},
+                'EFRF': {'min': 0.10, 'max': 0.35, 'value': efrf, 'unit': ''},
+                'Density': {'min': 0.85, 'max': 0.98, 'value': density, 'unit': ''},
+                'API Loading (%)': {'min': 90.0, 'max': 91.0, 'value': api, 'unit': '%'}  # target ~90.5
+            }
+
+            # Build comparison table
+            target_df = pd.DataFrame({
+                'Property': [],
+                'Recommended Range': [],
+                'Current Value': [],
+                'Status': []
+            })
+
+            for prop, info in targets.items():
+                val = info['value']
+                low = info['min']
+                high = info['max']
+                in_range = low <= val <= high
+                status = "✅ PASS" if in_range else "❌ FAIL"
+                target_df = pd.concat([target_df, pd.DataFrame({
+                    'Property': [prop],
+                    'Recommended Range': [f"{low:.2f} – {high:.2f}" + (f" {info['unit']}" if info['unit'] else "")],
+                    'Current Value': [f"{val:.3f}" if isinstance(val, float) else f"{val:.1f}"],
+                    'Status': [status]
+                })], ignore_index=True)
+
+            st.dataframe(target_df.style.applymap(
+                lambda x: 'background-color: #d4edda' if 'PASS' in str(x) else ('background-color: #f8d7da' if 'FAIL' in str(x) else ''),
+                subset=['Status']
+            ), use_container_width=True, hide_index=True)
+
+            # Additional info
+            st.caption("🎯 Industrial recommended ranges based on typical tablet quality standards.")
+
+            st.markdown("---")
+
             # ---- Physics Verification ----
             with st.expander("🔬 Physics Verification"):
                 st.markdown("""
@@ -1095,7 +1089,7 @@ with col_right:
                 st.metric("EFRF", f"{efrf:.4f}", delta="< 0.35 ✅" if efrf < 0.35 else "≥ 0.35 ❌")
 
             # ================================================================
-            # NSGA-II Results (with error handling)
+            # NSGA-II Results
             # ================================================================
             st.markdown("### ⚙️ NSGA-II Results")
             
@@ -1114,7 +1108,6 @@ with col_right:
                         pareto_api = -objectives[front0, 0]
                         feasible = constraints[front0]
                         
-                        # Filter valid values
                         valid_mask = (pareto_api >= 85) & (pareto_api <= 95) & (objectives[front0, 1] >= 0) & (objectives[front0, 1] <= 2)
                         pareto_api = pareto_api[valid_mask]
                         pareto_efrf = objectives[front0, 1][valid_mask]
@@ -1128,7 +1121,6 @@ with col_right:
                                 best_idx = feasible_indices[best_idx]
                                 st.success(f"Optimal Pareto: API = {pareto_api[best_idx]:.2f}% | EFRF = {pareto_efrf[best_idx]:.4f} | Feasible: {len(feasible_indices)}")
                             else:
-                                # Show best non-dominated even if infeasible
                                 best_idx = np.argmin(pareto_efrf)
                                 st.warning(f"No feasible solutions. Best non-dominated: API = {pareto_api[best_idx]:.2f}% | EFRF = {pareto_efrf[best_idx]:.4f}")
                         else:
@@ -1153,10 +1145,8 @@ with col_right:
                 if fig_p:
                     st.plotly_chart(fig_p, use_container_width=True)
                 else:
-                    # Fallback matplotlib
                     try:
                         fig, ax = plt.subplots(figsize=(10, 5))
-                        # Filter valid values
                         valid_idx = (objectives[:, 0] < 10) & (objectives[:, 1] < 10)
                         if np.any(valid_idx):
                             ax.scatter(-objectives[valid_idx, 0], objectives[valid_idx, 1], alpha=0.2, s=10, color='gray')
@@ -1189,7 +1179,6 @@ with col_right:
                 if fig_s:
                     st.plotly_chart(fig_s, use_container_width=True)
                 else:
-                    # Fallback matplotlib
                     features = ['API%', 'MCC%', 'PVPP%', 'Mg-St%', 'Binder%', 'Pressure', 'Speed', 'Granule']
                     _, _, _, base_efrf = predict_pinn(model, scaler, inputs)
                     sensitivities = []
@@ -1250,7 +1239,6 @@ with col_right:
                     hide_index=True
                 )
 
-                # Comparison charts
                 fig, axes = plt.subplots(1, 3, figsize=(14, 5))
                 models = comp_df['Model'].tolist()
                 colors_bar = ['#2ecc71', '#3498db', '#f39c12', '#9b59b6']
