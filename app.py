@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 18.0 (Updated Loss Weights)
+Version: 20.0 (Final Production Version with Physical Activations)
 """
 
 import streamlit as st
@@ -68,7 +68,7 @@ def safe_initialize():
 safe_initialize()
 
 # ================================================================
-# 1. TRUE PINN MODEL (UPDATED LOSS WEIGHTS)
+# 1. TRUE PINN MODEL (WITH PHYSICAL ACTIVATIONS)
 # ================================================================
 
 class TruePINN(nn.Module):
@@ -80,11 +80,13 @@ class TruePINN(nn.Module):
     - Boundary conditions: 0.4 < D < 0.98
     - MCC constraint: MCC ≤ 8%
     - Density penalty: D ≤ 1.0
+    - Physical activation functions: sigmoid for density, softplus for tensile and ER
     """
     
     def __init__(self, input_dim=8, output_dim=3):
         super(TruePINN, self).__init__()
 
+        # Main network with BatchNorm and Dropout
         self.network = nn.Sequential(
             nn.Linear(input_dim, 128),
             nn.BatchNorm1d(128),
@@ -104,6 +106,7 @@ class TruePINN(nn.Module):
             nn.Linear(32, output_dim)
         )
 
+        # Formulation-dependent Heckel parameters
         self.k_network = nn.Sequential(
             nn.Linear(input_dim, 32),
             nn.Tanh(),
@@ -122,7 +125,20 @@ class TruePINN(nn.Module):
         )
 
     def forward(self, X):
-        return self.network(X)
+        """
+        Forward pass with physical activation functions.
+        - Density (D): sigmoid → ensures 0 < D < 1
+        - Tensile Strength (σt): softplus → ensures σt > 0
+        - Elastic Recovery (ER): softplus → ensures ER > 0
+        """
+        raw = self.network(X)
+        
+        # Apply physical activation functions
+        density = torch.sigmoid(raw[:, 0:1])                      # D ∈ (0, 1)
+        tensile = torch.nn.functional.softplus(raw[:, 1:2])      # σt > 0
+        er = torch.nn.functional.softplus(raw[:, 2:3])           # ER > 0
+        
+        return torch.cat([density, tensile, er], dim=1)
 
     def get_heckel_params(self, X):
         k = self.k_network(X)
@@ -136,6 +152,9 @@ class TruePINN(nn.Module):
                      efrf_target=0.35,
                      mcc_max=8.0,
                      compute_grad=True):
+        """
+        Compute total PINN loss with all physics constraints and updated weights.
+        """
         pressure_real = X_raw[:, 5]
         mcc_real = X_raw[:, 1]
 
@@ -146,7 +165,7 @@ class TruePINN(nn.Module):
 
         k, A = self.get_heckel_params(X_scaled)
 
-        # 1. Data loss (weighted higher)
+        # 1. Data loss (weighted higher to prioritize data fitting)
         data_loss = nn.MSELoss()(y_pred, y_true)
 
         # 2. Heckel equation residual
@@ -155,14 +174,14 @@ class TruePINN(nn.Module):
         heckel_target = k * pressure_real + A
         heckel_loss = torch.mean((heckel_pred - heckel_target) ** 2)
 
-        # 3. EFRF constraint (relaxed)
+        # 3. EFRF constraint (relaxed weight for flexibility)
         efrf_pred = er_pred / (tensile_pred + 1e-8)
         efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
 
-        # 4. MCC constraint (unchanged)
+        # 4. MCC constraint
         mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
 
-        # 5. Density penalty (unchanged)
+        # 5. Density penalty (max 1.0)
         density_penalty = torch.mean(torch.relu(density_pred - 0.99) ** 2)
 
         # 6. Monotonicity constraint (relaxed)
@@ -193,6 +212,7 @@ class TruePINN(nn.Module):
             torch.mean(mask_high * torch.relu(density_pred - 0.98) ** 2)
         )
 
+        # Total loss with updated weights
         total_loss = (
             w_data * data_loss +
             w_heckel * heckel_loss +
@@ -217,6 +237,7 @@ class TruePINN(nn.Module):
         return total_loss, loss_dict
 
     def predict(self, X_scaled):
+        """Predict density, tensile strength, and elastic recovery."""
         self.eval()
         with torch.no_grad():
             if not isinstance(X_scaled, torch.Tensor):
@@ -229,6 +250,10 @@ class TruePINN(nn.Module):
 # ================================================================
 
 def generate_pinn_data(n_samples=600, random_state=42):
+    """
+    Generate synthetic data with targeted sampling around optimal region.
+    Uses 50% random + 50% targeted around the optimum.
+    """
     np.random.seed(random_state)
     X = np.zeros((n_samples, 8))
     y = np.zeros((n_samples, 3))
@@ -237,6 +262,7 @@ def generate_pinn_data(n_samples=600, random_state=42):
 
     for i in range(n_samples):
         if i < n_random:
+            # Random sampling across expanded design space
             api = np.random.uniform(85, 95)
             binder = np.random.uniform(0.5, 4.0)
             mgst = np.random.uniform(0.01, 1.2)
@@ -246,6 +272,7 @@ def generate_pinn_data(n_samples=600, random_state=42):
             granule = np.random.uniform(30, 250)
             mcc = np.random.uniform(0, 8.0)
         else:
+            # Targeted sampling around optimum
             api = np.random.normal(90.5, 1.5)
             api = np.clip(api, 85, 95)
             binder = np.random.normal(2.8, 0.4)
@@ -262,6 +289,7 @@ def generate_pinn_data(n_samples=600, random_state=42):
             granule = np.clip(granule, 30, 250)
             mcc = 8.0
 
+        # Ensure sum = 100% and MCC <= 8%
         total_others = api + binder + mgst + pvpp + mcc
         if total_others > 100:
             scale = 100 / total_others
@@ -279,6 +307,7 @@ def generate_pinn_data(n_samples=600, random_state=42):
                 mcc = 8.0
                 api -= excess
 
+        # Clamp final values
         api = np.clip(api, 85, 95)
         binder = np.clip(binder, 0.5, 4.0)
         mgst = np.clip(mgst, 0.01, 1.2)
@@ -287,6 +316,7 @@ def generate_pinn_data(n_samples=600, random_state=42):
 
         X[i] = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
 
+        # True physics models
         k_eff = 0.035 * (1 - 0.4 * (api - 85)/10) * (1 - 0.2 * (speed - 10)/30)
         k_eff = max(k_eff, 0.008)
         A_eff = 1.2 + 0.1 * (binder - 1.5) - 0.2 * (mgst - 0.5)
@@ -315,6 +345,12 @@ def generate_pinn_data(n_samples=600, random_state=42):
 # ================================================================
 
 class NSGAII:
+    """
+    Non-dominated Sorting Genetic Algorithm II for multi-objective optimization.
+    Objectives: Maximize API loading, Minimize EFRF.
+    Constraints: σt ≥ 2 MPa, EFRF < 0.35.
+    """
+    
     def __init__(self, model, scaler, bounds, pop_size=100, n_generations=60):
         self.model = model
         self.scaler = scaler
@@ -343,6 +379,7 @@ class NSGAII:
             try:
                 api, binder, mgst, pvpp, pressure, speed, granule = population[i, 0], population[i, 4], population[i, 3], population[i, 2], population[i, 5], population[i, 6], population[i, 7]
                 
+                # Ensure 100% and MCC <= 8%
                 used = api + binder + mgst + pvpp
                 if used > 100:
                     scale = 100 / used
@@ -377,8 +414,8 @@ class NSGAII:
                     efrf = max(0.0, min(efrf, 10.0))
                 
                 constraints[i] = (tensile >= 1.99 and efrf < 0.36)
-                objectives[i, 0] = -api
-                objectives[i, 1] = efrf
+                objectives[i, 0] = -api      # Minimize negative API = Maximize API
+                objectives[i, 1] = efrf      # Minimize EFRF
                 tensile_strengths[i] = tensile
 
                 population[i, 0] = api
@@ -889,7 +926,7 @@ with st.sidebar:
     """)
     st.warning("⚠️ **True PINN — Production-Ready**")
 
-with st.spinner("🔄 Training True PINN with updated weights..."):
+with st.spinner("🔄 Training True PINN with physical activations..."):
     model, scaler, feature_names, df, loss_history = load_pinn_model()
 st.success("✅ True PINN trained successfully")
 
@@ -1054,6 +1091,7 @@ with col_right:
                 - k(X) and A(X) are formulation-dependent.
                 - MCC constrained to ≤ 8%.
                 - Density penalty ensures D ≤ 1.0.
+                - Physical activations: sigmoid for density, softplus for tensile and ER.
                 """)
                 st.metric("EFRF", f"{efrf:.4f}", delta="< 0.35 ✅" if efrf < 0.35 else "≥ 0.35 ❌")
 
