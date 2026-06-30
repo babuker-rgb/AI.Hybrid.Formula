@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 16.0 (Final Professional Release)
+Version: 16.1 (NSGA-II Fixed & Enhanced Feasibility)
 """
 
 import streamlit as st
@@ -326,7 +326,7 @@ def generate_pinn_data(n_samples=600, random_state=42):
 
 
 # ================================================================
-# 3. NSGA-II IMPLEMENTATION
+# 3. NSGA-II IMPLEMENTATION (FIXED)
 # ================================================================
 
 class NSGAII:
@@ -361,45 +361,53 @@ class NSGAII:
         tensile_strengths = np.zeros(n)
 
         for i in range(n):
-            api, binder, mgst, pvpp, pressure, speed, granule = population[i, 0], population[i, 4], population[i, 3], population[i, 2], population[i, 5], population[i, 6], population[i, 7]
-            
-            # Ensure 100% and MCC constraint
-            used = api + binder + mgst + pvpp
-            if used > 100:
-                scale = 100 / used
-                api *= scale
-                binder *= scale
-                mgst *= scale
-                pvpp *= scale
-            mcc = 100 - (api + binder + mgst + pvpp)
-            if mcc > 8.0:
-                scale = (100 - 8.0) / (api + binder + mgst + pvpp)
-                api *= scale
-                binder *= scale
-                mgst *= scale
-                pvpp *= scale
-                mcc = 8.0
+            try:
+                api, binder, mgst, pvpp, pressure, speed, granule = population[i, 0], population[i, 4], population[i, 3], population[i, 2], population[i, 5], population[i, 6], population[i, 7]
+                
+                # Ensure 100% and MCC constraint
+                used = api + binder + mgst + pvpp
+                if used > 100:
+                    scale = 100 / used
+                    api *= scale
+                    binder *= scale
+                    mgst *= scale
+                    pvpp *= scale
+                mcc = 100 - (api + binder + mgst + pvpp)
+                if mcc > 8.0:
+                    scale = (100 - 8.0) / (api + binder + mgst + pvpp)
+                    api *= scale
+                    binder *= scale
+                    mgst *= scale
+                    pvpp *= scale
+                    mcc = 8.0
 
-            inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
-            inputs_scaled = self.scaler.transform([inputs])
-            X_tensor = torch.FloatTensor(inputs_scaled)
-            
-            with torch.no_grad():
-                pred = self.model(X_tensor).numpy()[0]
-            
-            tensile = pred[1]
-            efrf = pred[2] / (tensile + 1e-8)
+                inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
+                inputs_scaled = self.scaler.transform([inputs])
+                X_tensor = torch.FloatTensor(inputs_scaled)
+                
+                with torch.no_grad():
+                    pred = self.model(X_tensor).numpy()[0]
+                
+                tensile = pred[1]
+                efrf = pred[2] / (tensile + 1e-8)
 
-            tensile_strengths[i] = tensile
-            objectives[i, 0] = -api      # Minimize negative API = Maximize API
-            objectives[i, 1] = efrf      # Minimize EFRF
-            constraints[i] = (tensile >= 2.0 and efrf < 0.35)
+                tensile_strengths[i] = tensile
+                objectives[i, 0] = -api      # Minimize negative API = Maximize API
+                objectives[i, 1] = efrf      # Minimize EFRF
+                constraints[i] = (tensile >= 2.0 and efrf < 0.35)
 
-            population[i, 0] = api
-            population[i, 1] = mcc
-            population[i, 2] = pvpp
-            population[i, 3] = mgst
-            population[i, 4] = binder
+                population[i, 0] = api
+                population[i, 1] = mcc
+                population[i, 2] = pvpp
+                population[i, 3] = mgst
+                population[i, 4] = binder
+                
+            except Exception as e:
+                # If evaluation fails, set as infeasible with high values
+                objectives[i, 0] = 100.0
+                objectives[i, 1] = 100.0
+                constraints[i] = False
+                tensile_strengths[i] = 0.0
 
         return objectives, constraints, tensile_strengths, population
 
@@ -530,8 +538,10 @@ class NSGAII:
             self.tensile = tensile
             fronts, ranks = self._fast_non_dominated_sort(objectives, constraints)
             self.fronts = fronts
+            
             if gen == self.n_generations - 1:
                 break
+                
             crowding = np.zeros(self.pop_size)
             for front in fronts:
                 dist = self._crowding_distance(objectives, front)
@@ -578,6 +588,8 @@ class NSGAII:
             self.population = np.array(new_pop)
             self.objectives = np.array(new_obj)
             self.constraints = np.array(new_const)
+            
+        # Final evaluation
         objectives, constraints, tensile, pop = self._evaluate(self.population)
         self.population = pop
         self.objectives = objectives
@@ -1056,137 +1068,169 @@ with col_right:
                 st.metric("EFRF", f"{efrf:.4f}", delta="< 0.35 ✅" if efrf < 0.35 else "≥ 0.35 ❌")
 
             # ================================================================
-            # NSGA-II Results
+            # NSGA-II Results (with error handling)
             # ================================================================
             st.markdown("### ⚙️ NSGA-II Results")
-            bounds = np.array([
-                [85, 95], [0, 8], [1, 5], [0.05, 1.0], [0.5, 3.0],
-                [100, 250], [5, 40], [50, 200]
-            ])
-            with st.spinner("🔄 Running NSGA-II..."):
-                nsga = NSGAII(model, scaler, bounds, pop_size=80, n_generations=60)
-                pop, objectives, constraints, fronts = nsga.run()
-                if len(fronts) > 0 and len(fronts[0]) > 0:
-                    front0 = fronts[0]
-                    pareto_api = -objectives[front0, 0]
-                    feasible = constraints[front0]
-                    feasible_indices = [i for i, f in enumerate(feasible) if f]
-                    if feasible_indices:
-                        best_idx = np.argmax([pareto_api[i] for i in feasible_indices])
-                        best_idx = feasible_indices[best_idx]
-                        st.success(f"Optimal Pareto: API = {pareto_api[best_idx]:.2f}% | EFRF = {objectives[front0, 1][best_idx]:.4f} | Feasible: {len(feasible_indices)}")
+            
+            try:
+                bounds = np.array([
+                    [85, 95], [0, 8], [1, 5], [0.05, 1.0], [0.5, 3.0],
+                    [100, 250], [5, 40], [50, 200]
+                ])
+                
+                with st.spinner("🔄 Running NSGA-II..."):
+                    nsga = NSGAII(model, scaler, bounds, pop_size=80, n_generations=60)
+                    pop, objectives, constraints, fronts = nsga.run()
+                    
+                    if len(fronts) > 0 and len(fronts[0]) > 0:
+                        front0 = fronts[0]
+                        pareto_api = -objectives[front0, 0]
+                        feasible = constraints[front0]
+                        feasible_indices = [i for i, f in enumerate(feasible) if f]
+                        
+                        if feasible_indices:
+                            best_idx = np.argmax([pareto_api[i] for i in feasible_indices])
+                            best_idx = feasible_indices[best_idx]
+                            st.success(f"Optimal Pareto: API = {pareto_api[best_idx]:.2f}% | EFRF = {objectives[front0, 1][best_idx]:.4f} | Feasible: {len(feasible_indices)}")
+                        else:
+                            # Show best non-dominated even if infeasible
+                            best_idx = np.argmin(objectives[front0, 1])
+                            st.warning(f"No feasible solutions found. Best non-dominated: API = {-objectives[front0, 0][best_idx]:.2f}% | EFRF = {objectives[front0, 1][best_idx]:.4f}")
                     else:
-                        st.warning("No feasible solutions found.")
+                        st.warning("No Pareto front found. Try adjusting parameters.")
+                        
+            except Exception as e:
+                st.error(f"NSGA-II error: {e}")
+                objectives = np.zeros((1, 2))
+                constraints = np.zeros(1, dtype=bool)
+                fronts = [[]]
+                nsga = None
 
             # ================================================================
             # Pareto Front Plot
             # ================================================================
             st.markdown("### 📉 Pareto Front")
-            fig_p = plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf)
-            if fig_p:
-                st.plotly_chart(fig_p, use_container_width=True)
+            
+            if 'objectives' in locals() and len(objectives) > 0:
+                fig_p = plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf)
+                if fig_p:
+                    st.plotly_chart(fig_p, use_container_width=True)
+                else:
+                    # Fallback matplotlib
+                    try:
+                        fig, ax = plt.subplots(figsize=(10, 5))
+                        ax.scatter(-objectives[:, 0], objectives[:, 1], alpha=0.2, s=10, color='gray')
+                        if len(fronts) > 0 and len(fronts[0]) > 0:
+                            front0 = fronts[0]
+                            ax.plot(-objectives[front0, 0], objectives[front0, 1], 'r-', linewidth=2)
+                            ax.scatter(-objectives[front0, 0], objectives[front0, 1], c='red', s=50)
+                        ax.axhline(y=0.35, color='red', linestyle='--')
+                        ax.set_xlabel('API Loading (%)')
+                        ax.set_ylabel('EFRF')
+                        ax.set_title('Pareto Front')
+                        ax.set_xlim(85, 95)
+                        st.pyplot(fig)
+                        plt.close()
+                    except:
+                        st.info("Pareto front visualization not available.")
             else:
-                # Fallback matplotlib
-                fig, ax = plt.subplots(figsize=(10, 5))
-                ax.scatter(-objectives[:, 0], objectives[:, 1], alpha=0.2, s=10, color='gray')
-                if len(fronts) > 0 and len(fronts[0]) > 0:
-                    front0 = fronts[0]
-                    ax.plot(-objectives[front0, 0], objectives[front0, 1], 'r-', linewidth=2)
-                    ax.scatter(-objectives[front0, 0], objectives[front0, 1], c='red', s=50)
-                ax.axhline(y=0.35, color='red', linestyle='--')
-                ax.set_xlabel('API Loading (%)')
-                ax.set_ylabel('EFRF')
-                ax.set_title('Pareto Front')
-                ax.set_xlim(85, 95)
-                st.pyplot(fig)
-                plt.close()
+                st.info("Run prediction first to see Pareto front.")
 
             # ================================================================
             # Sensitivity Analysis
             # ================================================================
             st.markdown("### 🔍 Sensitivity Analysis")
-            fig_s = plot_sensitivity_plotly(inputs, model, scaler)
-            if fig_s:
-                st.plotly_chart(fig_s, use_container_width=True)
-            else:
-                # Fallback matplotlib
-                features = ['API%', 'MCC%', 'PVPP%', 'Mg-St%', 'Binder%', 'Pressure', 'Speed', 'Granule']
-                _, _, _, base_efrf = predict_pinn(model, scaler, inputs)
-                sensitivities = []
-                for i in range(8):
-                    test = inputs.copy()
-                    test[i] += 0.05 * (inputs[i] + 0.1)
-                    _, _, _, efrf_pos = predict_pinn(model, scaler, test)
-                    test[i] = inputs[i] - 0.05 * (inputs[i] + 0.1)
-                    _, _, _, efrf_neg = predict_pinn(model, scaler, test)
-                    sensitivities.append(max(abs(efrf_pos - base_efrf), abs(efrf_neg - base_efrf)))
-                sorted_idx = np.argsort(sensitivities)[::-1]
-                fig, ax = plt.subplots(figsize=(10, 5))
-                colors = ['#e74c3c' if v > np.mean(sensitivities) else '#2ecc71' for v in sensitivities]
-                ax.barh([features[i] for i in sorted_idx], [sensitivities[i] for i in sorted_idx], color=colors)
-                ax.axvline(x=np.mean(sensitivities), color='red', linestyle='--', label=f'Mean: {np.mean(sensitivities):.4f}')
-                ax.set_xlabel('Sensitivity (ΔEFRF)')
-                ax.set_title('Feature Impact on EFRF')
-                ax.legend()
-                st.pyplot(fig)
-                plt.close()
+            
+            try:
+                fig_s = plot_sensitivity_plotly(inputs, model, scaler)
+                if fig_s:
+                    st.plotly_chart(fig_s, use_container_width=True)
+                else:
+                    # Fallback matplotlib
+                    features = ['API%', 'MCC%', 'PVPP%', 'Mg-St%', 'Binder%', 'Pressure', 'Speed', 'Granule']
+                    _, _, _, base_efrf = predict_pinn(model, scaler, inputs)
+                    sensitivities = []
+                    for i in range(8):
+                        test = inputs.copy()
+                        test[i] += 0.05 * (inputs[i] + 0.1)
+                        _, _, _, efrf_pos = predict_pinn(model, scaler, test)
+                        test[i] = inputs[i] - 0.05 * (inputs[i] + 0.1)
+                        _, _, _, efrf_neg = predict_pinn(model, scaler, test)
+                        sensitivities.append(max(abs(efrf_pos - base_efrf), abs(efrf_neg - base_efrf)))
+                    sorted_idx = np.argsort(sensitivities)[::-1]
+                    fig, ax = plt.subplots(figsize=(10, 5))
+                    colors = ['#e74c3c' if v > np.mean(sensitivities) else '#2ecc71' for v in sensitivities]
+                    ax.barh([features[i] for i in sorted_idx], [sensitivities[i] for i in sorted_idx], color=colors)
+                    ax.axvline(x=np.mean(sensitivities), color='red', linestyle='--', label=f'Mean: {np.mean(sensitivities):.4f}')
+                    ax.set_xlabel('Sensitivity (ΔEFRF)')
+                    ax.set_title('Feature Impact on EFRF')
+                    ax.legend()
+                    st.pyplot(fig)
+                    plt.close()
+            except Exception as e:
+                st.warning(f"Sensitivity analysis error: {e}")
 
             # ================================================================
             # Model Comparison
             # ================================================================
             st.markdown("### 📊 Model Performance Comparison")
-            X_train, X_test, y_train, y_test = train_test_split(
-                df[feature_names].values,
-                df['Tensile_Strength_MPa'].values,
-                test_size=0.2,
-                random_state=42
-            )
-            X_train_scaled = scaler.transform(X_train)
-            X_test_scaled = scaler.transform(X_test)
+            
+            try:
+                X_train, X_test, y_train, y_test = train_test_split(
+                    df[feature_names].values,
+                    df['Tensile_Strength_MPa'].values,
+                    test_size=0.2,
+                    random_state=42
+                )
+                X_train_scaled = scaler.transform(X_train)
+                X_test_scaled = scaler.transform(X_test)
 
-            pinn_pred = model.predict(torch.FloatTensor(X_test_scaled))[:, 1]
-            pinn_r2 = r2_score(y_test, pinn_pred)
-            pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
-            pinn_mae = mean_absolute_error(y_test, pinn_pred)
-            
-            comp_df = train_and_compare(X_train_scaled, X_test_scaled, y_train, y_test)
-            pinn_row = pd.DataFrame([{
-                'Model': 'PINN (Proposed)',
-                'R²': pinn_r2,
-                'RMSE': pinn_rmse,
-                'MAE': pinn_mae,
-                'Physics': '✅ Enforced'
-            }])
-            comp_df = pd.concat([pinn_row, comp_df], ignore_index=True)
-            
-            st.dataframe(
-                comp_df.style.highlight_max(subset=['R²'], color='lightgreen')
-                         .highlight_min(subset=['RMSE', 'MAE'], color='lightcoral'),
-                use_container_width=True,
-                hide_index=True
-            )
+                pinn_pred = model.predict(torch.FloatTensor(X_test_scaled))[:, 1]
+                pinn_r2 = r2_score(y_test, pinn_pred)
+                pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
+                pinn_mae = mean_absolute_error(y_test, pinn_pred)
+                
+                comp_df = train_and_compare(X_train_scaled, X_test_scaled, y_train, y_test)
+                pinn_row = pd.DataFrame([{
+                    'Model': 'PINN (Proposed)',
+                    'R²': pinn_r2,
+                    'RMSE': pinn_rmse,
+                    'MAE': pinn_mae,
+                    'Physics': '✅ Enforced'
+                }])
+                comp_df = pd.concat([pinn_row, comp_df], ignore_index=True)
+                
+                st.dataframe(
+                    comp_df.style.highlight_max(subset=['R²'], color='lightgreen')
+                             .highlight_min(subset=['RMSE', 'MAE'], color='lightcoral'),
+                    use_container_width=True,
+                    hide_index=True
+                )
 
-            # Comparison charts
-            fig, axes = plt.subplots(1, 3, figsize=(14, 5))
-            models = comp_df['Model'].tolist()
-            colors_bar = ['#2ecc71', '#3498db', '#f39c12', '#9b59b6']
-            
-            axes[0].bar(models, comp_df['R²'], color=colors_bar)
-            axes[0].set_title('R² (Higher is Better)')
-            axes[0].set_ylim(0, 1)
-            axes[0].grid(True, alpha=0.3)
-            
-            axes[1].bar(models, comp_df['RMSE'], color=colors_bar)
-            axes[1].set_title('RMSE (Lower is Better)')
-            axes[1].grid(True, alpha=0.3)
-            
-            axes[2].bar(models, comp_df['MAE'], color=colors_bar)
-            axes[2].set_title('MAE (Lower is Better)')
-            axes[2].grid(True, alpha=0.3)
-            
-            plt.tight_layout()
-            st.pyplot(fig)
-            plt.close()
+                # Comparison charts
+                fig, axes = plt.subplots(1, 3, figsize=(14, 5))
+                models = comp_df['Model'].tolist()
+                colors_bar = ['#2ecc71', '#3498db', '#f39c12', '#9b59b6']
+                
+                axes[0].bar(models, comp_df['R²'], color=colors_bar)
+                axes[0].set_title('R² (Higher is Better)')
+                axes[0].set_ylim(0, 1)
+                axes[0].grid(True, alpha=0.3)
+                
+                axes[1].bar(models, comp_df['RMSE'], color=colors_bar)
+                axes[1].set_title('RMSE (Lower is Better)')
+                axes[1].grid(True, alpha=0.3)
+                
+                axes[2].bar(models, comp_df['MAE'], color=colors_bar)
+                axes[2].set_title('MAE (Lower is Better)')
+                axes[2].grid(True, alpha=0.3)
+                
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close()
+                
+            except Exception as e:
+                st.warning(f"Model comparison error: {e}")
 
     else:
         st.info("👆 Adjust parameters and click **'Predict & Optimise'**")
