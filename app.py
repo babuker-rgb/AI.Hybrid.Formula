@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 11.0 (Full Integration: PINN + NSGA-II + Pareto + Sensitivity + Model Comparison)
+Version: 12.0 (Sensitivity Unpacking Fixed)
 """
 
 import streamlit as st
@@ -722,16 +722,18 @@ def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
         return None
     return None
 
-def plot_sensitivity_plotly(base_inputs, model, scaler):
+
+def plot_sensitivity_plotly(inputs, model, scaler):
     try:
         features = ['API%', 'MCC%', 'PVPP%', 'Mg-St%', 'Binder%', 'Pressure', 'Speed', 'Granule']
-        _, base_efrf = predict_pinn(model, scaler, base_inputs)
+        # FIXED: Unpack all 4 return values
+        _, _, _, base_efrf = predict_pinn(model, scaler, inputs)
         sensitivities = []
         for i in range(8):
-            test = base_inputs.copy()
-            test[i] += 0.05 * (base_inputs[i] + 0.1)
+            test = inputs.copy()
+            test[i] += 0.05 * (inputs[i] + 0.1)
             _, _, _, efrf_pos = predict_pinn(model, scaler, test)
-            test[i] = base_inputs[i] - 0.05 * (base_inputs[i] + 0.1)
+            test[i] = inputs[i] - 0.05 * (inputs[i] + 0.1)
             _, _, _, efrf_neg = predict_pinn(model, scaler, test)
             sensitivities.append(max(abs(efrf_pos - base_efrf), abs(efrf_neg - base_efrf)))
 
@@ -841,10 +843,10 @@ st.success("✅ True PINN trained successfully")
 st.markdown("### 🧪 Suggested Experiments (One-Click Apply)")
 st.caption("Click any experiment button below to automatically adjust all parameters.")
 experiments = {
-    "Current": {'api': 90.5, 'binder': 2.7, 'pvpp': 3.0, 'mgst': 0.20, 'pressure': 230, 'speed': 12, 'granule': 125, 'description': "Baseline"},
-    "Experiment 1": {'api': 90.5, 'binder': 2.9, 'pvpp': 3.0, 'mgst': 0.15, 'pressure': 235, 'speed': 10, 'granule': 125, 'description': "↑ Binder, ↓ speed & Mg-St"},
-    "Experiment 2": {'api': 90.5, 'binder': 2.8, 'pvpp': 3.0, 'mgst': 0.12, 'pressure': 240, 'speed': 9, 'granule': 125, 'description': "↑ Pressure, ↓ speed & Mg-St"},
-    "Experiment 3": {'api': 90.5, 'binder': 3.0, 'pvpp': 3.0, 'mgst': 0.10, 'pressure': 245, 'speed': 8, 'granule': 125, 'description': "Max binder, min speed & Mg-St ✅"}
+    "Baseline": {'api': 90.5, 'binder': 2.7, 'pvpp': 3.0, 'mgst': 0.20, 'pressure': 230, 'speed': 12, 'granule': 125, 'description': "Baseline"},
+    "Exp1": {'api': 90.5, 'binder': 2.9, 'pvpp': 3.0, 'mgst': 0.15, 'pressure': 235, 'speed': 10, 'granule': 125, 'description': "↑ Binder, ↓ speed & Mg-St"},
+    "Exp2": {'api': 90.5, 'binder': 2.8, 'pvpp': 3.0, 'mgst': 0.12, 'pressure': 240, 'speed': 9, 'granule': 125, 'description': "↑ Pressure, ↓ speed & Mg-St"},
+    "Exp3": {'api': 90.5, 'binder': 3.0, 'pvpp': 3.0, 'mgst': 0.10, 'pressure': 245, 'speed': 8, 'granule': 125, 'description': "Max binder, min speed & Mg-St ✅"}
 }
 cols = st.columns(len(experiments))
 for i, (name, params) in enumerate(experiments.items()):
@@ -971,7 +973,7 @@ with col_right:
                 plt.close()
 
             # ================================================================
-            # Sensitivity Analysis
+            # Sensitivity Analysis (FIXED)
             # ================================================================
             st.markdown("### 🔍 Sensitivity Analysis")
             fig_s = plot_sensitivity_plotly(inputs, model, scaler)
@@ -980,7 +982,8 @@ with col_right:
             else:
                 # Fallback matplotlib
                 features = ['API%', 'MCC%', 'PVPP%', 'Mg-St%', 'Binder%', 'Pressure', 'Speed', 'Granule']
-                _, base_efrf = predict_pinn(model, scaler, inputs)
+                # FIX: unpack all 4 values
+                _, _, _, base_efrf = predict_pinn(model, scaler, inputs)
                 sensitivities = []
                 for i in range(8):
                     test = inputs.copy()
