@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 17.1 (Industrial Targets Removed)
+Version: 17.2 (Expanded Input Ranges)
 """
 
 import streamlit as st
@@ -42,14 +42,15 @@ DEFAULTS = {
     'granule': 125.0
 }
 
+# EXPANDED RANGES for wider exploration
 RANGES = {
-    'api': (85.0, 95.0),
-    'binder': (0.5, 3.0),
-    'pvpp': (1.0, 5.0),
-    'mgst': (0.05, 1.0),
-    'pressure': (100.0, 250.0),
-    'speed': (5.0, 40.0),
-    'granule': (50.0, 200.0)
+    'api': (85.0, 95.0),           # Expanded: 85-95% (was 85-95)
+    'binder': (0.5, 4.0),          # Expanded: up to 4.0% (was 0.5-3.0)
+    'pvpp': (0.5, 6.0),            # Expanded: 0.5-6.0% (was 1.0-5.0)
+    'mgst': (0.01, 1.2),           # Expanded: 0.01-1.2% (was 0.05-1.0)
+    'pressure': (80.0, 280.0),     # Expanded: 80-280 MPa (was 100-250)
+    'speed': (1.0, 50.0),          # Expanded: 1-50 rpm (was 5-40)
+    'granule': (30.0, 250.0)       # Expanded: 30-250 µm (was 50-200)
 }
 
 def safe_initialize():
@@ -218,7 +219,7 @@ class TruePINN(nn.Module):
 
 
 # ================================================================
-# 2. DATA GENERATION
+# 2. DATA GENERATION (Targeted Sampling)
 # ================================================================
 
 def generate_pinn_data(n_samples=600, random_state=42):
@@ -230,29 +231,31 @@ def generate_pinn_data(n_samples=600, random_state=42):
 
     for i in range(n_samples):
         if i < n_random:
+            # Use expanded ranges for random sampling
             api = np.random.uniform(85, 95)
-            binder = np.random.uniform(0.5, 3.0)
-            mgst = np.random.uniform(0.2, 1.0)
-            pvpp = np.random.uniform(1.0, 5.0)
-            pressure = np.random.uniform(100, 250)
-            speed = np.random.uniform(10, 40)
-            granule = np.random.uniform(50, 200)
+            binder = np.random.uniform(0.5, 4.0)
+            mgst = np.random.uniform(0.01, 1.2)
+            pvpp = np.random.uniform(0.5, 6.0)
+            pressure = np.random.uniform(80, 280)
+            speed = np.random.uniform(1, 50)
+            granule = np.random.uniform(30, 250)
             mcc = np.random.uniform(0, 8.0)
         else:
+            # Targeted sampling around optimum
             api = np.random.normal(90.5, 1.5)
             api = np.clip(api, 85, 95)
             binder = np.random.normal(2.8, 0.4)
-            binder = np.clip(binder, 0.5, 3.0)
+            binder = np.clip(binder, 0.5, 4.0)
             mgst = np.random.normal(0.15, 0.06)
-            mgst = np.clip(mgst, 0.05, 1.0)
+            mgst = np.clip(mgst, 0.01, 1.2)
             pvpp = np.random.normal(3.0, 0.5)
-            pvpp = np.clip(pvpp, 1.0, 5.0)
+            pvpp = np.clip(pvpp, 0.5, 6.0)
             pressure = np.random.normal(230, 15)
-            pressure = np.clip(pressure, 100, 250)
+            pressure = np.clip(pressure, 80, 280)
             speed = np.random.normal(10, 3)
-            speed = np.clip(speed, 5, 40)
+            speed = np.clip(speed, 1, 50)
             granule = np.random.normal(125, 20)
-            granule = np.clip(granule, 50, 200)
+            granule = np.clip(granule, 30, 250)
             mcc = 8.0
 
         total_others = api + binder + mgst + pvpp + mcc
@@ -273,9 +276,9 @@ def generate_pinn_data(n_samples=600, random_state=42):
                 api -= excess
 
         api = np.clip(api, 85, 95)
-        binder = np.clip(binder, 0.5, 3.0)
-        mgst = np.clip(mgst, 0.05, 1.0)
-        pvpp = np.clip(pvpp, 1.0, 5.0)
+        binder = np.clip(binder, 0.5, 4.0)
+        mgst = np.clip(mgst, 0.01, 1.2)
+        pvpp = np.clip(pvpp, 0.5, 6.0)
         mcc = np.clip(mcc, 0, 8.0)
 
         X[i] = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
@@ -904,16 +907,17 @@ col_left, col_right = st.columns([1, 1.2], gap="medium")
 
 with col_left:
     st.markdown("### 📊 Formulation Parameters")
+    st.caption("🧪 Expanded ranges for wider exploration")
     with st.container(border=True):
         api = st.slider("🧪 API Loading (%)", 85.0, 95.0, step=0.1, key="api")
-        binder = st.slider("🔗 Binder (%)", 0.5, 3.0, step=0.1, key="binder")
-        pvpp = st.slider("💊 PVPP (%)", 1.0, 5.0, step=0.1, key="pvpp")
-        mgst = st.slider("🧴 Mg-St (%)", 0.05, 1.0, step=0.01, key="mgst")
+        binder = st.slider("🔗 Binder (%)", 0.5, 4.0, step=0.1, key="binder")
+        pvpp = st.slider("💊 PVPP (%)", 0.5, 6.0, step=0.1, key="pvpp")
+        mgst = st.slider("🧴 Mg-St (%)", 0.01, 1.2, step=0.01, key="mgst")
 
         used_total = api + binder + pvpp + mgst
         remaining = 100 - used_total
         if remaining < 0:
-            st.error("❌ Total exceeds 100%!")
+            st.error("❌ Total exceeds 100%! Reduce API or other components.")
             mcc = 0.0
         else:
             mcc = min(remaining, 8.0)
@@ -928,10 +932,11 @@ with col_left:
             st.error(f"∑ Total = {total:.2f}% ✗")
 
     st.markdown("### ⚙️ Process Parameters")
+    st.caption("⚙️ Wider ranges for process exploration")
     with st.container(border=True):
-        pressure = st.slider("⚙️ Compaction Pressure (MPa)", 100.0, 250.0, step=1.0, key="pressure")
-        speed = st.slider("🔄 Punch Speed (rpm)", 5.0, 40.0, step=0.5, key="speed")
-        granule = st.slider("🔬 Granule Size (µm)", 50.0, 200.0, step=1.0, key="granule")
+        pressure = st.slider("⚙️ Compaction Pressure (MPa)", 80.0, 280.0, step=1.0, key="pressure")
+        speed = st.slider("🔄 Punch Speed (rpm)", 1.0, 50.0, step=0.5, key="speed")
+        granule = st.slider("🔬 Granule Size (µm)", 30.0, 250.0, step=1.0, key="granule")
 
     predict_btn = st.button("🔬 Predict & Optimise", use_container_width=True)
 
@@ -1051,8 +1056,8 @@ with col_right:
             
             try:
                 bounds = np.array([
-                    [85, 95], [0, 8], [1, 5], [0.05, 1.0], [0.5, 3.0],
-                    [100, 250], [5, 40], [50, 200]
+                    [85, 95], [0, 8], [0.5, 6.0], [0.01, 1.2], [0.5, 4.0],
+                    [80, 280], [1, 50], [30, 250]
                 ])
                 
                 with st.spinner("🔄 Running NSGA-II..."):
