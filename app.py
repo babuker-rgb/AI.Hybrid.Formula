@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 17.2 (Expanded Input Ranges)
+Version: 18.0 (Updated Loss Weights)
 """
 
 import streamlit as st
@@ -42,15 +42,14 @@ DEFAULTS = {
     'granule': 125.0
 }
 
-# EXPANDED RANGES for wider exploration
 RANGES = {
-    'api': (85.0, 95.0),           # Expanded: 85-95% (was 85-95)
-    'binder': (0.5, 4.0),          # Expanded: up to 4.0% (was 0.5-3.0)
-    'pvpp': (0.5, 6.0),            # Expanded: 0.5-6.0% (was 1.0-5.0)
-    'mgst': (0.01, 1.2),           # Expanded: 0.01-1.2% (was 0.05-1.0)
-    'pressure': (80.0, 280.0),     # Expanded: 80-280 MPa (was 100-250)
-    'speed': (1.0, 50.0),          # Expanded: 1-50 rpm (was 5-40)
-    'granule': (30.0, 250.0)       # Expanded: 30-250 µm (was 50-200)
+    'api': (85.0, 95.0),
+    'binder': (0.5, 4.0),
+    'pvpp': (0.5, 6.0),
+    'mgst': (0.01, 1.2),
+    'pressure': (80.0, 280.0),
+    'speed': (1.0, 50.0),
+    'granule': (30.0, 250.0)
 }
 
 def safe_initialize():
@@ -69,7 +68,7 @@ def safe_initialize():
 safe_initialize()
 
 # ================================================================
-# 1. TRUE PINN MODEL
+# 1. TRUE PINN MODEL (UPDATED LOSS WEIGHTS)
 # ================================================================
 
 class TruePINN(nn.Module):
@@ -131,9 +130,9 @@ class TruePINN(nn.Module):
         return k.squeeze(), A.squeeze()
 
     def compute_loss(self, X_scaled, X_raw, y_true,
-                     w_data=1.0, w_heckel=0.5, w_efrf=1.0,
-                     w_monotonic=0.1, w_boundary=0.1,
-                     w_density=0.5,
+                     w_data=2.0, w_heckel=0.3, w_efrf=0.2,
+                     w_monotonic=0.05, w_boundary=0.05,
+                     w_density=0.5, w_mcc=0.5,
                      efrf_target=0.35,
                      mcc_max=8.0,
                      compute_grad=True):
@@ -147,20 +146,26 @@ class TruePINN(nn.Module):
 
         k, A = self.get_heckel_params(X_scaled)
 
+        # 1. Data loss (weighted higher)
         data_loss = nn.MSELoss()(y_pred, y_true)
 
+        # 2. Heckel equation residual
         D_clamped = torch.clamp(density_pred, 0.01, 0.99)
         heckel_pred = torch.log(1.0 / (1.0 - D_clamped))
         heckel_target = k * pressure_real + A
         heckel_loss = torch.mean((heckel_pred - heckel_target) ** 2)
 
+        # 3. EFRF constraint (relaxed)
         efrf_pred = er_pred / (tensile_pred + 1e-8)
         efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
 
+        # 4. MCC constraint (unchanged)
         mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
 
+        # 5. Density penalty (unchanged)
         density_penalty = torch.mean(torch.relu(density_pred - 0.99) ** 2)
 
+        # 6. Monotonicity constraint (relaxed)
         if compute_grad:
             if not X_scaled.requires_grad:
                 X_scaled.requires_grad_(True)
@@ -180,6 +185,7 @@ class TruePINN(nn.Module):
         else:
             monotonic_loss = torch.tensor(0.0, device=X_scaled.device)
 
+        # 7. Boundary conditions (relaxed)
         mask_low = (pressure_real < 120).float()
         mask_high = (pressure_real > 230).float()
         boundary_loss = (
@@ -191,7 +197,7 @@ class TruePINN(nn.Module):
             w_data * data_loss +
             w_heckel * heckel_loss +
             w_efrf * efrf_loss +
-            0.5 * mcc_loss +
+            w_mcc * mcc_loss +
             w_density * density_penalty +
             w_monotonic * monotonic_loss +
             w_boundary * boundary_loss
@@ -231,7 +237,6 @@ def generate_pinn_data(n_samples=600, random_state=42):
 
     for i in range(n_samples):
         if i < n_random:
-            # Use expanded ranges for random sampling
             api = np.random.uniform(85, 95)
             binder = np.random.uniform(0.5, 4.0)
             mgst = np.random.uniform(0.01, 1.2)
@@ -241,7 +246,6 @@ def generate_pinn_data(n_samples=600, random_state=42):
             granule = np.random.uniform(30, 250)
             mcc = np.random.uniform(0, 8.0)
         else:
-            # Targeted sampling around optimum
             api = np.random.normal(90.5, 1.5)
             api = np.clip(api, 85, 95)
             binder = np.random.normal(2.8, 0.4)
@@ -576,7 +580,7 @@ class NSGAII:
 
 
 # ================================================================
-# 4. TRAIN MODEL
+# 4. TRAIN MODEL (WITH UPDATED WEIGHTS)
 # ================================================================
 
 @st.cache_resource
@@ -616,24 +620,28 @@ def load_pinn_model():
 
     progress_bar = st.progress(0)
     for epoch in range(2500):
+        # Training
         model.train()
         optimizer.zero_grad()
         total_loss, _ = model.compute_loss(
             X_scaled_train_t, X_raw_train_t, y_train_t,
-            w_data=1.0, w_heckel=0.5, w_efrf=1.0,
-            w_monotonic=0.1, w_boundary=0.1, w_density=0.5,
+            w_data=2.0, w_heckel=0.3, w_efrf=0.2,
+            w_monotonic=0.05, w_boundary=0.05,
+            w_density=0.5, w_mcc=0.5,
             efrf_target=0.35, mcc_max=8.0, compute_grad=True
         )
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
+        # Validation
         model.eval()
         with torch.set_grad_enabled(False):
             val_loss, _ = model.compute_loss(
                 X_scaled_val_t, X_raw_val_t, y_val_t,
-                w_data=1.0, w_heckel=0.5, w_efrf=1.0,
-                w_monotonic=0.1, w_boundary=0.1, w_density=0.5,
+                w_data=2.0, w_heckel=0.3, w_efrf=0.2,
+                w_monotonic=0.05, w_boundary=0.05,
+                w_density=0.5, w_mcc=0.5,
                 efrf_target=0.35, mcc_max=8.0, compute_grad=False
             )
         val_loss_value = val_loss.item()
@@ -881,7 +889,7 @@ with st.sidebar:
     """)
     st.warning("⚠️ **True PINN — Production-Ready**")
 
-with st.spinner("🔄 Training True PINN..."):
+with st.spinner("🔄 Training True PINN with updated weights..."):
     model, scaler, feature_names, df, loss_history = load_pinn_model()
 st.success("✅ True PINN trained successfully")
 
