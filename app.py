@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 16.1 (NSGA-II Fixed & Enhanced Feasibility)
+Version: 16.2 (NSGA-II Numerical Stability Fix)
 """
 
 import streamlit as st
@@ -326,7 +326,7 @@ def generate_pinn_data(n_samples=600, random_state=42):
 
 
 # ================================================================
-# 3. NSGA-II IMPLEMENTATION (FIXED)
+# 3. NSGA-II IMPLEMENTATION (NUMERICAL STABILITY FIX)
 # ================================================================
 
 class NSGAII:
@@ -389,12 +389,23 @@ class NSGAII:
                     pred = self.model(X_tensor).numpy()[0]
                 
                 tensile = pred[1]
-                efrf = pred[2] / (tensile + 1e-8)
+                er = pred[2]
+                
+                # Numerical stability: prevent division by zero and extreme values
+                if tensile < 0.01:
+                    tensile = 0.01
+                    efrf = 100.0  # Very high penalty
+                else:
+                    efrf = er / tensile
+                    # Clip EFRF to reasonable range
+                    efrf = max(0.0, min(efrf, 10.0))
+                
+                # Check feasibility with stricter tolerance
+                constraints[i] = (tensile >= 1.99 and efrf < 0.36)
 
-                tensile_strengths[i] = tensile
                 objectives[i, 0] = -api      # Minimize negative API = Maximize API
                 objectives[i, 1] = efrf      # Minimize EFRF
-                constraints[i] = (tensile >= 2.0 and efrf < 0.35)
+                tensile_strengths[i] = tensile
 
                 population[i, 0] = api
                 population[i, 1] = mcc
@@ -694,7 +705,7 @@ def load_pinn_model():
 
 
 # ================================================================
-# 5. PREDICTION
+# 5. PREDICTION (WITH NUMERICAL STABILITY)
 # ================================================================
 
 def predict_pinn(model, scaler, inputs):
@@ -704,7 +715,14 @@ def predict_pinn(model, scaler, inputs):
         with torch.no_grad():
             pred = model(X_tensor).numpy()[0]
         density, tensile, er = pred[0], pred[1], pred[2]
-        efrf = er / (tensile + 1e-8)
+        
+        # Numerical stability
+        if tensile < 0.01:
+            efrf = 10.0
+        else:
+            efrf = er / tensile
+            efrf = max(0.0, min(efrf, 10.0))
+        
         return density, tensile, er, efrf
     except Exception as e:
         st.error(f"Prediction error: {e}")
@@ -722,6 +740,15 @@ def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
             pareto_api = -objectives[front0, 0]
             pareto_efrf = objectives[front0, 1]
             feasible = constraints[front0]
+
+            # Filter out extreme values
+            valid_mask = (pareto_api >= 85) & (pareto_api <= 95) & (pareto_efrf >= 0) & (pareto_efrf <= 2)
+            pareto_api = pareto_api[valid_mask]
+            pareto_efrf = pareto_efrf[valid_mask]
+            feasible = feasible[valid_mask]
+
+            if len(pareto_api) == 0:
+                return None
 
             plot_df = pd.DataFrame({'API': pareto_api, 'EFRF': pareto_efrf}).dropna().sort_values('API')
             fig = go.Figure()
@@ -754,7 +781,7 @@ def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
                 ))
 
             # Your formulation
-            if api and efrf:
+            if api and efrf and 85 <= api <= 95 and 0 <= efrf <= 2:
                 fig.add_trace(go.Scatter(
                     x=[api], y=[efrf],
                     mode='markers+text',
@@ -767,7 +794,7 @@ def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
             fig.update_layout(
                 title='Pareto Front (NSGA-II)',
                 xaxis=dict(title='API Loading (%)', range=[85, 95]),
-                yaxis_title='EFRF',
+                yaxis=dict(title='EFRF', range=[0, 1.0]),
                 height=500,
                 hovermode='closest'
             )
@@ -1086,16 +1113,26 @@ with col_right:
                         front0 = fronts[0]
                         pareto_api = -objectives[front0, 0]
                         feasible = constraints[front0]
+                        
+                        # Filter valid values
+                        valid_mask = (pareto_api >= 85) & (pareto_api <= 95) & (objectives[front0, 1] >= 0) & (objectives[front0, 1] <= 2)
+                        pareto_api = pareto_api[valid_mask]
+                        pareto_efrf = objectives[front0, 1][valid_mask]
+                        feasible = feasible[valid_mask]
+                        
                         feasible_indices = [i for i, f in enumerate(feasible) if f]
                         
-                        if feasible_indices:
-                            best_idx = np.argmax([pareto_api[i] for i in feasible_indices])
-                            best_idx = feasible_indices[best_idx]
-                            st.success(f"Optimal Pareto: API = {pareto_api[best_idx]:.2f}% | EFRF = {objectives[front0, 1][best_idx]:.4f} | Feasible: {len(feasible_indices)}")
+                        if len(pareto_api) > 0:
+                            if feasible_indices:
+                                best_idx = np.argmax([pareto_api[i] for i in feasible_indices])
+                                best_idx = feasible_indices[best_idx]
+                                st.success(f"Optimal Pareto: API = {pareto_api[best_idx]:.2f}% | EFRF = {pareto_efrf[best_idx]:.4f} | Feasible: {len(feasible_indices)}")
+                            else:
+                                # Show best non-dominated even if infeasible
+                                best_idx = np.argmin(pareto_efrf)
+                                st.warning(f"No feasible solutions. Best non-dominated: API = {pareto_api[best_idx]:.2f}% | EFRF = {pareto_efrf[best_idx]:.4f}")
                         else:
-                            # Show best non-dominated even if infeasible
-                            best_idx = np.argmin(objectives[front0, 1])
-                            st.warning(f"No feasible solutions found. Best non-dominated: API = {-objectives[front0, 0][best_idx]:.2f}% | EFRF = {objectives[front0, 1][best_idx]:.4f}")
+                            st.warning("No valid Pareto solutions found.")
                     else:
                         st.warning("No Pareto front found. Try adjusting parameters.")
                         
@@ -1119,16 +1156,22 @@ with col_right:
                     # Fallback matplotlib
                     try:
                         fig, ax = plt.subplots(figsize=(10, 5))
-                        ax.scatter(-objectives[:, 0], objectives[:, 1], alpha=0.2, s=10, color='gray')
-                        if len(fronts) > 0 and len(fronts[0]) > 0:
-                            front0 = fronts[0]
-                            ax.plot(-objectives[front0, 0], objectives[front0, 1], 'r-', linewidth=2)
-                            ax.scatter(-objectives[front0, 0], objectives[front0, 1], c='red', s=50)
+                        # Filter valid values
+                        valid_idx = (objectives[:, 0] < 10) & (objectives[:, 1] < 10)
+                        if np.any(valid_idx):
+                            ax.scatter(-objectives[valid_idx, 0], objectives[valid_idx, 1], alpha=0.2, s=10, color='gray')
+                            if len(fronts) > 0 and len(fronts[0]) > 0:
+                                front0 = fronts[0]
+                                valid_front = (objectives[front0, 0] < 10) & (objectives[front0, 1] < 10)
+                                if np.any(valid_front):
+                                    ax.plot(-objectives[front0[valid_front], 0], objectives[front0[valid_front], 1], 'r-', linewidth=2)
+                                    ax.scatter(-objectives[front0[valid_front], 0], objectives[front0[valid_front], 1], c='red', s=50)
                         ax.axhline(y=0.35, color='red', linestyle='--')
                         ax.set_xlabel('API Loading (%)')
                         ax.set_ylabel('EFRF')
                         ax.set_title('Pareto Front')
                         ax.set_xlim(85, 95)
+                        ax.set_ylim(0, 1.0)
                         st.pyplot(fig)
                         plt.close()
                     except:
