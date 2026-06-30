@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Flexible Experiments
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 9.0 (Fully Functional Experiment Buttons)
+Version: 10.0 (Improved Data Generation)
 """
 
 import streamlit as st
@@ -47,7 +47,6 @@ RANGES = {
 }
 
 def safe_initialize():
-    """Initialize session state with defaults and ensure valid values."""
     for key in DEFAULTS:
         if key not in st.session_state:
             st.session_state[key] = DEFAULTS[key]
@@ -60,7 +59,6 @@ def safe_initialize():
             except (ValueError, TypeError):
                 st.session_state[key] = DEFAULTS[key]
 
-# Run initialization before any UI
 safe_initialize()
 
 # ================================================================
@@ -199,20 +197,51 @@ class TruePINN(nn.Module):
 
 
 # ================================================================
-# 2. DATA GENERATION
+# 2. IMPROVED DATA GENERATION (Targeted Sampling)
 # ================================================================
 
-def generate_pinn_data(n_samples=400, random_state=42):
+def generate_pinn_data(n_samples=600, random_state=42):
+    """
+    Generate synthetic data with focus on optimal region.
+    Uses stratified sampling: 50% random + 50% targeted around optimum.
+    """
     np.random.seed(random_state)
     X = np.zeros((n_samples, 8))
     y = np.zeros((n_samples, 3))
 
+    n_random = n_samples // 2
+    n_targeted = n_samples - n_random
+
     for i in range(n_samples):
-        api = np.random.uniform(85, 95)
-        binder = np.random.uniform(0.5, 3.0)
-        mgst = np.random.uniform(0.2, 1.0)
-        pvpp = np.random.uniform(1.0, 5.0)
-        mcc = np.random.uniform(0, 8.0)
+        if i < n_random:
+            # Random sampling
+            api = np.random.uniform(85, 95)
+            binder = np.random.uniform(0.5, 3.0)
+            mgst = np.random.uniform(0.2, 1.0)
+            pvpp = np.random.uniform(1.0, 5.0)
+            pressure = np.random.uniform(100, 250)
+            speed = np.random.uniform(10, 40)
+            granule = np.random.uniform(50, 200)
+            mcc = np.random.uniform(0, 8.0)
+        else:
+            # Targeted sampling around optimum
+            api = np.random.normal(90.5, 1.5)
+            api = np.clip(api, 85, 95)
+            binder = np.random.normal(2.8, 0.4)
+            binder = np.clip(binder, 0.5, 3.0)
+            mgst = np.random.normal(0.15, 0.06)
+            mgst = np.clip(mgst, 0.05, 1.0)
+            pvpp = np.random.normal(3.0, 0.5)
+            pvpp = np.clip(pvpp, 1.0, 5.0)
+            pressure = np.random.normal(230, 15)
+            pressure = np.clip(pressure, 100, 250)
+            speed = np.random.normal(10, 3)
+            speed = np.clip(speed, 5, 40)
+            granule = np.random.normal(125, 20)
+            granule = np.clip(granule, 50, 200)
+            mcc = 8.0
+
+        # Ensure sum = 100%
         total_others = api + binder + mgst + pvpp + mcc
         if total_others > 100:
             scale = 100 / total_others
@@ -230,18 +259,16 @@ def generate_pinn_data(n_samples=400, random_state=42):
                 mcc = 8.0
                 api -= excess
 
+        # Clamp
         api = np.clip(api, 85, 95)
         binder = np.clip(binder, 0.5, 3.0)
-        mgst = np.clip(mgst, 0.2, 1.0)
+        mgst = np.clip(mgst, 0.05, 1.0)
         pvpp = np.clip(pvpp, 1.0, 5.0)
         mcc = np.clip(mcc, 0, 8.0)
 
-        pressure = np.random.uniform(100, 250)
-        speed = np.random.uniform(10, 40)
-        granule = np.random.uniform(50, 200)
-
         X[i] = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
 
+        # Physics
         k_eff = 0.035 * (1 - 0.4 * (api - 85)/10) * (1 - 0.2 * (speed - 10)/30)
         k_eff = max(k_eff, 0.008)
         A_eff = 1.2 + 0.1 * (binder - 1.5) - 0.2 * (mgst - 0.5)
@@ -271,7 +298,7 @@ def generate_pinn_data(n_samples=400, random_state=42):
 
 @st.cache_resource
 def load_pinn_model():
-    df, feature_names = generate_pinn_data(n_samples=400)
+    df, feature_names = generate_pinn_data(n_samples=600)
     X_raw = df[feature_names].values
     y = df[['Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']].values
 
@@ -394,17 +421,17 @@ def get_experiments():
         "Experiment 1": {
             'api': 90.5, 'binder': 2.9, 'pvpp': 3.0, 'mgst': 0.15,
             'pressure': 235, 'speed': 10, 'granule': 125,
-            'description': "Increase binder, reduce speed & Mg-St (EFRF ≈ 0.371)"
+            'description': "Increase binder, reduce speed & Mg-St"
         },
         "Experiment 2": {
             'api': 90.5, 'binder': 2.8, 'pvpp': 3.0, 'mgst': 0.12,
             'pressure': 240, 'speed': 9, 'granule': 125,
-            'description': "Higher pressure, lower speed & Mg-St (EFRF ≈ 0.344)"
+            'description': "Higher pressure, lower speed & Mg-St"
         },
         "Experiment 3": {
             'api': 90.5, 'binder': 3.0, 'pvpp': 3.0, 'mgst': 0.10,
             'pressure': 245, 'speed': 8, 'granule': 125,
-            'description': "Max binder, min speed & Mg-St (EFRF ≈ 0.319) ✅"
+            'description': "Max binder, min speed & Mg-St ✅"
         }
     }
 
@@ -428,7 +455,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ---- Header ----
 st.markdown("""
 <div style="text-align: center; padding: 1rem 0;">
     <span style="font-size: 2.5rem; display: inline-block; animation: pulse 2s infinite;">🧠</span>
@@ -447,7 +473,6 @@ st.caption("Babuker A. Abdalla · Nile Valley University, Sudan")
 st.markdown('</div>', unsafe_allow_html=True)
 st.markdown("---")
 
-# ---- Sidebar ----
 with st.sidebar:
     st.markdown("### 📚 Physics Constraints")
     st.markdown("""
@@ -468,12 +493,10 @@ with st.sidebar:
     """)
     st.warning("⚠️ **True PINN — Production-Ready**")
 
-# ---- Load Model ----
-with st.spinner("🔄 Training True PINN..."):
+with st.spinner("🔄 Training True PINN with improved data..."):
     model, scaler, feature_names, df, loss_history = load_pinn_model()
 st.success("✅ True PINN trained successfully")
 
-# ---- Experiments ----
 st.markdown("### 🧪 Suggested Experiments (One-Click Apply)")
 st.caption("Click any experiment button below to automatically adjust all parameters.")
 
@@ -482,7 +505,6 @@ cols = st.columns(len(experiments))
 for i, (name, params) in enumerate(experiments.items()):
     with cols[i]:
         if st.button(f"📌 {name}", key=f"exp_{i}", use_container_width=True):
-            # Update all session state values
             for key in params:
                 st.session_state[key] = params[key]
             st.rerun()
@@ -490,25 +512,20 @@ for i, (name, params) in enumerate(experiments.items()):
 
 st.markdown("---")
 
-# ================================================================
-# TWO-COLUMN LAYOUT: Inputs | Results
-# ================================================================
 col_left, col_right = st.columns([1, 1.2], gap="medium")
 
 with col_left:
     st.markdown("### 📊 Formulation Parameters")
     with st.container(border=True):
-        # Sliders directly bound to session state via key
         api = st.slider("🧪 API Loading (%)", 85.0, 95.0, step=0.1, key="api")
         binder = st.slider("🔗 Binder (%)", 0.5, 3.0, step=0.1, key="binder")
         pvpp = st.slider("💊 PVPP (%)", 1.0, 5.0, step=0.1, key="pvpp")
         mgst = st.slider("🧴 Mg-St (%)", 0.05, 1.0, step=0.01, key="mgst")
 
-        # MCC calculation
         used_total = api + binder + pvpp + mgst
         remaining = 100 - used_total
         if remaining < 0:
-            st.error("❌ Total exceeds 100%! Reduce API or other components.")
+            st.error("❌ Total exceeds 100%!")
             mcc = 0.0
         else:
             mcc = min(remaining, 8.0)
@@ -520,7 +537,7 @@ with col_left:
         if abs(total - 100) < 0.1:
             st.success(f"∑ Total = {total:.2f}% ✓")
         else:
-            st.error(f"∑ Total = {total:.2f}% ✗ (MCC capped at 8%)")
+            st.error(f"∑ Total = {total:.2f}% ✗")
 
     st.markdown("### ⚙️ Process Parameters")
     with st.container(border=True):
@@ -530,9 +547,6 @@ with col_left:
 
     predict_btn = st.button("🔬 Predict & Optimise", use_container_width=True)
 
-# ================================================================
-# RESULTS PANEL
-# ================================================================
 with col_right:
     st.markdown("### 📈 Predictive Results")
 
@@ -563,7 +577,7 @@ with col_right:
             elif tensile < 2.0:
                 st.warning("⚠️ Low tensile strength – increase binder or pressure.")
             elif efrf >= 0.35:
-                st.error(f"🚨 High capping risk – EFRF = {efrf:.4f} (must be < 0.35). Reduce speed or Mg-St.")
+                st.error(f"🚨 High capping risk – EFRF = {efrf:.4f} (must be < 0.35).")
 
             with st.expander("🔬 Physics Verification"):
                 st.markdown("""
