@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 22.0 (Multi-Task PINN + Variable Weights + Adam→LBFGS)
+Version: 23.0 (Final Production with NSGA-II Fix)
 """
 
 import streamlit as st
@@ -100,7 +100,7 @@ def add_interaction_features(X_raw):
     ], axis=1)
 
 # ================================================================
-# 2. MULTI-TASK TRUE PINN MODEL (WITH k(X) AND A(X) AS OUTPUTS)
+# 2. MULTI-TASK TRUE PINN MODEL
 # ================================================================
 
 class MultiTaskTruePINN(nn.Module):
@@ -112,7 +112,7 @@ class MultiTaskTruePINN(nn.Module):
     - Multi-task learning improves consistency between physics and predictions
     """
     
-    def __init__(self, input_dim=13, output_dim=5):  # 5 outputs: D, σt, ER, k, A
+    def __init__(self, input_dim=13, output_dim=5):
         super(MultiTaskTruePINN, self).__init__()
 
         # Main network with BatchNorm and Dropout
@@ -146,7 +146,7 @@ class MultiTaskTruePINN(nn.Module):
         density = torch.sigmoid(raw[:, 0:1])                      # D ∈ (0, 1)
         tensile = torch.nn.functional.softplus(raw[:, 1:2])      # σt > 0
         er = torch.nn.functional.softplus(raw[:, 2:3])           # ER > 0
-        k = torch.nn.functional.softplus(raw[:, 3:4])            # k > 0 (Softplus)
+        k = torch.nn.functional.softplus(raw[:, 3:4])            # k > 0
         A = raw[:, 4:5]                                          # A can be any real
         
         return torch.cat([density, tensile, er, k, A], dim=1)
@@ -236,9 +236,7 @@ class MultiTaskTruePINN(nn.Module):
         )
 
         # ---------- 8. k and A Regularization ----------
-        # Encourage k to be physically reasonable (0.01-0.1)
         k_regularization = torch.mean(torch.relu(k_pred - 0.1) ** 2) + torch.mean(torch.relu(0.005 - k_pred) ** 2)
-        # Encourage A to be in reasonable range (0.5-2.0)
         A_regularization = torch.mean(torch.relu(A_pred - 2.0) ** 2) + torch.mean(torch.relu(0.5 - A_pred) ** 2)
 
         # ---------- TOTAL LOSS ----------
@@ -372,7 +370,7 @@ def generate_pinn_data(n_samples=600, random_state=42):
 
 
 # ================================================================
-# 4. NSGA-II IMPLEMENTATION
+# 4. NSGA-II IMPLEMENTATION (FIXED EFRF NUMERICAL ISSUE)
 # ================================================================
 
 class NSGAII:
@@ -434,15 +432,17 @@ class NSGAII:
                 with torch.no_grad():
                     pred = self.model.predict(X_tensor)[0]
                 
-                tensile = pred[1]
-                er = pred[2]
+                tensile = float(pred[1])
+                er = float(pred[2])
                 
+                # SAFE EFRF computation with clamping to avoid 0.0000
                 if tensile < 0.01:
                     tensile = 0.01
-                    efrf = 100.0
+                    efrf = 10.0
                 else:
                     efrf = er / tensile
-                    efrf = max(0.0, min(efrf, 10.0))
+                    # Clamp to physically reasonable range (0.01 to 5.0)
+                    efrf = max(0.01, min(efrf, 5.0))
                 
                 constraints[i] = (tensile >= 1.99 and efrf < 0.36)
                 objectives[i, 0] = -api
@@ -830,7 +830,7 @@ def predict_pinn(model, scaler, y_scaler, inputs):
             efrf = 10.0
         else:
             efrf = er / tensile
-            efrf = max(0.0, min(efrf, 10.0))
+            efrf = max(0.01, min(efrf, 5.0))  # Clamp to reasonable range
         return density, tensile, er, efrf
     except Exception as e:
         st.error(f"Prediction error: {e}")
@@ -849,7 +849,7 @@ def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
             pareto_efrf = objectives[front0, 1]
             feasible = constraints[front0]
 
-            valid_mask = (pareto_api >= 85) & (pareto_api <= 95) & (pareto_efrf >= 0) & (pareto_efrf <= 2)
+            valid_mask = (pareto_api >= 85) & (pareto_api <= 95) & (pareto_efrf >= 0.001) & (pareto_efrf <= 2)
             pareto_api = pareto_api[valid_mask]
             pareto_efrf = pareto_efrf[valid_mask]
             feasible = feasible[valid_mask]
@@ -884,7 +884,7 @@ def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
                     name=f'Feasible ({len(feasible_indices)})'
                 ))
 
-            if api and efrf and 85 <= api <= 95 and 0 <= efrf <= 2:
+            if api and efrf and 85 <= api <= 95 and 0.001 <= efrf <= 2:
                 fig.add_trace(go.Scatter(
                     x=[api], y=[efrf],
                     mode='markers+text',
@@ -1034,6 +1034,7 @@ with st.sidebar:
     - ✅ Adam (2000 epochs) → LBFGS (500 iterations)
     - ✅ Feature Engineering (interaction terms)
     - ✅ Output Normalization
+    - ✅ NSGA-II numerical fix
 
     **Target:** ~90.5% Paracetamol
     """)
@@ -1206,6 +1207,7 @@ with col_right:
                 - ✅ Adam → LBFGS hybrid training.
                 - ✅ Feature engineering (interaction terms).
                 - ✅ Output normalization applied.
+                - ✅ NSGA-II numerical stability fixed.
                 """)
                 
                 # Show learned k and A values
@@ -1244,7 +1246,7 @@ with col_right:
                         pareto_api = -objectives[front0, 0]
                         feasible = constraints[front0]
                         
-                        valid_mask = (pareto_api >= 85) & (pareto_api <= 95) & (objectives[front0, 1] >= 0) & (objectives[front0, 1] <= 2)
+                        valid_mask = (pareto_api >= 85) & (pareto_api <= 95) & (objectives[front0, 1] >= 0.001) & (objectives[front0, 1] <= 2)
                         pareto_api = pareto_api[valid_mask]
                         pareto_efrf = objectives[front0, 1][valid_mask]
                         feasible = feasible[valid_mask]
@@ -1283,12 +1285,12 @@ with col_right:
                 else:
                     try:
                         fig, ax = plt.subplots(figsize=(10, 5))
-                        valid_idx = (objectives[:, 0] < 10) & (objectives[:, 1] < 10)
+                        valid_idx = (objectives[:, 0] < 10) & (objectives[:, 1] > 0.001) & (objectives[:, 1] < 10)
                         if np.any(valid_idx):
                             ax.scatter(-objectives[valid_idx, 0], objectives[valid_idx, 1], alpha=0.2, s=10, color='gray')
                             if len(fronts) > 0 and len(fronts[0]) > 0:
                                 front0 = fronts[0]
-                                valid_front = (objectives[front0, 0] < 10) & (objectives[front0, 1] < 10)
+                                valid_front = (objectives[front0, 0] < 10) & (objectives[front0, 1] > 0.001) & (objectives[front0, 1] < 10)
                                 if np.any(valid_front):
                                     ax.plot(-objectives[front0[valid_front], 0], objectives[front0[valid_front], 1], 'r-', linewidth=2)
                                     ax.scatter(-objectives[front0[valid_front], 0], objectives[front0[valid_front], 1], c='red', s=50)
