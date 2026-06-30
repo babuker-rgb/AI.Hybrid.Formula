@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Flexible Experiments
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 8.0 (Flexible Inputs & Suggested Experiments)
+Version: 8.1 (Fixed Input Range Protection)
 """
 
 import streamlit as st
@@ -91,7 +91,7 @@ class TruePINN(nn.Module):
         """
         # Real pressure for physics
         pressure_real = X_raw[:, 5]
-        mcc_real = X_raw[:, 1]  # MCC is at index 1
+        mcc_real = X_raw[:, 1]
 
         # Forward pass
         y_pred = self.forward(X_scaled)
@@ -111,14 +111,14 @@ class TruePINN(nn.Module):
         heckel_target = k * pressure_real + A
         heckel_loss = torch.mean((heckel_pred - heckel_target) ** 2)
 
-        # ---------- EFRF Constraint (strict safety margin) ----------
+        # ---------- EFRF Constraint ----------
         efrf_pred = er_pred / (tensile_pred + 1e-8)
         efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
 
         # ---------- MCC Constraint ----------
         mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
 
-        # ---------- Monotonicity: ∂D/∂P > 0 ----------
+        # ---------- Monotonicity ----------
         if compute_grad:
             if not X_scaled.requires_grad:
                 X_scaled.requires_grad_(True)
@@ -138,7 +138,7 @@ class TruePINN(nn.Module):
         else:
             monotonic_loss = torch.tensor(0.0, device=X_scaled.device)
 
-        # ---------- Boundary Conditions (using real pressure) ----------
+        # ---------- Boundary Conditions ----------
         mask_low = (pressure_real < 120).float()
         mask_high = (pressure_real > 230).float()
         boundary_loss = (
@@ -177,7 +177,7 @@ class TruePINN(nn.Module):
 
 
 # ================================================================
-# 2. DATA GENERATION WITH MCC LIMIT
+# 2. DATA GENERATION
 # ================================================================
 
 def generate_pinn_data(n_samples=400, random_state=42):
@@ -186,7 +186,6 @@ def generate_pinn_data(n_samples=400, random_state=42):
     y = np.zeros((n_samples, 3))
 
     for i in range(n_samples):
-        # Generate formulations with MCC limited to 8%
         api = np.random.uniform(85, 95)
         binder = np.random.uniform(0.5, 3.0)
         mgst = np.random.uniform(0.2, 1.0)
@@ -209,7 +208,6 @@ def generate_pinn_data(n_samples=400, random_state=42):
                 mcc = 8.0
                 api -= excess
 
-        # Clamp
         api = np.clip(api, 85, 95)
         binder = np.clip(binder, 0.5, 3.0)
         mgst = np.clip(mgst, 0.2, 1.0)
@@ -222,7 +220,6 @@ def generate_pinn_data(n_samples=400, random_state=42):
 
         X[i] = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
 
-        # True physics
         k_eff = 0.035 * (1 - 0.4 * (api - 85)/10) * (1 - 0.2 * (speed - 10)/30)
         k_eff = max(k_eff, 0.008)
         A_eff = 1.2 + 0.1 * (binder - 1.5) - 0.2 * (mgst - 0.5)
@@ -247,7 +244,7 @@ def generate_pinn_data(n_samples=400, random_state=42):
 
 
 # ================================================================
-# 3. TRAIN WITH EARLY STOPPING
+# 3. TRAIN MODEL
 # ================================================================
 
 @st.cache_resource
@@ -366,10 +363,7 @@ def predict_pinn(model, scaler, inputs):
 # ================================================================
 
 def get_experiments():
-    """
-    Returns a dictionary of suggested experiments to reduce EFRF.
-    """
-    experiments = {
+    return {
         "Current": {
             'api': 90.5, 'binder': 2.7, 'pvpp': 3.0, 'mgst': 0.20,
             'pressure': 230, 'speed': 12, 'granule': 125,
@@ -391,14 +385,31 @@ def get_experiments():
             'description': "Max binder, min speed & Mg-St (EFRF ≈ 0.319) ✅"
         }
     }
-    return experiments
 
 
 # ================================================================
-# 6. STREAMLIT UI WITH EXPERIMENT FLEXIBILITY
+# 6. STREAMLIT UI
 # ================================================================
 
 st.set_page_config(page_title="True PINN Framework", page_icon="🧬", layout="wide")
+
+# ---- SAFETY: Reset invalid session state values ----
+if 'pressure' not in st.session_state or st.session_state.pressure < 100 or st.session_state.pressure > 250:
+    st.session_state.pressure = 230.0
+if 'speed' not in st.session_state or st.session_state.speed < 5 or st.session_state.speed > 40:
+    st.session_state.speed = 12.0
+if 'mgst' not in st.session_state or st.session_state.mgst < 0.05 or st.session_state.mgst > 1.0:
+    st.session_state.mgst = 0.20
+if 'api' not in st.session_state or st.session_state.api < 85 or st.session_state.api > 95:
+    st.session_state.api = 90.5
+if 'binder' not in st.session_state or st.session_state.binder < 0.5 or st.session_state.binder > 3.0:
+    st.session_state.binder = 2.7
+if 'pvpp' not in st.session_state or st.session_state.pvpp < 1.0 or st.session_state.pvpp > 5.0:
+    st.session_state.pvpp = 3.0
+if 'granule' not in st.session_state or st.session_state.granule < 50 or st.session_state.granule > 200:
+    st.session_state.granule = 125.0
+
+# ---- Custom CSS ----
 st.markdown("""
 <style>
     .main-header { text-align: center; padding: 0.5rem 0; }
@@ -412,7 +423,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Header
+# ---- Header ----
 st.markdown("""
 <div style="text-align: center; padding: 1rem 0;">
     <span style="font-size: 2.5rem; display: inline-block; animation: pulse 2s infinite;">🧠</span>
@@ -431,7 +442,7 @@ st.caption("Babuker A. Abdalla · Nile Valley University, Sudan")
 st.markdown('</div>', unsafe_allow_html=True)
 st.markdown("---")
 
-# Sidebar
+# ---- Sidebar ----
 with st.sidebar:
     st.markdown("### 📚 Physics Constraints")
     st.markdown("""
@@ -452,30 +463,12 @@ with st.sidebar:
     """)
     st.warning("⚠️ **True PINN — Production-Ready**")
 
-# Load model
+# ---- Load Model ----
 with st.spinner("🔄 Training True PINN..."):
     model, scaler, feature_names, df, loss_history = load_pinn_model()
 st.success("✅ True PINN trained successfully")
 
-# Initialize session state for flexibility
-if 'api' not in st.session_state:
-    st.session_state.api = 90.5
-if 'binder' not in st.session_state:
-    st.session_state.binder = 2.7
-if 'pvpp' not in st.session_state:
-    st.session_state.pvpp = 3.0
-if 'mgst' not in st.session_state:
-    st.session_state.mgst = 0.20
-if 'pressure' not in st.session_state:
-    st.session_state.pressure = 230
-if 'speed' not in st.session_state:
-    st.session_state.speed = 12
-if 'granule' not in st.session_state:
-    st.session_state.granule = 125
-
-# ================================================================
-# EXPERIMENT BUTTONS (Flexible inputs)
-# ================================================================
+# ---- Experiments ----
 st.markdown("### 🧪 Suggested Experiments (One-Click Apply)")
 st.caption("Click any experiment button below to automatically adjust all parameters.")
 
@@ -492,7 +485,6 @@ for i, (name, params) in enumerate(experiments.items()):
             st.session_state.speed = params['speed']
             st.session_state.granule = params['granule']
             st.rerun()
-
         st.caption(params['description'])
 
 st.markdown("---")
@@ -508,9 +500,8 @@ with col_left:
         api = st.slider("🧪 API Loading (%)", 85.0, 95.0, st.session_state.api, 0.1, key="slider_api")
         binder = st.slider("🔗 Binder (%)", 0.5, 3.0, st.session_state.binder, 0.1, key="slider_binder")
         pvpp = st.slider("💊 PVPP (%)", 1.0, 5.0, st.session_state.pvpp, 0.1, key="slider_pvpp")
-        mgst = st.slider("🧴 Mg-St (%)", 0.05, 1.0, st.session_state.mgst, 0.01, key="slider_mgst")  # Extended min to 0.05
+        mgst = st.slider("🧴 Mg-St (%)", 0.05, 1.0, st.session_state.mgst, 0.01, key="slider_mgst")
 
-        # Auto-calculate MCC with cap at 8%
         used_total = api + binder + pvpp + mgst
         remaining = 100 - used_total
         if remaining < 0:
@@ -531,25 +522,25 @@ with col_left:
     st.markdown("### ⚙️ Process Parameters")
     with st.container(border=True):
         pressure = st.slider("⚙️ Compaction Pressure (MPa)", 100.0, 250.0, st.session_state.pressure, 1.0, key="slider_pressure")
-        speed = st.slider("🔄 Punch Speed (rpm)", 5.0, 40.0, st.session_state.speed, 0.5, key="slider_speed")  # Extended min to 5
+        speed = st.slider("🔄 Punch Speed (rpm)", 5.0, 40.0, st.session_state.speed, 0.5, key="slider_speed")
         granule = st.slider("🔬 Granule Size (µm)", 50.0, 200.0, st.session_state.granule, 1.0, key="slider_granule")
 
     predict_btn = st.button("🔬 Predict & Optimise", use_container_width=True)
+
+# ---- Update session state from sliders ----
+st.session_state.api = api
+st.session_state.binder = binder
+st.session_state.pvpp = pvpp
+st.session_state.mgst = mgst
+st.session_state.pressure = pressure
+st.session_state.speed = speed
+st.session_state.granule = granule
 
 # ================================================================
 # RESULTS PANEL
 # ================================================================
 with col_right:
     st.markdown("### 📈 Predictive Results")
-
-    # Update session state from sliders (for consistency)
-    st.session_state.api = api
-    st.session_state.binder = binder
-    st.session_state.pvpp = pvpp
-    st.session_state.mgst = mgst
-    st.session_state.pressure = pressure
-    st.session_state.speed = speed
-    st.session_state.granule = granule
 
     if predict_btn:
         if abs(total - 100) > 0.1:
@@ -559,7 +550,6 @@ with col_right:
             with st.spinner("🧠 Running True PINN prediction..."):
                 density, tensile, er, efrf = predict_pinn(model, scaler, inputs)
 
-            # Metrics
             c1, c2, c3 = st.columns(3)
             c1.metric("📊 Density", f"{density:.3f}")
             c2.metric("💪 Tensile", f"{tensile:.3f} MPa")
@@ -567,7 +557,6 @@ with col_right:
 
             st.markdown("---")
 
-            # Status with strict safety margin
             if tensile >= 2.0 and efrf < 0.35:
                 st.success(f"""
                 🎉 **Formulation satisfies all constraints with safety margin!**
@@ -582,7 +571,6 @@ with col_right:
             elif efrf >= 0.35:
                 st.error(f"🚨 High capping risk – EFRF = {efrf:.4f} (must be < 0.35). Reduce speed or Mg-St.")
 
-            # Physics Verification
             with st.expander("🔬 Physics Verification"):
                 st.markdown("""
                 - ✅ Heckel residual, EFRF constraint, monotonicity, boundary conditions enforced.
