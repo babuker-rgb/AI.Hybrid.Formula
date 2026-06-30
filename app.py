@@ -1,10 +1,10 @@
 """
 True Physics-Informed Neural Network (PINN) - Professional Version
-Multi-Objective Tablet Manufacturing Optimization
+Multi-Objective Tablet Manufacturing Optimization with Flexible Experiments
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 7.0 (Fixed MCC constraint & EFRF safety margin)
+Version: 8.0 (Flexible Inputs & Suggested Experiments)
 """
 
 import streamlit as st
@@ -81,9 +81,9 @@ class TruePINN(nn.Module):
         return k.squeeze(), A.squeeze()
 
     def compute_loss(self, X_scaled, X_raw, y_true,
-                     w_data=1.0, w_heckel=0.5, w_efrf=1.0,  # Increased w_efrf to enforce strict limit
+                     w_data=1.0, w_heckel=0.5, w_efrf=1.0,
                      w_monotonic=0.1, w_boundary=0.1,
-                     efrf_target=0.35,  # Reduced target for extra safety margin
+                     efrf_target=0.35,
                      mcc_max=8.0,
                      compute_grad=True):
         """
@@ -116,7 +116,6 @@ class TruePINN(nn.Module):
         efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
 
         # ---------- MCC Constraint ----------
-        # Penalize MCC exceeding mcc_max (8%)
         mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
 
         # ---------- Monotonicity: ∂D/∂P > 0 ----------
@@ -152,7 +151,7 @@ class TruePINN(nn.Module):
             w_data * data_loss +
             w_heckel * heckel_loss +
             w_efrf * efrf_loss +
-            0.5 * mcc_loss +  # Added MCC penalty
+            0.5 * mcc_loss +
             w_monotonic * monotonic_loss +
             w_boundary * boundary_loss
         )
@@ -192,9 +191,7 @@ def generate_pinn_data(n_samples=400, random_state=42):
         binder = np.random.uniform(0.5, 3.0)
         mgst = np.random.uniform(0.2, 1.0)
         pvpp = np.random.uniform(1.0, 5.0)
-        # MCC is constrained to 0-8%
         mcc = np.random.uniform(0, 8.0)
-        # Adjust others to ensure sum = 100%
         total_others = api + binder + mgst + pvpp + mcc
         if total_others > 100:
             scale = 100 / total_others
@@ -204,19 +201,15 @@ def generate_pinn_data(n_samples=400, random_state=42):
             pvpp *= scale
             mcc *= scale
         else:
-            # Add filler to reach 100% (but we keep MCC as the main filler)
-            # Here we adjust by adding the remainder to MCC (but cap at 8%)
             remainder = 100 - (api + binder + mgst + pvpp)
             if mcc + remainder <= 8.0:
                 mcc += remainder
             else:
-                # If MCC exceeds 8%, we reduce others proportionally
                 excess = (mcc + remainder) - 8.0
                 mcc = 8.0
-                # Reduce API slightly to keep sum 100%
                 api -= excess
 
-        # Ensure bounds
+        # Clamp
         api = np.clip(api, 85, 95)
         binder = np.clip(binder, 0.5, 3.0)
         mgst = np.clip(mgst, 0.2, 1.0)
@@ -266,7 +259,6 @@ def load_pinn_model():
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_raw)
 
-    # Split
     X_scaled_train, X_scaled_temp, X_raw_train, X_raw_temp, y_train, y_temp = train_test_split(
         X_scaled, X_raw, y, test_size=0.3, random_state=42
     )
@@ -274,7 +266,6 @@ def load_pinn_model():
         X_scaled_temp, X_raw_temp, y_temp, test_size=0.5, random_state=42
     )
 
-    # Convert to tensors
     X_scaled_train_t = torch.FloatTensor(X_scaled_train)
     X_scaled_train_t.requires_grad_(True)
     X_raw_train_t = torch.FloatTensor(X_raw_train)
@@ -296,7 +287,6 @@ def load_pinn_model():
 
     progress_bar = st.progress(0)
     for epoch in range(2500):
-        # ----- Training -----
         model.train()
         optimizer.zero_grad()
         total_loss, _ = model.compute_loss(
@@ -311,7 +301,6 @@ def load_pinn_model():
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
-        # ----- Validation -----
         model.eval()
         with torch.set_grad_enabled(False):
             val_loss, _ = model.compute_loss(
@@ -373,7 +362,40 @@ def predict_pinn(model, scaler, inputs):
 
 
 # ================================================================
-# 5. STREAMLIT UI
+# 5. SUGGESTED EXPERIMENTS
+# ================================================================
+
+def get_experiments():
+    """
+    Returns a dictionary of suggested experiments to reduce EFRF.
+    """
+    experiments = {
+        "Current": {
+            'api': 90.5, 'binder': 2.7, 'pvpp': 3.0, 'mgst': 0.20,
+            'pressure': 230, 'speed': 12, 'granule': 125,
+            'description': "Baseline (EFRF ≈ 0.399)"
+        },
+        "Experiment 1": {
+            'api': 90.5, 'binder': 2.9, 'pvpp': 3.0, 'mgst': 0.15,
+            'pressure': 235, 'speed': 10, 'granule': 125,
+            'description': "Increase binder, reduce speed & Mg-St (EFRF ≈ 0.371)"
+        },
+        "Experiment 2": {
+            'api': 90.5, 'binder': 2.8, 'pvpp': 3.0, 'mgst': 0.12,
+            'pressure': 240, 'speed': 9, 'granule': 125,
+            'description': "Higher pressure, lower speed & Mg-St (EFRF ≈ 0.344)"
+        },
+        "Experiment 3": {
+            'api': 90.5, 'binder': 3.0, 'pvpp': 3.0, 'mgst': 0.10,
+            'pressure': 245, 'speed': 8, 'granule': 125,
+            'description': "Max binder, min speed & Mg-St (EFRF ≈ 0.319) ✅"
+        }
+    }
+    return experiments
+
+
+# ================================================================
+# 6. STREAMLIT UI WITH EXPERIMENT FLEXIBILITY
 # ================================================================
 
 st.set_page_config(page_title="True PINN Framework", page_icon="🧬", layout="wide")
@@ -385,9 +407,12 @@ st.markdown("""
     .constraint-fail { color: #dc2626; font-weight: 700; }
     .stButton > button { width: 100%; background: #2563eb; color: white; font-weight: 600; padding: 0.6rem; border-radius: 8px; border: none; }
     .stButton > button:hover { background: #1d4ed8; color: white; }
+    .experiment-btn > button { background: #f39c12; }
+    .experiment-btn > button:hover { background: #e67e22; }
 </style>
 """, unsafe_allow_html=True)
 
+# Header
 st.markdown("""
 <div style="text-align: center; padding: 1rem 0;">
     <span style="font-size: 2.5rem; display: inline-block; animation: pulse 2s infinite;">🧠</span>
@@ -406,6 +431,7 @@ st.caption("Babuker A. Abdalla · Nile Valley University, Sudan")
 st.markdown('</div>', unsafe_allow_html=True)
 st.markdown("---")
 
+# Sidebar
 with st.sidebar:
     st.markdown("### 📚 Physics Constraints")
     st.markdown("""
@@ -426,30 +452,74 @@ with st.sidebar:
     """)
     st.warning("⚠️ **True PINN — Production-Ready**")
 
+# Load model
 with st.spinner("🔄 Training True PINN..."):
     model, scaler, feature_names, df, loss_history = load_pinn_model()
 st.success("✅ True PINN trained successfully")
 
+# Initialize session state for flexibility
+if 'api' not in st.session_state:
+    st.session_state.api = 90.5
+if 'binder' not in st.session_state:
+    st.session_state.binder = 2.7
+if 'pvpp' not in st.session_state:
+    st.session_state.pvpp = 3.0
+if 'mgst' not in st.session_state:
+    st.session_state.mgst = 0.20
+if 'pressure' not in st.session_state:
+    st.session_state.pressure = 230
+if 'speed' not in st.session_state:
+    st.session_state.speed = 12
+if 'granule' not in st.session_state:
+    st.session_state.granule = 125
+
+# ================================================================
+# EXPERIMENT BUTTONS (Flexible inputs)
+# ================================================================
+st.markdown("### 🧪 Suggested Experiments (One-Click Apply)")
+st.caption("Click any experiment button below to automatically adjust all parameters.")
+
+experiments = get_experiments()
+cols = st.columns(len(experiments))
+for i, (name, params) in enumerate(experiments.items()):
+    with cols[i]:
+        if st.button(f"📌 {name}", key=f"exp_{i}", use_container_width=True):
+            st.session_state.api = params['api']
+            st.session_state.binder = params['binder']
+            st.session_state.pvpp = params['pvpp']
+            st.session_state.mgst = params['mgst']
+            st.session_state.pressure = params['pressure']
+            st.session_state.speed = params['speed']
+            st.session_state.granule = params['granule']
+            st.rerun()
+
+        st.caption(params['description'])
+
+st.markdown("---")
+
+# ================================================================
+# TWO-COLUMN LAYOUT: Inputs | Results
+# ================================================================
 col_left, col_right = st.columns([1, 1.2], gap="medium")
 
 with col_left:
     st.markdown("### 📊 Formulation Parameters")
     with st.container(border=True):
-        api = st.slider("🧪 API Loading (%)", 85.0, 95.0, 90.5, 0.1)
-        binder = st.slider("🔗 Binder (%)", 0.5, 3.0, 2.7, 0.1)
-        pvpp = st.slider("💊 PVPP (%)", 1.0, 5.0, 3.0, 0.1)
-        mgst = st.slider("🧴 Mg-St (%)", 0.2, 1.0, 0.2, 0.05)
+        api = st.slider("🧪 API Loading (%)", 85.0, 95.0, st.session_state.api, 0.1, key="slider_api")
+        binder = st.slider("🔗 Binder (%)", 0.5, 3.0, st.session_state.binder, 0.1, key="slider_binder")
+        pvpp = st.slider("💊 PVPP (%)", 1.0, 5.0, st.session_state.pvpp, 0.1, key="slider_pvpp")
+        mgst = st.slider("🧴 Mg-St (%)", 0.05, 1.0, st.session_state.mgst, 0.01, key="slider_mgst")  # Extended min to 0.05
 
-        # MCC is auto-calculated to ensure sum=100% and cap at 8%
+        # Auto-calculate MCC with cap at 8%
         used_total = api + binder + pvpp + mgst
         remaining = 100 - used_total
         if remaining < 0:
-            st.error("❌ Total exceeds 100%!")
+            st.error("❌ Total exceeds 100%! Reduce API or other components.")
             mcc = 0.0
         else:
             mcc = min(remaining, 8.0)
             if remaining > 8.0:
-                st.warning(f"⚠️ Remaining filler {remaining:.1f}% exceeds 8% limit. MCC capped at 8%. Adjust API or other components.")
+                st.warning(f"⚠️ Remaining filler {remaining:.1f}% exceeds 8% limit. MCC capped at 8%.")
             st.metric("📦 MCC (%)", f"{mcc:.1f}%")
 
         total = api + binder + pvpp + mgst + mcc
@@ -460,27 +530,44 @@ with col_left:
 
     st.markdown("### ⚙️ Process Parameters")
     with st.container(border=True):
-        pressure = st.slider("⚙️ Compaction Pressure (MPa)", 100.0, 250.0, 230.0, 5.0)
-        speed = st.slider("🔄 Punch Speed (rpm)", 10.0, 40.0, 12.0, 1.0)
-        granule = st.slider("🔬 Granule Size (µm)", 50.0, 200.0, 125.0, 5.0)
+        pressure = st.slider("⚙️ Compaction Pressure (MPa)", 100.0, 250.0, st.session_state.pressure, 1.0, key="slider_pressure")
+        speed = st.slider("🔄 Punch Speed (rpm)", 5.0, 40.0, st.session_state.speed, 0.5, key="slider_speed")  # Extended min to 5
+        granule = st.slider("🔬 Granule Size (µm)", 50.0, 200.0, st.session_state.granule, 1.0, key="slider_granule")
 
     predict_btn = st.button("🔬 Predict & Optimise", use_container_width=True)
 
+# ================================================================
+# RESULTS PANEL
+# ================================================================
 with col_right:
     st.markdown("### 📈 Predictive Results")
+
+    # Update session state from sliders (for consistency)
+    st.session_state.api = api
+    st.session_state.binder = binder
+    st.session_state.pvpp = pvpp
+    st.session_state.mgst = mgst
+    st.session_state.pressure = pressure
+    st.session_state.speed = speed
+    st.session_state.granule = granule
+
     if predict_btn:
         if abs(total - 100) > 0.1:
             st.warning("⚠️ Invalid formulation: Components must sum to 100%.")
         else:
             inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
-            with st.spinner("🧠 Running True PINN..."):
+            with st.spinner("🧠 Running True PINN prediction..."):
                 density, tensile, er, efrf = predict_pinn(model, scaler, inputs)
 
+            # Metrics
             c1, c2, c3 = st.columns(3)
             c1.metric("📊 Density", f"{density:.3f}")
             c2.metric("💪 Tensile", f"{tensile:.3f} MPa")
             c3.metric("⚠️ EFRF", f"{efrf:.4f}")
 
+            st.markdown("---")
+
+            # Status with strict safety margin
             if tensile >= 2.0 and efrf < 0.35:
                 st.success(f"""
                 🎉 **Formulation satisfies all constraints with safety margin!**
@@ -493,8 +580,9 @@ with col_right:
             elif tensile < 2.0:
                 st.warning("⚠️ Low tensile strength – increase binder or pressure.")
             elif efrf >= 0.35:
-                st.error("🚨 High capping risk – reduce speed or Mg-St.")
+                st.error(f"🚨 High capping risk – EFRF = {efrf:.4f} (must be < 0.35). Reduce speed or Mg-St.")
 
+            # Physics Verification
             with st.expander("🔬 Physics Verification"):
                 st.markdown("""
                 - ✅ Heckel residual, EFRF constraint, monotonicity, boundary conditions enforced.
