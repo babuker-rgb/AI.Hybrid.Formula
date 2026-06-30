@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Flexible Experiments
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 8.2 (Fully Fixed Session State)
+Version: 8.3 (Ultimate Session State Fix)
 """
 
 import streamlit as st
@@ -23,44 +23,48 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. FORCE RESET SESSION STATE (BEFORE ANY UI ELEMENTS)
+# 0. ULTIMATE SESSION STATE RESET (before any UI)
 # ================================================================
 
-# This MUST be the first thing after imports to prevent slider errors
-if 'pressure' not in st.session_state or not isinstance(st.session_state.pressure, (int, float)):
-    st.session_state.pressure = 230.0
-elif st.session_state.pressure < 100 or st.session_state.pressure > 250:
-    st.session_state.pressure = 230.0
+# Define default values
+DEFAULTS = {
+    'api': 90.5,
+    'binder': 2.7,
+    'pvpp': 3.0,
+    'mgst': 0.20,
+    'pressure': 230.0,
+    'speed': 12.0,
+    'granule': 125.0
+}
 
-if 'speed' not in st.session_state or not isinstance(st.session_state.speed, (int, float)):
-    st.session_state.speed = 12.0
-elif st.session_state.speed < 5 or st.session_state.speed > 40:
-    st.session_state.speed = 12.0
+# Define valid ranges
+RANGES = {
+    'api': (85.0, 95.0),
+    'binder': (0.5, 3.0),
+    'pvpp': (1.0, 5.0),
+    'mgst': (0.05, 1.0),
+    'pressure': (100.0, 250.0),
+    'speed': (5.0, 40.0),
+    'granule': (50.0, 200.0)
+}
 
-if 'mgst' not in st.session_state or not isinstance(st.session_state.mgst, (int, float)):
-    st.session_state.mgst = 0.20
-elif st.session_state.mgst < 0.05 or st.session_state.mgst > 1.0:
-    st.session_state.mgst = 0.20
+# Helper to clamp values
+def clamp(val, min_val, max_val):
+    return max(min_val, min(val, max_val))
 
-if 'api' not in st.session_state or not isinstance(st.session_state.api, (int, float)):
-    st.session_state.api = 90.5
-elif st.session_state.api < 85 or st.session_state.api > 95:
-    st.session_state.api = 90.5
-
-if 'binder' not in st.session_state or not isinstance(st.session_state.binder, (int, float)):
-    st.session_state.binder = 2.7
-elif st.session_state.binder < 0.5 or st.session_state.binder > 3.0:
-    st.session_state.binder = 2.7
-
-if 'pvpp' not in st.session_state or not isinstance(st.session_state.pvpp, (int, float)):
-    st.session_state.pvpp = 3.0
-elif st.session_state.pvpp < 1.0 or st.session_state.pvpp > 5.0:
-    st.session_state.pvpp = 3.0
-
-if 'granule' not in st.session_state or not isinstance(st.session_state.granule, (int, float)):
-    st.session_state.granule = 125.0
-elif st.session_state.granule < 50 or st.session_state.granule > 200:
-    st.session_state.granule = 125.0
+# Reset all session state values to safe defaults
+for key in DEFAULTS:
+    if key not in st.session_state:
+        st.session_state[key] = DEFAULTS[key]
+    else:
+        # Ensure value is numeric and within range
+        try:
+            val = float(st.session_state[key])
+            min_val, max_val = RANGES[key]
+            if val < min_val or val > max_val:
+                st.session_state[key] = DEFAULTS[key]
+        except (ValueError, TypeError):
+            st.session_state[key] = DEFAULTS[key]
 
 # ================================================================
 # 1. TRUE PINN MODEL
@@ -521,10 +525,11 @@ col_left, col_right = st.columns([1, 1.2], gap="medium")
 with col_left:
     st.markdown("### 📊 Formulation Parameters")
     with st.container(border=True):
-        api = st.slider("🧪 API Loading (%)", 85.0, 95.0, st.session_state.api, 0.1, key="slider_api")
-        binder = st.slider("🔗 Binder (%)", 0.5, 3.0, st.session_state.binder, 0.1, key="slider_binder")
-        pvpp = st.slider("💊 PVPP (%)", 1.0, 5.0, st.session_state.pvpp, 0.1, key="slider_pvpp")
-        mgst = st.slider("🧴 Mg-St (%)", 0.05, 1.0, st.session_state.mgst, 0.01, key="slider_mgst")
+        # Use session state values safely
+        api = st.slider("🧪 API Loading (%)", 85.0, 95.0, float(st.session_state.api), 0.1, key="slider_api")
+        binder = st.slider("🔗 Binder (%)", 0.5, 3.0, float(st.session_state.binder), 0.1, key="slider_binder")
+        pvpp = st.slider("💊 PVPP (%)", 1.0, 5.0, float(st.session_state.pvpp), 0.1, key="slider_pvpp")
+        mgst = st.slider("🧴 Mg-St (%)", 0.05, 1.0, float(st.session_state.mgst), 0.01, key="slider_mgst")
 
         used_total = api + binder + pvpp + mgst
         remaining = 100 - used_total
@@ -545,9 +550,9 @@ with col_left:
 
     st.markdown("### ⚙️ Process Parameters")
     with st.container(border=True):
-        pressure = st.slider("⚙️ Compaction Pressure (MPa)", 100.0, 250.0, st.session_state.pressure, 1.0, key="slider_pressure")
-        speed = st.slider("🔄 Punch Speed (rpm)", 5.0, 40.0, st.session_state.speed, 0.5, key="slider_speed")
-        granule = st.slider("🔬 Granule Size (µm)", 50.0, 200.0, st.session_state.granule, 1.0, key="slider_granule")
+        pressure = st.slider("⚙️ Compaction Pressure (MPa)", 100.0, 250.0, float(st.session_state.pressure), 1.0, key="slider_pressure")
+        speed = st.slider("🔄 Punch Speed (rpm)", 5.0, 40.0, float(st.session_state.speed), 0.5, key="slider_speed")
+        granule = st.slider("🔬 Granule Size (µm)", 50.0, 200.0, float(st.session_state.granule), 1.0, key="slider_granule")
 
     predict_btn = st.button("🔬 Predict & Optimise", use_container_width=True)
 
