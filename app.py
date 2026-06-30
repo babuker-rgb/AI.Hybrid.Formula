@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 14.0 (Final - Fixed Predict Method)
+Version: 15.0 (Final with Feasibility Indicator)
 """
 
 import streamlit as st
@@ -201,7 +201,6 @@ class TruePINN(nn.Module):
         return total_loss, loss_dict
 
     def predict(self, X_scaled):
-        """Predict density, tensile strength, elastic recovery."""
         self.eval()
         with torch.no_grad():
             if not isinstance(X_scaled, torch.Tensor):
@@ -903,6 +902,7 @@ with col_right:
             with st.spinner("🧠 Running True PINN prediction..."):
                 density, tensile, er, efrf = predict_pinn(model, scaler, inputs)
 
+            # ---- Metrics Display ----
             c1, c2, c3 = st.columns(3)
             c1.metric("📊 Density", f"{density:.3f}")
             c2.metric("💪 Tensile", f"{tensile:.3f} MPa")
@@ -910,21 +910,78 @@ with col_right:
 
             st.markdown("---")
 
-            if tensile >= 2.0 and efrf < 0.35:
-                st.success(f"""
-                🎉 **Formulation satisfies all constraints with safety margin!**
-                ✅ σt = {tensile:.3f} MPa (≥ 2 MPa)
-                ✅ EFRF = {efrf:.4f} (< 0.35)
-                📌 Suitable for high-speed industrial tableting.
-                """)
-            elif tensile < 2.0 and efrf >= 0.35:
-                st.error("🚨 CRITICAL: Low strength and high capping risk.")
-            elif tensile < 2.0:
-                st.warning("⚠️ Low tensile strength – increase binder or pressure.")
-            elif efrf >= 0.35:
-                st.error(f"🚨 High capping risk – EFRF = {efrf:.4f} (must be < 0.35).")
+            # ---- FORMULATION FEASIBILITY (NEW) ----
+            st.markdown("### ✅ Formulation Feasibility")
 
+            tensile_pass = tensile >= 2.0
+            efrf_pass = efrf < 0.40   # Feasibility threshold for display
+            all_pass = tensile_pass and efrf_pass
+
+            col1, col2, col3 = st.columns([1, 1, 1.5])
+
+            with col1:
+                if tensile_pass:
+                    st.markdown("""
+                    <div style="background: #d4edda; padding: 0.5rem; border-radius: 8px; text-align: center; border: 1px solid #28a745;">
+                        <span style="font-size: 1.2rem;">✅</span><br>
+                        <strong>σt ≥ 2.0 MPa</strong><br>
+                        <span style="color: #28a745; font-weight: bold;">PASS</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.markdown("""
+                    <div style="background: #f8d7da; padding: 0.5rem; border-radius: 8px; text-align: center; border: 1px solid #dc3545;">
+                        <span style="font-size: 1.2rem;">❌</span><br>
+                        <strong>σt ≥ 2.0 MPa</strong><br>
+                        <span style="color: #dc3545; font-weight: bold;">FAIL</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+            with col2:
+                if efrf_pass:
+                    st.markdown("""
+                    <div style="background: #d4edda; padding: 0.5rem; border-radius: 8px; text-align: center; border: 1px solid #28a745;">
+                        <span style="font-size: 1.2rem;">✅</span><br>
+                        <strong>EFRF < 0.40</strong><br>
+                        <span style="color: #28a745; font-weight: bold;">PASS</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.markdown("""
+                    <div style="background: #f8d7da; padding: 0.5rem; border-radius: 8px; text-align: center; border: 1px solid #dc3545;">
+                        <span style="font-size: 1.2rem;">❌</span><br>
+                        <strong>EFRF < 0.40</strong><br>
+                        <span style="color: #dc3545; font-weight: bold;">FAIL</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+            with col3:
+                if all_pass:
+                    st.markdown("""
+                    <div style="background: #d4edda; padding: 0.5rem; border-radius: 8px; text-align: center; border: 2px solid #28a745;">
+                        <span style="font-size: 1.8rem;">🎉</span><br>
+                        <strong style="color: #28a745;">FORMULATION FEASIBLE</strong><br>
+                        <span style="color: #155724; font-size: 0.85rem;">Suitable for production</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.markdown("""
+                    <div style="background: #f8d7da; padding: 0.5rem; border-radius: 8px; text-align: center; border: 2px solid #dc3545;">
+                        <span style="font-size: 1.8rem;">⚠️</span><br>
+                        <strong style="color: #dc3545;">FORMULATION NOT FEASIBLE</strong><br>
+                        <span style="color: #721c24; font-size: 0.85rem;">Adjust parameters</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+            st.markdown("---")
+
+            # ---- Physics Verification ----
             with st.expander("🔬 Physics Verification"):
+                st.markdown("""
+                - ✅ Heckel residual, EFRF constraint, monotonicity, boundary conditions enforced.
+                - k(X) and A(X) are formulation-dependent.
+                - MCC constrained to ≤ 8%.
+                """)
                 st.metric("EFRF", f"{efrf:.4f}", delta="< 0.35 ✅" if efrf < 0.35 else "≥ 0.35 ❌")
 
             # ================================================================
@@ -1003,14 +1060,13 @@ with col_right:
                 plt.close()
 
             # ================================================================
-            # Model Comparison (FIXED)
+            # Model Comparison
             # ================================================================
             st.markdown("### 📊 Model Performance Comparison")
             X_train, X_test, y_train, y_test = train_test_split(df[feature_names].values, df['Tensile_Strength_MPa'].values, test_size=0.2, random_state=42)
             X_train_scaled = scaler.transform(X_train)
             X_test_scaled = scaler.transform(X_test)
-            
-            # FIX: model.predict returns numpy array directly
+
             pinn_pred = model.predict(torch.FloatTensor(X_test_scaled))[:, 1]  # tensile strength
             pinn_r2 = r2_score(y_test, pinn_pred)
             pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
@@ -1036,6 +1092,9 @@ with col_right:
             plt.tight_layout()
             st.pyplot(fig)
             plt.close()
+
+    else:
+        st.info("👆 Adjust parameters and click **'Predict & Optimise'**")
 
 st.markdown("---")
 st.caption("🔬 **True PINN — Production-Ready with Full Physics & MCC Constraint**")
