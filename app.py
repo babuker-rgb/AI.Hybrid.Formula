@@ -1,10 +1,10 @@
 """
-Physics-Informed Neural Network (PINN) 
+True Physics-Informed Neural Network (PINN) - Professional Version
 Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 5.2 (Fixed validation gradient issue)
+Version: 6.0 (Fixed validation gradient issue)
 """
 
 import streamlit as st
@@ -84,11 +84,11 @@ class TruePINN(nn.Module):
                      w_data=1.0, w_heckel=0.5, w_efrf=0.5,
                      w_monotonic=0.1, w_boundary=0.1,
                      efrf_target=0.4,
-                     create_graph=False):
+                     compute_grad=True):
         """
-        Total PINN loss with stable monotonicity gradient.
-        create_graph: If True, enables higher-order gradients (for training).
-                      If False, disables gradient tracking (for validation).
+        Total PINN loss.
+        compute_grad: if True, compute monotonicity gradient (training).
+                      if False, skip monotonicity gradient (validation).
         """
         # Real pressure for physics
         pressure_real = X_raw[:, 5]
@@ -116,28 +116,26 @@ class TruePINN(nn.Module):
         efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
 
         # ---------- Monotonicity: ∂D/∂P > 0 ----------
-        # We compute gradient with respect to the input tensor X_scaled.
-        # Ensure X_scaled requires grad.
-        if not X_scaled.requires_grad:
-            X_scaled.requires_grad_(True)
+        if compute_grad:
+            # Compute gradient using autograd (only during training)
+            if not X_scaled.requires_grad:
+                X_scaled.requires_grad_(True)
 
-        # Forward pass again for gradient (reuse network)
-        y_pred_grad = self.forward(X_scaled)
-        density_grad = y_pred_grad[:, 0]
+            y_pred_grad = self.forward(X_scaled)
+            density_grad = y_pred_grad[:, 0]
 
-        # Compute gradient of density w.r.t X_scaled
-        grad_outputs = torch.ones_like(density_grad)
-        grad_density = torch.autograd.grad(
-            outputs=density_grad,
-            inputs=X_scaled,
-            grad_outputs=grad_outputs,
-            create_graph=create_graph,
-            retain_graph=create_graph  # only retain if we need higher-order grads
-        )[0]
-
-        # Gradient w.r.t pressure (index 5)
-        grad_pressure = grad_density[:, 5]
-        monotonic_loss = torch.mean(torch.relu(-grad_pressure) ** 2)
+            grad_density = torch.autograd.grad(
+                outputs=density_grad,
+                inputs=X_scaled,
+                grad_outputs=torch.ones_like(density_grad),
+                create_graph=True,
+                retain_graph=True
+            )[0]
+            grad_pressure = grad_density[:, 5]
+            monotonic_loss = torch.mean(torch.relu(-grad_pressure) ** 2)
+        else:
+            # During validation, we skip the monotonicity term
+            monotonic_loss = torch.tensor(0.0, device=X_scaled.device)
 
         # ---------- Boundary Conditions (using real pressure) ----------
         mask_low = (pressure_real < 120).float()
@@ -160,7 +158,7 @@ class TruePINN(nn.Module):
             'data_loss': data_loss.item(),
             'heckel_loss': heckel_loss.item(),
             'efrf_loss': efrf_loss.item(),
-            'monotonic_loss': monotonic_loss.item(),
+            'monotonic_loss': monotonic_loss.item() if compute_grad else 0.0,
             'boundary_loss': boundary_loss.item(),
             'total_loss': total_loss.item()
         }
@@ -253,7 +251,7 @@ def load_pinn_model():
     y_train_t = torch.FloatTensor(y_train)
 
     X_scaled_val_t = torch.FloatTensor(X_scaled_val)
-    X_scaled_val_t.requires_grad_(True)
+    X_scaled_val_t.requires_grad_(True)  # Keep for consistency, but we won't compute grad during validation
     X_raw_val_t = torch.FloatTensor(X_raw_val)
     y_val_t = torch.FloatTensor(y_val)
 
@@ -276,30 +274,23 @@ def load_pinn_model():
             w_data=1.0, w_heckel=0.5, w_efrf=0.5,
             w_monotonic=0.1, w_boundary=0.1,
             efrf_target=0.4,
-            create_graph=True   # enable gradient tracking for training
+            compute_grad=True   # enable gradient for training
         )
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
-        # ----- Validation (without creating gradient graph) -----
+        # ----- Validation (without monotonicity gradient) -----
         model.eval()
-        # We don't need gradients during validation; we compute loss with create_graph=False
-        with torch.no_grad():
-            # Still need to compute monotonicity loss but without tracking gradients
-            # We'll call compute_loss with create_graph=False, but we must ensure inputs require_grad
-            # However, to avoid interfering with the gradient tape, we'll compute loss in a detached way.
-            # Since we set create_graph=False, torch.autograd.grad will not create a graph,
-            # but it still requires inputs to have requires_grad=True. That's fine.
-
-            # Note: We are inside no_grad, but compute_loss will still use autograd.grad
-            # because we pass create_graph=False. This is safe because no backward will be called.
+        # Compute validation loss without gradient tracking for monotonicity
+        # We still compute the loss but skip the autograd part.
+        with torch.set_grad_enabled(False):  # Disable gradient globally for validation
             val_loss, _ = model.compute_loss(
                 X_scaled_val_t, X_raw_val_t, y_val_t,
                 w_data=1.0, w_heckel=0.5, w_efrf=0.5,
                 w_monotonic=0.1, w_boundary=0.1,
                 efrf_target=0.4,
-                create_graph=False   # no gradient tracking for validation
+                compute_grad=False   # skip monotonicity gradient
             )
         val_loss_value = val_loss.item()
 
