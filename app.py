@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 12.0 (Sensitivity Unpacking Fixed)
+Version: 14.0 (Final - Fixed Predict Method)
 """
 
 import streamlit as st
@@ -201,6 +201,7 @@ class TruePINN(nn.Module):
         return total_loss, loss_dict
 
     def predict(self, X_scaled):
+        """Predict density, tensile strength, elastic recovery."""
         self.eval()
         with torch.no_grad():
             if not isinstance(X_scaled, torch.Tensor):
@@ -299,7 +300,7 @@ def generate_pinn_data(n_samples=600, random_state=42):
 # ================================================================
 
 class NSGAII:
-    def __init__(self, model, scaler, bounds, pop_size=100, n_generations=80):
+    def __init__(self, model, scaler, bounds, pop_size=100, n_generations=60):
         self.model = model
         self.scaler = scaler
         self.bounds = bounds
@@ -726,7 +727,6 @@ def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
 def plot_sensitivity_plotly(inputs, model, scaler):
     try:
         features = ['API%', 'MCC%', 'PVPP%', 'Mg-St%', 'Binder%', 'Pressure', 'Speed', 'Granule']
-        # FIXED: Unpack all 4 return values
         _, _, _, base_efrf = predict_pinn(model, scaler, inputs)
         sensitivities = []
         for i in range(8):
@@ -973,7 +973,7 @@ with col_right:
                 plt.close()
 
             # ================================================================
-            # Sensitivity Analysis (FIXED)
+            # Sensitivity Analysis
             # ================================================================
             st.markdown("### 🔍 Sensitivity Analysis")
             fig_s = plot_sensitivity_plotly(inputs, model, scaler)
@@ -982,7 +982,6 @@ with col_right:
             else:
                 # Fallback matplotlib
                 features = ['API%', 'MCC%', 'PVPP%', 'Mg-St%', 'Binder%', 'Pressure', 'Speed', 'Granule']
-                # FIX: unpack all 4 values
                 _, _, _, base_efrf = predict_pinn(model, scaler, inputs)
                 sensitivities = []
                 for i in range(8):
@@ -1004,13 +1003,15 @@ with col_right:
                 plt.close()
 
             # ================================================================
-            # Model Comparison
+            # Model Comparison (FIXED)
             # ================================================================
             st.markdown("### 📊 Model Performance Comparison")
             X_train, X_test, y_train, y_test = train_test_split(df[feature_names].values, df['Tensile_Strength_MPa'].values, test_size=0.2, random_state=42)
             X_train_scaled = scaler.transform(X_train)
             X_test_scaled = scaler.transform(X_test)
-            pinn_pred = model.predict(torch.FloatTensor(X_test_scaled)).numpy()[:, 1]
+            
+            # FIX: model.predict returns numpy array directly
+            pinn_pred = model.predict(torch.FloatTensor(X_test_scaled))[:, 1]  # tensile strength
             pinn_r2 = r2_score(y_test, pinn_pred)
             pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
             pinn_mae = mean_absolute_error(y_test, pinn_pred)
