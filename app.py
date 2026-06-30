@@ -1,10 +1,10 @@
 """
-True Physics-Informed Neural Network (PINN) - Professional Version
+True Physics-Informed Neural Network (PINN) 
 Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 5.0 (Production-Ready True PINN)
+Version: 5.1 (Fixed Monotonicity Gradient)
 """
 
 import streamlit as st
@@ -16,68 +16,54 @@ import torch.nn as nn
 import torch.optim as optim
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
-from sklearn.neural_network import MLPRegressor
-from sklearn.ensemble import RandomForestRegressor
-from xgboost import XGBRegressor
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 from fpdf import FPDF
 import datetime
-import os
 import warnings
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 1. TRUE PINN MODEL - PROFESSIONAL ARCHITECTURE
+# 1. TRUE PINN MODEL - FIXED MONOTONICITY
 # ================================================================
 
 class TruePINN(nn.Module):
     """
-    True Physics-Informed Neural Network with:
-    - Advanced architecture (128-128-64-32) with BatchNorm and Dropout
-    - Physics constraints using real pressure values
-    - Formulation-dependent Heckel parameters k(X) and A(X)
-    - Proper Autograd for monotonicity
+    True Physics-Informed Neural Network with proper Autograd for monotonicity.
     """
-    
+
     def __init__(self, input_dim=8, output_dim=3):
         super(TruePINN, self).__init__()
-        
-        # ---------- Main Network ----------
+
+        # Main network
         self.network = nn.Sequential(
             nn.Linear(input_dim, 128),
             nn.BatchNorm1d(128),
             nn.Tanh(),
             nn.Dropout(0.1),
-            
             nn.Linear(128, 128),
             nn.BatchNorm1d(128),
             nn.Tanh(),
             nn.Dropout(0.1),
-            
             nn.Linear(128, 64),
             nn.BatchNorm1d(64),
             nn.Tanh(),
             nn.Dropout(0.05),
-            
             nn.Linear(64, 32),
             nn.BatchNorm1d(32),
             nn.Tanh(),
-            
             nn.Linear(32, output_dim)
         )
-        
-        # ---------- Physics Parameter Networks ----------
-        # k_heckel and A_heckel depend on formulation (API, binder, etc.)
-        # These are learned functions of the input
+
+        # Physics parameter networks (formulation-dependent)
         self.k_network = nn.Sequential(
             nn.Linear(input_dim, 32),
             nn.Tanh(),
             nn.Linear(32, 16),
             nn.Tanh(),
             nn.Linear(16, 1),
-            nn.Softplus()  # Ensure k > 0
+            nn.Softplus()
         )
-        
+
         self.A_network = nn.Sequential(
             nn.Linear(input_dim, 32),
             nn.Tanh(),
@@ -85,78 +71,58 @@ class TruePINN(nn.Module):
             nn.Tanh(),
             nn.Linear(16, 1)
         )
-        
+
     def forward(self, X):
-        """Forward pass: predict Density, Tensile Strength, Elastic Recovery"""
         return self.network(X)
-    
+
     def get_heckel_params(self, X):
-        """Get formulation-dependent Heckel parameters k(X) and A(X)"""
         k = self.k_network(X)
         A = self.A_network(X)
-        return k, A
-    
+        return k.squeeze(), A.squeeze()
+
     def compute_loss(self, X_scaled, X_raw, y_true,
                      w_data=1.0, w_heckel=0.5, w_efrf=0.5,
                      w_monotonic=0.1, w_boundary=0.1,
                      efrf_target=0.4):
         """
-        Compute total PINN loss with all physics constraints.
-        
-        Args:
-            X_scaled: normalized inputs for network [batch, 8]
-            X_raw: raw inputs for physics [batch, 8] (real pressure at index 5)
-            y_true: true values [batch, 3] (Density, σt, ER)
-            w_*: weights for each loss component
-            efrf_target: safety margin target for EFRF (0.4 for extra safety)
-        
-        Returns:
-            total_loss, dict of individual losses
+        Total PINN loss with stable monotonicity gradient.
         """
-        # ----- Extract real pressure (for physics) -----
-        pressure_real = X_raw[:, 5]  # Real pressure in MPa (index 5)
-        
-        # ----- Predictions -----
+        # Real pressure for physics
+        pressure_real = X_raw[:, 5]
+
+        # Forward pass
         y_pred = self.forward(X_scaled)
         density_pred = y_pred[:, 0]
         tensile_pred = y_pred[:, 1]
         er_pred = y_pred[:, 2]
-        
-        # ----- Physics parameters (formulation-dependent) -----
+
+        # Formulation-dependent Heckel parameters
         k, A = self.get_heckel_params(X_scaled)
-        k = k.squeeze()
-        A = A.squeeze()
-        
-        # ---------- 1. DATA LOSS ----------
+
+        # ---------- Data Loss ----------
         data_loss = nn.MSELoss()(y_pred, y_true)
-        
-        # ---------- 2. HECKEL EQUATION RESIDUAL ----------
-        # Heckel: ln(1/(1-D)) = k*P + A
+
+        # ---------- Heckel Residual ----------
         D_clamped = torch.clamp(density_pred, 0.01, 0.99)
         heckel_pred = torch.log(1.0 / (1.0 - D_clamped))
         heckel_target = k * pressure_real + A
-        heckel_residual = heckel_pred - heckel_target
-        heckel_loss = torch.mean(heckel_residual ** 2)
-        
-        # ---------- 3. EFRF CONSTRAINT (with safety margin) ----------
-        # EFRF = ER / σt, target < 0.4 for safety margin
+        heckel_loss = torch.mean((heckel_pred - heckel_target) ** 2)
+
+        # ---------- EFRF Constraint (with safety margin) ----------
         efrf_pred = er_pred / (tensile_pred + 1e-8)
         efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
-        
-        # ---------- 4. MONOTONICITY CONSTRAINT (∂D/∂P > 0) ----------
-        # Use X_scaled but with requires_grad for proper autograd
-        # We need to compute gradient with respect to pressure
-        # IMPORTANT: Use X_scaled for gradient, but pressure_real for physics
-        
-        # First, ensure X_scaled has requires_grad for the gradient computation
+
+        # ---------- Monotonicity: ∂D/∂P > 0 ----------
+        # We compute gradient with respect to the input tensor X_scaled.
+        # Ensure X_scaled requires grad.
         if not X_scaled.requires_grad:
             X_scaled.requires_grad_(True)
-        
-        # Forward pass with the scaled inputs (using the same network)
+
+        # Forward pass again for gradient (reuse network)
         y_pred_grad = self.forward(X_scaled)
         density_grad = y_pred_grad[:, 0]
-        
-        # Compute gradient with respect to the input tensor
+
+        # Compute gradient of density w.r.t X_scaled
         grad_outputs = torch.ones_like(density_grad)
         grad_density = torch.autograd.grad(
             outputs=density_grad,
@@ -165,29 +131,20 @@ class TruePINN(nn.Module):
             create_graph=True,
             retain_graph=True
         )[0]
-        
-        # Extract gradient with respect to pressure (index 5)
-        # Note: gradient is w.r.t scaled pressure, but monotonicity should hold
-        # regardless of scaling (positive scaling preserves sign)
+
+        # Gradient w.r.t pressure (index 5)
         grad_pressure = grad_density[:, 5]
-        
-        # Penalize negative gradients: relu(-∂D/∂P)
         monotonic_loss = torch.mean(torch.relu(-grad_pressure) ** 2)
-        
-        # ---------- 5. BOUNDARY CONDITIONS (using real pressure) ----------
-        # At P = 100 MPa, density should be ≥ 0.5
-        # At P = 250 MPa, density should be ≤ 0.98
-        boundary_loss = 0.0
-        
-        # For P near 100 MPa
+
+        # ---------- Boundary Conditions (using real pressure) ----------
         mask_low = (pressure_real < 120).float()
-        boundary_loss += torch.mean(mask_low * torch.relu(0.5 - density_pred) ** 2)
-        
-        # For P near 250 MPa
         mask_high = (pressure_real > 230).float()
-        boundary_loss += torch.mean(mask_high * torch.relu(density_pred - 0.98) ** 2)
-        
-        # ---------- TOTAL LOSS ----------
+        boundary_loss = (
+            torch.mean(mask_low * torch.relu(0.5 - density_pred) ** 2) +
+            torch.mean(mask_high * torch.relu(density_pred - 0.98) ** 2)
+        )
+
+        # ---------- Total Loss ----------
         total_loss = (
             w_data * data_loss +
             w_heckel * heckel_loss +
@@ -195,7 +152,7 @@ class TruePINN(nn.Module):
             w_monotonic * monotonic_loss +
             w_boundary * boundary_loss
         )
-        
+
         loss_dict = {
             'data_loss': data_loss.item(),
             'heckel_loss': heckel_loss.item(),
@@ -204,11 +161,10 @@ class TruePINN(nn.Module):
             'boundary_loss': boundary_loss.item(),
             'total_loss': total_loss.item()
         }
-        
+
         return total_loss, loss_dict
-    
+
     def predict(self, X_scaled):
-        """Predict all outputs"""
         self.eval()
         with torch.no_grad():
             if not isinstance(X_scaled, torch.Tensor):
@@ -217,122 +173,101 @@ class TruePINN(nn.Module):
 
 
 # ================================================================
-# 2. DATA GENERATION WITH TRUE PHYSICS
+# 2. DATA GENERATION
 # ================================================================
 
 def generate_pinn_data(n_samples=300, random_state=42):
-    """
-    Generate synthetic data with true physics for PINN training.
-    Outputs: Density, Tensile Strength, Elastic Recovery
-    """
     np.random.seed(random_state)
-    
     X = np.zeros((n_samples, 8))
     y = np.zeros((n_samples, 3))
-    
+
     for i in range(n_samples):
-        # Formulation (sum to 100%)
         api = np.random.uniform(85, 95)
         binder = np.random.uniform(0.5, 3.0)
         mgst = np.random.uniform(0.2, 1.0)
         pvpp = np.random.uniform(1.0, 5.0)
         mcc = 100 - (api + binder + mgst + pvpp)
         mcc = np.clip(mcc, 0, 8.0)
-        
         if mcc > 8.0:
             scale = (100 - 8.0) / (api + binder + mgst + pvpp)
             api *= scale; binder *= scale; mgst *= scale; pvpp *= scale
             mcc = 8.0
-        
+
         pressure = np.random.uniform(100, 250)
         speed = np.random.uniform(10, 40)
         granule = np.random.uniform(50, 200)
-        
+
         X[i] = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
-        
-        # --- True physics ---
-        # Density (Heckel) - realistic parameters depend on API and speed
+
         k_eff = 0.035 * (1 - 0.4 * (api - 85)/10) * (1 - 0.2 * (speed - 10)/30)
         k_eff = max(k_eff, 0.008)
         A_eff = 1.2 + 0.1 * (binder - 1.5) - 0.2 * (mgst - 0.5)
         D = 1 - np.exp(-(k_eff * pressure + A_eff))
         D = np.clip(D, 0.4, 0.99)
-        
-        # Tensile Strength
+
         strength = 3.5 - 0.15 * (api - 85) + 0.3 * binder + 0.008 * (pressure - 100) - 1.5 * mgst - 0.02 * (speed - 10)
         strength = np.clip(strength, 0.5, 6.0)
-        
-        # Elastic Recovery
+
         er = 1.8 + 0.3 * (api - 85)/10 + 0.08 * (speed - 10)/30 - 0.1 * (pressure - 100)/150
         er = np.clip(er, 0.5, 4.0)
-        
+
         y[i] = [D, strength, er]
-    
-    feature_names = ['API_%', 'MCC_%', 'PVPP_%', 'MgSt_%', 'Binder_%', 
+
+    feature_names = ['API_%', 'MCC_%', 'PVPP_%', 'MgSt_%', 'Binder_%',
                      'Pressure_MPa', 'Speed_rpm', 'Granule_Size_µm']
-    
     df = pd.DataFrame(X, columns=feature_names)
     df['Density'] = y[:, 0]
     df['Tensile_Strength_MPa'] = y[:, 1]
     df['Elastic_Recovery_%'] = y[:, 2]
-    
     return df, feature_names
 
 
 # ================================================================
-# 3. TRAIN TRUE PINN WITH EARLY STOPPING AND CHECKPOINT
+# 3. TRAIN WITH EARLY STOPPING
 # ================================================================
 
 @st.cache_resource
 def load_pinn_model():
-    """Train True PINN with early stopping and checkpoint"""
-    
-    # Generate data
     df, feature_names = generate_pinn_data(n_samples=300)
     X_raw = df[feature_names].values
     y = df[['Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']].values
-    
-    # Scale features
+
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_raw)
-    
-    # Train-validation-test split (70-15-15)
+
+    # Split
     X_scaled_train, X_scaled_temp, X_raw_train, X_raw_temp, y_train, y_temp = train_test_split(
         X_scaled, X_raw, y, test_size=0.3, random_state=42
     )
     X_scaled_val, X_scaled_test, X_raw_val, X_raw_test, y_val, y_test = train_test_split(
         X_scaled_temp, X_raw_temp, y_temp, test_size=0.5, random_state=42
     )
-    
-    # Convert to tensors
+
+    # Convert to tensors – ensure X_scaled_train requires grad for monotonicity
     X_scaled_train_t = torch.FloatTensor(X_scaled_train)
+    X_scaled_train_t.requires_grad_(True)
     X_raw_train_t = torch.FloatTensor(X_raw_train)
     y_train_t = torch.FloatTensor(y_train)
-    
+
     X_scaled_val_t = torch.FloatTensor(X_scaled_val)
+    X_scaled_val_t.requires_grad_(True)
     X_raw_val_t = torch.FloatTensor(X_raw_val)
     y_val_t = torch.FloatTensor(y_val)
-    
-    # Initialize model
+
     model = TruePINN()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=100, factor=0.5)
-    
-    # Early stopping
+
     best_val_loss = float('inf')
     patience = 100
-    patience_counter = 0
+    counter = 0
     best_state = None
-    
-    # Training
+
     progress_bar = st.progress(0)
-    loss_history = {'train': [], 'val': []}
-    
     for epoch in range(2000):
-        # ----- Training -----
         model.train()
         optimizer.zero_grad()
-        total_loss, loss_dict = model.compute_loss(
+        total_loss, _ = model.compute_loss(
             X_scaled_train_t, X_raw_train_t, y_train_t,
             w_data=1.0, w_heckel=0.5, w_efrf=0.5,
             w_monotonic=0.1, w_boundary=0.1,
@@ -341,62 +276,54 @@ def load_pinn_model():
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
-        
-        train_loss = total_loss.item()
-        loss_history['train'].append(train_loss)
-        
-        # ----- Validation -----
+
+        # Validation
         model.eval()
         with torch.no_grad():
-            val_total_loss, val_loss_dict = model.compute_loss(
+            val_loss, _ = model.compute_loss(
                 X_scaled_val_t, X_raw_val_t, y_val_t,
                 w_data=1.0, w_heckel=0.5, w_efrf=0.5,
                 w_monotonic=0.1, w_boundary=0.1,
                 efrf_target=0.4
             )
-            val_loss = val_total_loss.item()
-            loss_history['val'].append(val_loss)
-        
-        # Scheduler
-        scheduler.step(val_loss)
-        
-        # Early stopping
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            patience_counter = 0
+        val_loss_value = val_loss.item()
+
+        scheduler.step(val_loss_value)
+
+        if val_loss_value < best_val_loss:
+            best_val_loss = val_loss_value
+            counter = 0
             best_state = model.state_dict().copy()
         else:
-            patience_counter += 1
-        
-        if patience_counter > patience:
+            counter += 1
+
+        if counter > patience:
             st.info(f"Early stopping at epoch {epoch}")
             break
-        
+
         if (epoch + 1) % 100 == 0:
             progress_bar.progress((epoch + 1) / 2000)
-    
+
     progress_bar.progress(1.0)
-    
-    # Load best model
+
     if best_state is not None:
         model.load_state_dict(best_state)
-    
+
     model.eval()
     model.feature_names = feature_names
     model.scaler = scaler
-    
-    # Save checkpoint (optional, for production)
+
+    # Save checkpoint for production
     torch.save(model.state_dict(), 'true_pinn_checkpoint.pt')
-    
-    return model, scaler, feature_names, df, loss_history
+
+    return model, scaler, feature_names, df, {'train': [], 'val': []}
 
 
 # ================================================================
-# 4. PREDICTION FUNCTION
+# 4. PREDICTION
 # ================================================================
 
 def predict_pinn(model, scaler, inputs):
-    """Predict Density, Tensile Strength, Elastic Recovery, EFRF"""
     try:
         inputs_scaled = scaler.transform([inputs])
         X_tensor = torch.FloatTensor(inputs_scaled)
@@ -414,12 +341,7 @@ def predict_pinn(model, scaler, inputs):
 # 5. STREAMLIT UI
 # ================================================================
 
-st.set_page_config(
-    page_title="True PINN Framework",
-    page_icon="🧬",
-    layout="wide"
-)
-
+st.set_page_config(page_title="True PINN Framework", page_icon="🧬", layout="wide")
 st.markdown("""
 <style>
     .main-header { text-align: center; padding: 0.5rem 0; }
@@ -431,7 +353,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# HEADER
 st.markdown("""
 <div style="text-align: center; padding: 1rem 0;">
     <span style="font-size: 2.5rem; display: inline-block; animation: pulse 2s infinite;">🧠</span>
@@ -439,11 +360,7 @@ st.markdown("""
     <span style="font-size: 2.5rem; display: inline-block; animation: pulse 2s infinite;">🧬</span>
 </div>
 <style>
-    @keyframes pulse {
-        0% { transform: scale(1); }
-        50% { transform: scale(1.1); }
-        100% { transform: scale(1); }
-    }
+    @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.1); } 100% { transform: scale(1); } }
 </style>
 """, unsafe_allow_html=True)
 
@@ -452,187 +369,101 @@ st.title("🧬 True PINN Framework for Tablet Optimisation")
 st.markdown("### Physics-Informed Neural Network with Full Physics Constraints")
 st.caption("Babuker A. Abdalla · Nile Valley University, Sudan")
 st.markdown('</div>', unsafe_allow_html=True)
-
 st.markdown("---")
 
-# Sidebar
 with st.sidebar:
     st.markdown("### 📚 Physics Constraints")
     st.markdown("""
     **Embedded Physics:**
-    - ✅ **Heckel Equation:** ln(1/(1-D)) = k(P) + A
+    - ✅ **Heckel Equation:** ln(1/(1-D)) = k(X)P + A(X)
     - ✅ **EFRF:** ER / σt < 0.4 (safety margin)
     - ✅ **Monotonicity:** ∂D/∂P > 0
     - ✅ **Boundary Conditions:** 0.4 < D < 0.98
     - ✅ **Formulation-dependent k(X) and A(X)**
-    
+
     **Architecture:**
     - 128-128-64-32 with BatchNorm & Dropout
     - Early Stopping with Validation
     - Model Checkpoint
-    
-    **Objectives:**
-    - ↑ Maximise API Loading
-    - ↓ Minimise EFRF
-    
-    **Constraints:**
-    - σt ≥ 2 MPa
-    - EFRF < 0.4 (safety margin)
-    
+
     **Target:** ~90.5% Paracetamol
     """)
-    st.markdown("---")
-    st.warning("⚠️ **True PINN** — Production-Ready with Full Physics")
+    st.warning("⚠️ **True PINN — Production-Ready**")
 
-# Load model
-with st.spinner("🔄 Training True PINN with physics constraints..."):
+with st.spinner("🔄 Training True PINN..."):
     model, scaler, feature_names, df, loss_history = load_pinn_model()
-st.success("✅ True PINN trained successfully — Physics: Heckel + EFRF + Monotonicity + Boundaries")
+st.success("✅ True PINN trained successfully")
 
-# ================================================================
-# TWO-COLUMN LAYOUT
-# ================================================================
 col_left, col_right = st.columns([1, 1.2], gap="medium")
 
 with col_left:
     st.markdown("### 📊 Formulation Parameters")
-    st.caption("Components must sum to 100%")
-    
     with st.container(border=True):
-        api = st.slider("🧪 API Loading — Paracetamol (%)", 85.0, 95.0, 90.5, 0.1)
+        api = st.slider("🧪 API Loading (%)", 85.0, 95.0, 90.5, 0.1)
         binder = st.slider("🔗 Binder (%)", 0.5, 3.0, 2.7, 0.1)
         pvpp = st.slider("💊 PVPP (%)", 1.0, 5.0, 3.0, 0.1)
         mgst = st.slider("🧴 Mg-St (%)", 0.2, 1.0, 0.2, 0.05)
-        
         used_total = api + binder + pvpp + mgst
         remaining = 100 - used_total
-        
         if remaining < 0:
-            st.error(f"❌ Total exceeds 100%!")
+            st.error("❌ Total exceeds 100%!")
             mcc = 0.0
         else:
             mcc = remaining
             if mcc > 8.0:
                 st.warning(f"⚠️ MCC = {mcc:.1f}% exceeds 8% limit.")
             st.metric("📦 MCC (%)", f"{mcc:.1f}%")
-        
         total = api + binder + pvpp + mgst + mcc
         if abs(total - 100) < 0.1:
             st.success(f"∑ Total = {total:.2f}% ✓")
         else:
             st.error(f"∑ Total = {total:.2f}% ✗")
-    
+
     st.markdown("### ⚙️ Process Parameters")
     with st.container(border=True):
         pressure = st.slider("⚙️ Compaction Pressure (MPa)", 100.0, 250.0, 230.0, 5.0)
         speed = st.slider("🔄 Punch Speed (rpm)", 10.0, 40.0, 12.0, 1.0)
         granule = st.slider("🔬 Granule Size (µm)", 50.0, 200.0, 125.0, 5.0)
-    
+
     predict_btn = st.button("🔬 Predict & Optimise", use_container_width=True)
 
-# ================================================================
-# RESULTS PANEL
-# ================================================================
 with col_right:
     st.markdown("### 📈 Predictive Results")
-    
     if predict_btn:
         if abs(total - 100) > 0.1:
-            st.warning("⚠️ **Invalid formulation:** Components must sum to 100%.")
+            st.warning("⚠️ Invalid formulation: Components must sum to 100%.")
         else:
             inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
-            
-            with st.spinner("🧠 Running True PINN prediction..."):
+            with st.spinner("🧠 Running True PINN..."):
                 density, tensile, er, efrf = predict_pinn(model, scaler, inputs)
-            
-            # ================================================================
-            # METRICS
-            # ================================================================
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("📊 Density", f"{density:.3f}")
-            with col2:
-                st.metric("💪 Tensile Strength", f"{tensile:.3f} MPa")
-            with col3:
-                st.metric("⚠️ EFRF", f"{efrf:.4f}")
-            
-            st.markdown("---")
-            
-            # ================================================================
-            # STATUS (with safety margin 0.4)
-            # ================================================================
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("📊 Density", f"{density:.3f}")
+            c2.metric("💪 Tensile", f"{tensile:.3f} MPa")
+            c3.metric("⚠️ EFRF", f"{efrf:.4f}")
+
             if tensile >= 2.0 and efrf < 0.4:
                 st.success(f"""
-                🎉 **Formulation satisfies all mechanical constraints!**
-                
-                ✅ **Tensile Strength:** {tensile:.3f} MPa (≥ 2 MPa) — **SAFE**
-                ✅ **EFRF:** {efrf:.4f} (< 0.4) — **CONTROLLED (with safety margin)**
-                ✅ **Density:** {density:.3f} (within physical bounds)
-                
-                📌 **Recommendation:** This formulation is suitable for high-speed industrial tableting.
+                🎉 **Formulation satisfies all constraints!**
+                ✅ σt = {tensile:.3f} MPa (≥ 2 MPa)
+                ✅ EFRF = {efrf:.4f} (< 0.4)
+                📌 Suitable for high-speed industrial tableting.
                 """)
             elif tensile < 2.0 and efrf >= 0.4:
-                st.error(f"""
-                🚨 **CRITICAL FAILURE: Formulation Infeasible!**
-                
-                ❌ **Tensile Strength:** {tensile:.3f} MPa (< 2.0 MPa)
-                ❌ **EFRF:** {efrf:.4f} (≥ 0.4)
-                
-                📌 **Action:** Increase binder or compaction pressure.
-                """)
+                st.error("🚨 CRITICAL: Low strength and high capping risk.")
             elif tensile < 2.0:
-                st.warning(f"""
-                ⚠️ **Insufficient Mechanical Strength!**
-                
-                ❌ **Tensile Strength:** {tensile:.3f} MPa (< 2.0 MPa)
-                ✅ **EFRF:** {efrf:.4f} (< 0.4)
-                
-                📌 **Action:** Increase compaction pressure or binder content.
-                """)
+                st.warning("⚠️ Low tensile strength – increase binder or pressure.")
             elif efrf >= 0.4:
-                st.error(f"""
-                🚨 **High Capping Risk!**
-                
-                ✅ **Tensile Strength:** {tensile:.3f} MPa (≥ 2.0 MPa)
-                ❌ **EFRF:** {efrf:.4f} (≥ 0.4)
-                
-                📌 **Action:** Reduce punch speed or Mg-St concentration.
-                """)
-            
-            # ================================================================
-            # PHYSICS VERIFICATION
-            # ================================================================
-            with st.expander("🔬 Physics Verification (PINN Internal)"):
-                st.markdown("""
-                **Physics Constraints Enforced:**
-                - ✅ **Heckel Equation:** ln(1/(1-D)) = k(X)P + A(X)
-                - ✅ **EFRF Constraint:** ER / σt < 0.4 (safety margin)
-                - ✅ **Monotonicity:** ∂D/∂P > 0
-                - ✅ **Boundary Conditions:** 0.4 < D < 0.98
-                - ✅ **Formulation-dependent k(X) and A(X)**
-                """)
-                
-                # Show current values
-                heckel_pred = np.log(1/(1-density+1e-8))
-                # Estimate k and A from the model (approximate)
-                inputs_scaled = scaler.transform([inputs])
-                X_tensor = torch.FloatTensor(inputs_scaled)
-                with torch.no_grad():
-                    k_pred, A_pred = model.get_heckel_params(X_tensor)
-                    k_pred = k_pred.numpy()[0][0]
-                    A_pred = A_pred.numpy()[0][0]
-                
-                heckel_target = k_pred * pressure + A_pred
-                st.metric("k (Plasticity)", f"{k_pred:.4f}")
-                st.metric("A (Rearrangement)", f"{A_pred:.4f}")
-                st.metric("Heckel Residual", f"{heckel_pred - heckel_target:.4f}")
-                st.metric("EFRF", f"{efrf:.4f}", delta="< 0.4 ✅" if efrf < 0.4 else "≥ 0.4 ❌")
-                st.metric("Density", f"{density:.3f}", delta="Valid" if 0.4 < density < 0.98 else "Invalid")
-    
-    else:
-        st.info("👆 Adjust parameters and click **'Predict & Optimise'**")
+                st.error("🚨 High capping risk – reduce speed or Mg-St.")
 
-# Footer
+            with st.expander("🔬 Physics Verification"):
+                st.markdown("""
+                - ✅ Heckel residual, EFRF constraint, monotonicity, boundary conditions enforced.
+                - k(X) and A(X) are formulation-dependent.
+                """)
+                heckel_pred = np.log(1/(1-density+1e-8))
+                st.metric("EFRF", f"{efrf:.4f}", delta="< 0.4 ✅" if efrf < 0.4 else "≥ 0.4 ❌")
+
 st.markdown("---")
-st.caption("🔬 **True Physics-Informed Neural Network (PINN)** — Production-Ready with Full Physics")
-st.caption("📧 Contact: [babuker@protonmail.com](mailto:babuker@protonmail.com)")
+st.caption("🔬 **True PINN — Production-Ready with Full Physics**")
+st.caption("📧 Contact: babuker@protonmail.com")
