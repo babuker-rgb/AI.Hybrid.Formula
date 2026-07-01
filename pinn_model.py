@@ -28,7 +28,6 @@ FEATURE_NAMES = [
     "API_%", "MCC_%", "PVPP_%", "MgSt_%",
     "Binder_%", "Pressure_MPa", "Speed_rpm", "Granule_Size_µm"
 ]
-
 OUTPUT_NAMES = ["Density", "Tensile_Strength_MPa", "Elastic_Recovery_%"]
 
 def add_interaction_features(X_raw):
@@ -221,7 +220,6 @@ class PINNTrainer:
         X_train_t = torch.FloatTensor(X_train)
         y_train_t = torch.FloatTensor(y_train)
         X_raw_train_t = torch.FloatTensor(X_raw_train)
-
         X_val_t = torch.FloatTensor(X_val)
         y_val_t = torch.FloatTensor(y_val)
 
