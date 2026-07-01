@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 31.1 (Fixed Progress Bar Overflow)
+Version: 32.0 (Simplified Architecture, Very Light Physics, More Data)
 """
 
 import streamlit as st
@@ -26,7 +26,7 @@ import time
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. USER-CONFIGURABLE PARAMETERS
+# 0. USER-CONFIGURABLE PARAMETERS (SIMPLIFIED & STABLE)
 # ================================================================
 
 TENSILE_MIN = 1.90          # MPa
@@ -35,19 +35,17 @@ MCC_MAX = 8.0               # %
 DENSITY_MAX = 0.99
 PRESSURE_MAX = 300.0        # MPa
 
-NSGA_POP_SIZE = 100
-NSGA_GENERATIONS = 100
+NSGA_POP_SIZE = 80          # Reduced for speed
+NSGA_GENERATIONS = 80
 
 BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
-# --- TWO-STAGE TRAINING PARAMETERS ---
-PHYSICS_WEIGHT_INIT = 0.001   # Extremely low for fine-tuning
-PHYSICS_WEIGHT_FINAL = 0.01   # Slowly increase during training
-DATA_WEIGHT_INIT = 1.0
-DATA_WEIGHT_FINAL = 1.0
-N_SAMPLES = 1200
-PATIENCE = 200
+# --- CRITICAL: Very low physics weight from the start ---
+PHYSICS_WEIGHT = 0.0001     # Extremely low to prevent collapse
+DATA_WEIGHT = 1.0
+N_SAMPLES = 2000            # More data for better learning
+PATIENCE = 100
 
 # ================================================================
 # 1. SAFE IMPORTS
@@ -143,18 +141,26 @@ def add_interaction_features(X_raw):
     ], axis=1)
 
 # ================================================================
-# 4. MULTI-TASK TRUE PINN MODEL
+# 4. SIMPLIFIED MULTI-TASK PINN MODEL
 # ================================================================
 
 class MultiTaskTruePINN(nn.Module):
     def __init__(self, input_dim=13, output_dim=5):
         super(MultiTaskTruePINN, self).__init__()
+        # Simplified architecture for stability
         self.network = nn.Sequential(
-            nn.Linear(input_dim, 128), nn.BatchNorm1d(128), nn.Tanh(), nn.Dropout(0.1),
-            nn.Linear(128, 128), nn.BatchNorm1d(128), nn.Tanh(), nn.Dropout(0.1),
-            nn.Linear(128, 64), nn.BatchNorm1d(64), nn.Tanh(), nn.Dropout(0.05),
-            nn.Linear(64, 32), nn.BatchNorm1d(32), nn.Tanh(),
-            nn.Linear(32, output_dim)
+            nn.Linear(input_dim, 64),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Dropout(0.05),
+            nn.Linear(64, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Dropout(0.05),
+            nn.Linear(32, 16),
+            nn.BatchNorm1d(16),
+            nn.ReLU(),
+            nn.Linear(16, output_dim)
         )
         self.loss_history = {'train': [], 'val': [], 'data': [], 'physics': []}
 
@@ -175,15 +181,12 @@ class MultiTaskTruePINN(nn.Module):
             output = self.forward(X_scaled)
             return output[:, :3].numpy()
 
-    def compute_loss(self, X_scaled, X_raw, y_true, epoch=0, max_epochs=4000,
-                     w_data_init=DATA_WEIGHT_INIT,
-                     w_physics_init=PHYSICS_WEIGHT_INIT,
-                     w_data_final=DATA_WEIGHT_FINAL,
-                     w_physics_final=PHYSICS_WEIGHT_FINAL,
-                     w_mcc=0.5, w_density=0.5,
+    def compute_loss(self, X_scaled, X_raw, y_true, epoch=0, max_epochs=3000,
+                     w_data=DATA_WEIGHT,
+                     w_physics=PHYSICS_WEIGHT,
+                     w_mcc=0.1, w_density=0.1,
                      efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
-                     compute_grad=True, record_loss=False,
-                     physics_enabled=True):
+                     compute_grad=False, record_loss=False):
         pressure_real = X_raw[:, 5]
         mcc_real = X_raw[:, 1]
 
@@ -194,81 +197,70 @@ class MultiTaskTruePINN(nn.Module):
         k_pred = y_pred[:, 3]
         A_pred = y_pred[:, 4]
 
-        progress = min(epoch / 500, 1.0)
-        w_data = w_data_init + (w_data_final - w_data_init) * progress
-        w_physics = w_physics_init + (w_physics_final - w_physics_init) * progress
-
         data_loss = nn.MSELoss()(y_pred[:, :3], y_true)
 
-        if physics_enabled:
-            D_clamped = torch.clamp(density_pred, 0.01, 0.99)
-            heckel_pred = torch.log(1.0 / (1.0 - D_clamped))
-            heckel_target = k_pred * pressure_real + A_pred
-            heckel_loss = torch.mean((heckel_pred - heckel_target) ** 2)
+        # Physics loss with very low weight
+        D_clamped = torch.clamp(density_pred, 0.01, 0.99)
+        heckel_pred = torch.log(1.0 / (1.0 - D_clamped))
+        heckel_target = k_pred * pressure_real + A_pred
+        heckel_loss = torch.mean((heckel_pred - heckel_target) ** 2)
 
-            efrf_pred = er_pred / (tensile_pred + 1e-8)
-            efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
+        efrf_pred = er_pred / (tensile_pred + 1e-8)
+        efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
 
-            mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
-            density_penalty = torch.mean(torch.relu(density_pred - DENSITY_MAX) ** 2)
+        mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
+        density_penalty = torch.mean(torch.relu(density_pred - DENSITY_MAX) ** 2)
 
-            if compute_grad:
-                if not X_scaled.requires_grad:
-                    X_scaled.requires_grad_(True)
-                y_pred_grad = self.forward(X_scaled)
-                density_grad = y_pred_grad[:, 0]
-                grad_density = torch.autograd.grad(
-                    outputs=density_grad,
-                    inputs=X_scaled,
-                    grad_outputs=torch.ones_like(density_grad),
-                    create_graph=True, retain_graph=True
-                )[0]
-                grad_pressure = grad_density[:, 5]
-                monotonic_loss = torch.mean(torch.relu(-grad_pressure) ** 2)
-            else:
-                monotonic_loss = torch.tensor(0.0, device=X_scaled.device)
-
-            mask_low = (pressure_real < 120).float()
-            mask_high = (pressure_real > 230).float()
-            boundary_loss = (
-                torch.mean(mask_low * torch.relu(0.5 - density_pred) ** 2) +
-                torch.mean(mask_high * torch.relu(density_pred - 0.98) ** 2)
-            )
-
-            k_reg = torch.mean(torch.relu(k_pred - 0.1) ** 2) + torch.mean(torch.relu(0.005 - k_pred) ** 2)
-            A_reg = torch.mean(torch.relu(A_pred - 2.0) ** 2) + torch.mean(torch.relu(0.5 - A_pred) ** 2)
-
-            physics_loss = heckel_loss + efrf_loss + monotonic_loss + boundary_loss
-            physics_loss_val = physics_loss.item()
-            total_loss = (
-                w_data * data_loss +
-                w_physics * physics_loss +
-                w_mcc * mcc_loss +
-                w_density * density_penalty +
-                0.1 * k_reg + 0.1 * A_reg
-            )
+        if compute_grad:
+            if not X_scaled.requires_grad:
+                X_scaled.requires_grad_(True)
+            y_pred_grad = self.forward(X_scaled)
+            density_grad = y_pred_grad[:, 0]
+            grad_density = torch.autograd.grad(
+                outputs=density_grad,
+                inputs=X_scaled,
+                grad_outputs=torch.ones_like(density_grad),
+                create_graph=True, retain_graph=True
+            )[0]
+            grad_pressure = grad_density[:, 5]
+            monotonic_loss = torch.mean(torch.relu(-grad_pressure) ** 2)
         else:
-            physics_loss = torch.tensor(0.0, device=X_scaled.device)
-            physics_loss_val = 0.0
-            total_loss = w_data * data_loss
+            monotonic_loss = torch.tensor(0.0, device=X_scaled.device)
+
+        mask_low = (pressure_real < 120).float()
+        mask_high = (pressure_real > 230).float()
+        boundary_loss = (
+            torch.mean(mask_low * torch.relu(0.5 - density_pred) ** 2) +
+            torch.mean(mask_high * torch.relu(density_pred - 0.98) ** 2)
+        )
+
+        k_reg = torch.mean(torch.relu(k_pred - 0.1) ** 2) + torch.mean(torch.relu(0.005 - k_pred) ** 2)
+        A_reg = torch.mean(torch.relu(A_pred - 2.0) ** 2) + torch.mean(torch.relu(0.5 - A_pred) ** 2)
+
+        physics_loss = heckel_loss + efrf_loss + monotonic_loss + boundary_loss
+        total_loss = (
+            w_data * data_loss +
+            w_physics * physics_loss +
+            w_mcc * mcc_loss +
+            w_density * density_penalty +
+            0.01 * k_reg + 0.01 * A_reg
+        )
 
         loss_dict = {
             'data_loss': data_loss.item(),
-            'physics_loss': physics_loss_val,
-            'w_data': w_data,
-            'w_physics': w_physics,
+            'physics_loss': physics_loss.item(),
             'total_loss': total_loss.item()
         }
 
         if record_loss:
             self.loss_history['train'].append(total_loss.item())
             self.loss_history['data'].append(data_loss.item())
-            self.loss_history['physics'].append(physics_loss_val)
+            self.loss_history['physics'].append(physics_loss.item())
 
         return total_loss, loss_dict
 
 # ================================================================
-# 5. DATA GENERATION
+# 5. DATA GENERATION (INCREASED SIZE)
 # ================================================================
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
@@ -517,7 +509,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.ln(3)
     pdf.set_y(270)
     pdf.set_font("Arial", "I", 8)
-    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v31.1", ln=True, align="C")
+    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v32.0", ln=True, align="C")
     
     pdf_bytes = pdf.output(dest="S")
     if isinstance(pdf_bytes, bytearray):
@@ -804,7 +796,7 @@ class NSGAII:
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 8. TRAIN MODEL (TWO-STAGE) - with fixed progress bar
+# 8. TRAIN MODEL (SIMPLE & STABLE)
 # ================================================================
 
 @st.cache_resource
@@ -841,7 +833,7 @@ def load_pinn_model():
     model = MultiTaskTruePINN(input_dim=X_augmented.shape[1])
     
     optimizer_adam = optim.Adam(model.parameters(), lr=0.001)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer_adam, patience=100, factor=0.5)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer_adam, patience=50, factor=0.5)
 
     best_val_loss = float('inf')
     patience = PATIENCE
@@ -849,26 +841,22 @@ def load_pinn_model():
     best_state = None
 
     progress_bar = st.progress(0)
-    adam_epochs = 1500
-    max_epochs = 2000
+    max_epochs = 3000
 
-    st.info("🧠 Phase 1: Data-Only Training (No Physics) — Building base model...")
-    
-    for epoch in range(adam_epochs):
+    st.info("🧠 Training PINN with very light physics constraints...")
+
+    for epoch in range(max_epochs):
         model.train()
         optimizer_adam.zero_grad()
         total_loss, loss_dict = model.compute_loss(
             X_scaled_train_t, X_raw_train_t, y_train_t,
             epoch=epoch, max_epochs=max_epochs,
-            w_data_init=DATA_WEIGHT_INIT,
-            w_physics_init=PHYSICS_WEIGHT_INIT,
-            w_data_final=DATA_WEIGHT_FINAL,
-            w_physics_final=PHYSICS_WEIGHT_FINAL,
-            w_mcc=0.5, w_density=0.5,
+            w_data=DATA_WEIGHT,
+            w_physics=PHYSICS_WEIGHT,
+            w_mcc=0.1, w_density=0.1,
             efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
-            compute_grad=False,
-            record_loss=True,
-            physics_enabled=False
+            compute_grad=True if epoch % 10 == 0 else False,
+            record_loss=True
         )
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -879,15 +867,12 @@ def load_pinn_model():
             val_loss, _ = model.compute_loss(
                 X_scaled_val_t, X_raw_val_t, y_val_t,
                 epoch=epoch, max_epochs=max_epochs,
-                w_data_init=DATA_WEIGHT_INIT,
-                w_physics_init=PHYSICS_WEIGHT_INIT,
-                w_data_final=DATA_WEIGHT_FINAL,
-                w_physics_final=PHYSICS_WEIGHT_FINAL,
-                w_mcc=0.5, w_density=0.5,
+                w_data=DATA_WEIGHT,
+                w_physics=PHYSICS_WEIGHT,
+                w_mcc=0.1, w_density=0.1,
                 efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
                 compute_grad=False,
-                record_loss=False,
-                physics_enabled=False
+                record_loss=False
             )
         val_loss_value = val_loss.item()
         model.loss_history['val'].append(val_loss_value)
@@ -901,127 +886,11 @@ def load_pinn_model():
             counter += 1
 
         if counter > patience:
+            st.info(f"Early stopping at epoch {epoch}")
             break
 
         if (epoch + 1) % 200 == 0:
             progress_bar.progress(min(1.0, (epoch + 1) / max_epochs))
-
-    if best_state is not None:
-        model.load_state_dict(best_state)
-    
-    st.info("⚖️ Phase 2: Physics Fine-Tuning (Very Light Physics) — Adding physical constraints...")
-    
-    best_val_loss = float('inf')
-    counter = 0
-    physics_epochs = 500
-    
-    for epoch in range(physics_epochs):
-        model.train()
-        optimizer_adam.zero_grad()
-        total_loss, loss_dict = model.compute_loss(
-            X_scaled_train_t, X_raw_train_t, y_train_t,
-            epoch=epoch + adam_epochs,
-            max_epochs=max_epochs,
-            w_data_init=DATA_WEIGHT_INIT,
-            w_physics_init=PHYSICS_WEIGHT_INIT,
-            w_data_final=DATA_WEIGHT_FINAL,
-            w_physics_final=PHYSICS_WEIGHT_FINAL,
-            w_mcc=0.5, w_density=0.5,
-            efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
-            compute_grad=True,
-            record_loss=True,
-            physics_enabled=True
-        )
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer_adam.step()
-
-        model.eval()
-        with torch.set_grad_enabled(False):
-            val_loss, _ = model.compute_loss(
-                X_scaled_val_t, X_raw_val_t, y_val_t,
-                epoch=epoch + adam_epochs,
-                max_epochs=max_epochs,
-                w_data_init=DATA_WEIGHT_INIT,
-                w_physics_init=PHYSICS_WEIGHT_INIT,
-                w_data_final=DATA_WEIGHT_FINAL,
-                w_physics_final=PHYSICS_WEIGHT_FINAL,
-                w_mcc=0.5, w_density=0.5,
-                efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
-                compute_grad=False,
-                record_loss=False,
-                physics_enabled=True
-            )
-        val_loss_value = val_loss.item()
-        model.loss_history['val'].append(val_loss_value)
-        scheduler.step(val_loss_value)
-
-        if val_loss_value < best_val_loss:
-            best_val_loss = val_loss_value
-            counter = 0
-            best_state = model.state_dict().copy()
-        else:
-            counter += 1
-
-        if counter > patience // 2:
-            break
-
-        if (epoch + 1) % 100 == 0:
-            progress_bar.progress(min(1.0, (adam_epochs + epoch + 1) / max_epochs))
-
-    if best_state is not None:
-        model.load_state_dict(best_state)
-    
-    st.info("🔄 LBFGS Fine-Tuning...")
-    optimizer_lbfgs = optim.LBFGS(model.parameters(), lr=0.1, max_iter=300, line_search_fn='strong_wolfe')
-    
-    def closure():
-        optimizer_lbfgs.zero_grad()
-        total_loss, _ = model.compute_loss(
-            X_scaled_train_t, X_raw_train_t, y_train_t,
-            epoch=adam_epochs + physics_epochs,
-            max_epochs=max_epochs,
-            w_data_init=DATA_WEIGHT_INIT,
-            w_physics_init=PHYSICS_WEIGHT_INIT,
-            w_data_final=DATA_WEIGHT_FINAL,
-            w_physics_final=PHYSICS_WEIGHT_FINAL,
-            w_mcc=0.5, w_density=0.5,
-            efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
-            compute_grad=True,
-            record_loss=False,
-            physics_enabled=True
-        )
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        return total_loss
-
-    for i in range(5):
-        optimizer_lbfgs.step(closure)
-        # --- FIX: clamp progress to [0,1] ---
-        progress_val = (adam_epochs + physics_epochs + (i + 1) * 50) / max_epochs
-        progress_bar.progress(min(1.0, progress_val))
-        
-        model.eval()
-        with torch.set_grad_enabled(False):
-            val_loss, _ = model.compute_loss(
-                X_scaled_val_t, X_raw_val_t, y_val_t,
-                epoch=adam_epochs + physics_epochs + (i + 1) * 50,
-                max_epochs=max_epochs,
-                w_data_init=DATA_WEIGHT_INIT,
-                w_physics_init=PHYSICS_WEIGHT_INIT,
-                w_data_final=DATA_WEIGHT_FINAL,
-                w_physics_final=PHYSICS_WEIGHT_FINAL,
-                w_mcc=0.5, w_density=0.5,
-                efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
-                compute_grad=False,
-                record_loss=False,
-                physics_enabled=True
-            )
-            val_loss_value = val_loss.item()
-            model.loss_history['val'].append(val_loss_value)
-            if val_loss_value < best_val_loss:
-                best_val_loss = val_loss_value
-                best_state = model.state_dict().copy()
 
     progress_bar.progress(1.0)
 
@@ -1096,7 +965,7 @@ def plot_training_curves(loss_history):
         ))
     
     fig.update_layout(
-        title='Training Curves (Two-Stage Training)',
+        title='Training Curves',
         xaxis=dict(title='Epoch'),
         yaxis=dict(title='Loss', type='log'),
         height=400,
@@ -1229,7 +1098,7 @@ def plot_sensitivity_plotly(inputs, model, scaler, y_scaler):
 
 def train_and_compare(X_train, X_test, y_train, y_test):
     models = {}
-    models['MLP'] = MLPRegressor(hidden_layer_sizes=(64, 64, 64), max_iter=1000, random_state=42)
+    models['MLP'] = MLPRegressor(hidden_layer_sizes=(64, 32, 16), max_iter=1000, random_state=42)
     models['Random Forest'] = RandomForestRegressor(n_estimators=100, random_state=42)
     if XGB_AVAILABLE:
         models['XGBoost'] = XGBRegressor(n_estimators=100, learning_rate=0.1, random_state=42)
@@ -1251,14 +1120,14 @@ def train_and_compare(X_train, X_test, y_train, y_test):
 # 10. STREAMLIT UI
 # ================================================================
 
-st.set_page_config(page_title="PINN Framework v31.1", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Framework v32.0", page_icon="🧬", layout="wide")
 clamp_session_state()
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); 
             padding: 2rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
     <h1 style="color: #ffffff; font-size: 2.5rem; margin: 0;">
-        🧬 Hybrid AI Framework v31.1
+        🧬 Hybrid AI Framework v32.0
     </h1>
     <p style="color: #a8b2d1; font-size: 1.2rem; margin: 0.5rem 0 0 0;">
         Physics-Informed Neural Network · Multi-Objective Optimization
@@ -1283,16 +1152,14 @@ with st.sidebar:
     
     **Multi-Task PINN:**
     - 5 outputs (D, σt, ER, k, A)
-    - **Two-Stage Training:**
-      - Phase 1: Data-Only (No Physics)
-      - Phase 2: Physics Fine-Tuning (Very Light)
-    - **NSGA-II:** pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS}
-    - **Physics weight:** {PHYSICS_WEIGHT_INIT:.3f} (very light)
+    - **Simplified Architecture:** 64-32-16
+    - **Physics weight:** {PHYSICS_WEIGHT:.4f} (very light)
     - **Dataset size:** {N_SAMPLES}
+    - **Optimizer:** Adam only (no LBFGS)
     """)
-    st.info("🔬 **v31.1** — Fixed progress bar overflow")
+    st.info("🔬 **v32.0** — Simplified Architecture, Stable Training")
 
-with st.spinner("🔄 Training Multi-Task PINN (Two-Stage)..."):
+with st.spinner("🔄 Training Multi-Task PINN..."):
     model, scaler, y_scaler, feature_names, df, loss_history = load_pinn_model()
 st.success("✅ Multi-Task True PINN trained successfully")
 
@@ -1508,8 +1375,6 @@ with col_right:
             
             with tab4:
                 st.markdown("### 📈 Training Curves")
-                st.caption("Two-Stage Training: Phase 1 (Data-Only), Phase 2 (Physics Fine-Tuning)")
-                
                 fig_loss = plot_training_curves(loss_history)
                 if fig_loss:
                     st.plotly_chart(fig_loss, use_container_width=True)
@@ -1547,5 +1412,5 @@ with col_right:
                 st.success("✅ One-click download — includes formulation, predictions, training curves, and model comparison.")
 
 st.markdown("---")
-st.caption(f"🔬 **Multi-Task True PINN — v31.1 (Fixed Progress Bar)**")
+st.caption(f"🔬 **Multi-Task True PINN — v32.0 (Simplified & Stable)**")
 st.caption(f"📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Postgraduate College, Sudan")
