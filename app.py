@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 24.3 (Production-Ready)
+Version: 25.0 (Improved NSGA-II & Expanded Pressure Range)
 """
 
 import streamlit as st
@@ -35,6 +35,7 @@ TENSILE_MIN = 1.90          # MPa
 EFRF_MAX = 0.40             # dimensionless
 MCC_MAX = 8.0               # %
 DENSITY_MAX = 0.99          # dimensionless
+PRESSURE_MAX = 300.0        # MPa (expanded)
 EFRF_TARGET = EFRF_MAX      # used for physics loss
 
 # ================================================================
@@ -67,8 +68,8 @@ RANGES = {
     'binder': (0.5, 4.0),
     'pvpp': (0.5, 6.0),
     'mgst': (0.01, 1.2),
-    'mcc': (0.0, 8.0),
-    'pressure': (80.0, 280.0),
+    'mcc': (0.0, MCC_MAX),
+    'pressure': (80.0, PRESSURE_MAX),
     'speed': (1.0, 50.0),
     'granule': (30.0, 250.0)
 }
@@ -318,8 +319,8 @@ def generate_pinn_data(n_samples=600, random_state=42):
             binder = np.random.uniform(0.5, 4.0)
             mgst = np.random.uniform(0.01, 1.2)
             pvpp = np.random.uniform(0.5, 6.0)
-            mcc = np.random.uniform(0, 8.0)
-            pressure = np.random.uniform(80, 280)
+            mcc = np.random.uniform(0, MCC_MAX)
+            pressure = np.random.uniform(80, PRESSURE_MAX)
             speed = np.random.uniform(1, 50)
             granule = np.random.uniform(30, 250)
         else:
@@ -332,9 +333,9 @@ def generate_pinn_data(n_samples=600, random_state=42):
             pvpp = np.random.normal(3.0, 0.5)
             pvpp = np.clip(pvpp, 0.5, 6.0)
             mcc = np.random.normal(5.0, 1.0)
-            mcc = np.clip(mcc, 0, 8.0)
+            mcc = np.clip(mcc, 0, MCC_MAX)
             pressure = np.random.normal(230, 15)
-            pressure = np.clip(pressure, 80, 280)
+            pressure = np.clip(pressure, 80, PRESSURE_MAX)
             speed = np.random.normal(10, 3)
             speed = np.clip(speed, 1, 50)
             granule = np.random.normal(125, 20)
@@ -588,11 +589,11 @@ def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
 
 
 # ================================================================
-# 7. NSGA-II IMPLEMENTATION
+# 7. NSGA-II IMPLEMENTATION (Improved with better exploration)
 # ================================================================
 
 class NSGAII:
-    def __init__(self, model, scaler, bounds, pop_size=100, n_generations=60):
+    def __init__(self, model, scaler, bounds, pop_size=150, n_generations=100):
         self.model = model
         self.scaler = scaler
         self.bounds = bounds
@@ -1218,6 +1219,7 @@ with st.sidebar:
     - Adam → LBFGS hybrid
     - Feature engineering
     - Output normalization
+    - **NSGA-II:** pop=150, gen=100
     """)
     st.warning("⚠️ **Production-Ready**")
 
@@ -1270,7 +1272,7 @@ with col_left:
     
     st.markdown("### ⚙️ Process Parameters")
     with st.container(border=True):
-        pressure = st.slider("⚙️ Pressure (MPa)", 80.0, 280.0, get_safe_value('pressure'), 1.0, key="pressure")
+        pressure = st.slider("⚙️ Pressure (MPa)", 80.0, PRESSURE_MAX, get_safe_value('pressure'), 1.0, key="pressure")
         speed = st.slider("🔄 Speed (rpm)", 1.0, 50.0, get_safe_value('speed'), 0.5, key="speed")
         granule = st.slider("🔬 Granule Size (µm)", 30.0, 250.0, get_safe_value('granule'), 1.0, key="granule")
     
@@ -1328,10 +1330,10 @@ with col_right:
             st.markdown("### ⚙️ NSGA-II")
             bounds = np.array([
                 [85, 95], [0, MCC_MAX], [0.5, 6.0], [0.01, 1.2], [0.5, 4.0],
-                [80, 280], [1, 50], [30, 250]
+                [80, PRESSURE_MAX], [1, 50], [30, 250]
             ])
             with st.spinner("🔄 Running NSGA-II..."):
-                nsga = NSGAII(model, scaler, bounds, pop_size=80, n_generations=40)
+                nsga = NSGAII(model, scaler, bounds, pop_size=150, n_generations=100)
                 pop, objectives, constraints, fronts = nsga.run()
                 if len(fronts) > 0 and len(fronts[0]) > 0:
                     front0 = fronts[0]
