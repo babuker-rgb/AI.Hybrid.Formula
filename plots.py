@@ -1,5 +1,4 @@
 import matplotlib.pyplot as plt
-import numpy as np
 
 def plot_pareto(opt_df, path="pareto_front.png"):
     plt.figure(figsize=(7, 5))
@@ -7,9 +6,17 @@ def plot_pareto(opt_df, path="pareto_front.png"):
     infeasible = opt_df[opt_df["Feasible"] == False]
 
     if len(infeasible) > 0:
-        plt.scatter(infeasible["Objective_API"], infeasible["Objective_EFRF"], c="gray", s=16, alpha=0.5, label="Infeasible")
+        plt.scatter(
+            infeasible["Objective_API"],
+            infeasible["Objective_EFRF"],
+            c="gray", s=16, alpha=0.5, label="Infeasible"
+        )
     if len(feasible) > 0:
-        plt.scatter(feasible["Objective_API"], feasible["Objective_EFRF"], c="green", s=20, alpha=0.8, label="Feasible")
+        plt.scatter(
+            feasible["Objective_API"],
+            feasible["Objective_EFRF"],
+            c="green", s=20, alpha=0.8, label="Feasible"
+        )
 
     plt.xlabel("API Loading (%)")
     plt.ylabel("EFRF")
@@ -35,7 +42,7 @@ def plot_loss_curves(loss_history, path="loss_curves.png"):
 
 def plot_predicted_vs_actual(y_true, y_pred, output_names, path="prediction_plot.png"):
     n = len(output_names)
-    fig, axes = plt.subplots(1, n, figsize=(5*n, 4))
+    fig, axes = plt.subplots(1, n, figsize=(5 * n, 4))
     if n == 1:
         axes = [axes]
 
