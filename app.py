@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 24.2 (Session State Clamping Fix)
+Version: 24.3 (Robust Session State Fix)
 """
 
 import streamlit as st
@@ -38,7 +38,7 @@ except ImportError:
     XGB_AVAILABLE = False
 
 # ================================================================
-# 1. SESSION STATE INITIALIZATION WITH CLAMPING
+# 1. SESSION STATE MANAGEMENT (ROBUST)
 # ================================================================
 
 DEFAULTS = {
@@ -64,15 +64,14 @@ RANGES = {
 }
 
 def safe_initialize():
+    """Initialize session state with defaults if missing."""
     for key in DEFAULTS:
         if key not in st.session_state:
             st.session_state[key] = DEFAULTS[key]
         else:
             try:
                 val = float(st.session_state[key])
-                min_val, max_val = RANGES[key]
-                if val < min_val or val > max_val:
-                    st.session_state[key] = DEFAULTS[key]
+                # If value is not a number, reset to default
             except (ValueError, TypeError):
                 st.session_state[key] = DEFAULTS[key]
 
@@ -89,6 +88,17 @@ def clamp_session_state():
                     st.session_state[key] = max_val
             except (ValueError, TypeError):
                 st.session_state[key] = DEFAULTS[key]
+
+def get_safe_value(key):
+    """Return a clamped session state value."""
+    if key not in st.session_state:
+        st.session_state[key] = DEFAULTS[key]
+    try:
+        val = float(st.session_state[key])
+        min_val, max_val = RANGES[key]
+        return max(min_val, min(val, max_val))
+    except:
+        return DEFAULTS[key]
 
 # Initialize and clamp
 safe_initialize()
@@ -1234,12 +1244,12 @@ with col_left:
     st.markdown("### 📊 Formulation Parameters")
     
     with st.container(border=True):
-        # Use clamped values directly from session state
-        api = st.slider("🧪 API Loading (%)", 85.0, 95.0, st.session_state.api, 0.1, key="api")
-        binder = st.slider("🔗 Binder (%)", 0.5, 4.0, st.session_state.binder, 0.1, key="binder")
-        pvpp = st.slider("💊 PVPP (%)", 0.5, 6.0, st.session_state.pvpp, 0.1, key="pvpp")
-        mgst = st.slider("🧴 Mg-St (%)", 0.01, 1.2, st.session_state.mgst, 0.01, key="mgst")
-        mcc = st.slider("📦 MCC (%)", 0.0, 8.0, st.session_state.mcc, 0.1, key="mcc")
+        # Use get_safe_value to ensure valid defaults
+        api = st.slider("🧪 API Loading (%)", 85.0, 95.0, get_safe_value('api'), 0.1, key="api")
+        binder = st.slider("🔗 Binder (%)", 0.5, 4.0, get_safe_value('binder'), 0.1, key="binder")
+        pvpp = st.slider("💊 PVPP (%)", 0.5, 6.0, get_safe_value('pvpp'), 0.1, key="pvpp")
+        mgst = st.slider("🧴 Mg-St (%)", 0.01, 1.2, get_safe_value('mgst'), 0.01, key="mgst")
+        mcc = st.slider("📦 MCC (%)", 0.0, 8.0, get_safe_value('mcc'), 0.1, key="mcc")
         
         total = api + binder + pvpp + mgst + mcc
         if abs(total - 100) < 0.1:
@@ -1251,9 +1261,9 @@ with col_left:
     
     st.markdown("### ⚙️ Process Parameters")
     with st.container(border=True):
-        pressure = st.slider("⚙️ Pressure (MPa)", 80.0, 280.0, st.session_state.pressure, 1.0, key="pressure")
-        speed = st.slider("🔄 Speed (rpm)", 1.0, 50.0, st.session_state.speed, 0.5, key="speed")
-        granule = st.slider("🔬 Granule Size (µm)", 30.0, 250.0, st.session_state.granule, 1.0, key="granule")
+        pressure = st.slider("⚙️ Pressure (MPa)", 80.0, 280.0, get_safe_value('pressure'), 1.0, key="pressure")
+        speed = st.slider("🔄 Speed (rpm)", 1.0, 50.0, get_safe_value('speed'), 0.5, key="speed")
+        granule = st.slider("🔬 Granule Size (µm)", 30.0, 250.0, get_safe_value('granule'), 1.0, key="granule")
     
     predict_btn = st.button("🔬 Predict & Optimize", use_container_width=True)
 
