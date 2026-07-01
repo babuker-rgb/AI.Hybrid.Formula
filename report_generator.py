@@ -1,6 +1,4 @@
 from fpdf import FPDF
-import pandas as pd
-from pathlib import Path
 
 def sanitize_text(text):
     replacements = {
@@ -16,13 +14,8 @@ def sanitize_text(text):
         text = str(text).replace(old, new)
     return text
 
-def generate_pdf_report(
-    out_path,
-    best_formulation,
-    metrics_df,
-    opt_df,
-    title="Hybrid AI Framework (PINN-NSGA-II) Report"
-):
+def generate_pdf_report(out_path, best_formulation, metrics_df, opt_df,
+                        title="Hybrid AI Framework (PINN-NSGA-II) Report"):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
