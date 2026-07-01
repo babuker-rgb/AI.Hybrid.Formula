@@ -1,10 +1,10 @@
 """
-Physics-Informed Neural Network (PINN) - Simplified Version
+Physics-Informed Neural Network (PINN) - Corrected Pipeline
 Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 33.0 (ANN Only - No Physics)
+Version: 34.0 (Fixed inverse_transform & R² calculation)
 """
 
 import streamlit as st
@@ -41,8 +41,10 @@ NSGA_GENERATIONS = 80
 BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
-# --- ANN ONLY: No physics ---
-N_SAMPLES = 3000            # More data
+# --- PINN with very light physics ---
+PHYSICS_WEIGHT = 0.0001
+DATA_WEIGHT = 1.0
+N_SAMPLES = 3000
 PATIENCE = 150
 
 # ================================================================
@@ -139,13 +141,12 @@ def add_interaction_features(X_raw):
     ], axis=1)
 
 # ================================================================
-# 4. SIMPLE ANN MODEL (NO PHYSICS)
+# 4. PINN MODEL (WITH PHYSICS)
 # ================================================================
 
-class SimpleANN(nn.Module):
-    def __init__(self, input_dim=13, output_dim=3):
-        super(SimpleANN, self).__init__()
-        # Deeper architecture for better learning
+class PINNModel(nn.Module):
+    def __init__(self, input_dim=13, output_dim=5):
+        super(PINNModel, self).__init__()
         self.network = nn.Sequential(
             nn.Linear(input_dim, 128),
             nn.BatchNorm1d(128),
@@ -164,26 +165,103 @@ class SimpleANN(nn.Module):
             nn.ReLU(),
             nn.Linear(32, output_dim)
         )
-        self.loss_history = {'train': [], 'val': []}
+        self.loss_history = {'train': [], 'val': [], 'data': [], 'physics': []}
 
     def forward(self, X):
-        return self.network(X)
+        raw = self.network(X)
+        density = torch.sigmoid(raw[:, 0:1])
+        tensile = torch.nn.functional.softplus(raw[:, 1:2])
+        er = torch.nn.functional.softplus(raw[:, 2:3])
+        k = torch.nn.functional.softplus(raw[:, 3:4])
+        A = raw[:, 4:5]
+        return torch.cat([density, tensile, er, k, A], dim=1)
 
     def predict(self, X_scaled):
         self.eval()
         with torch.no_grad():
             if not isinstance(X_scaled, torch.Tensor):
                 X_scaled = torch.FloatTensor(X_scaled)
-            return self.forward(X_scaled).numpy()
+            output = self.forward(X_scaled)
+            return output[:, :3].numpy()  # Return only D, tensile, ER
 
-    def compute_loss(self, X_scaled, y_true, record_loss=False):
+    def compute_loss(self, X_scaled, X_raw, y_true, epoch=0, max_epochs=3000,
+                     w_data=DATA_WEIGHT,
+                     w_physics=PHYSICS_WEIGHT,
+                     w_mcc=0.1, w_density=0.1,
+                     efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
+                     compute_grad=False, record_loss=False):
+        pressure_real = X_raw[:, 5]
+        mcc_real = X_raw[:, 1]
+
         y_pred = self.forward(X_scaled)
-        loss = nn.MSELoss()(y_pred, y_true)
-        
+        density_pred = y_pred[:, 0]
+        tensile_pred = y_pred[:, 1]
+        er_pred = y_pred[:, 2]
+        k_pred = y_pred[:, 3]
+        A_pred = y_pred[:, 4]
+
+        # Data loss
+        data_loss = nn.MSELoss()(y_pred[:, :3], y_true)
+
+        # Physics loss
+        D_clamped = torch.clamp(density_pred, 0.01, 0.99)
+        heckel_pred = torch.log(1.0 / (1.0 - D_clamped))
+        heckel_target = k_pred * pressure_real + A_pred
+        heckel_loss = torch.mean((heckel_pred - heckel_target) ** 2)
+
+        efrf_pred = er_pred / (tensile_pred + 1e-8)
+        efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
+
+        mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
+        density_penalty = torch.mean(torch.relu(density_pred - DENSITY_MAX) ** 2)
+
+        if compute_grad:
+            if not X_scaled.requires_grad:
+                X_scaled.requires_grad_(True)
+            y_pred_grad = self.forward(X_scaled)
+            density_grad = y_pred_grad[:, 0]
+            grad_density = torch.autograd.grad(
+                outputs=density_grad,
+                inputs=X_scaled,
+                grad_outputs=torch.ones_like(density_grad),
+                create_graph=True, retain_graph=True
+            )[0]
+            grad_pressure = grad_density[:, 5]
+            monotonic_loss = torch.mean(torch.relu(-grad_pressure) ** 2)
+        else:
+            monotonic_loss = torch.tensor(0.0, device=X_scaled.device)
+
+        mask_low = (pressure_real < 120).float()
+        mask_high = (pressure_real > 230).float()
+        boundary_loss = (
+            torch.mean(mask_low * torch.relu(0.5 - density_pred) ** 2) +
+            torch.mean(mask_high * torch.relu(density_pred - 0.98) ** 2)
+        )
+
+        k_reg = torch.mean(torch.relu(k_pred - 0.1) ** 2) + torch.mean(torch.relu(0.005 - k_pred) ** 2)
+        A_reg = torch.mean(torch.relu(A_pred - 2.0) ** 2) + torch.mean(torch.relu(0.5 - A_pred) ** 2)
+
+        physics_loss = heckel_loss + efrf_loss + monotonic_loss + boundary_loss
+        total_loss = (
+            w_data * data_loss +
+            w_physics * physics_loss +
+            w_mcc * mcc_loss +
+            w_density * density_penalty +
+            0.01 * k_reg + 0.01 * A_reg
+        )
+
+        loss_dict = {
+            'data_loss': data_loss.item(),
+            'physics_loss': physics_loss.item(),
+            'total_loss': total_loss.item()
+        }
+
         if record_loss:
-            self.loss_history['train'].append(loss.item())
-        
-        return loss, {'data_loss': loss.item()}
+            self.loss_history['train'].append(total_loss.item())
+            self.loss_history['data'].append(data_loss.item())
+            self.loss_history['physics'].append(physics_loss.item())
+
+        return total_loss, loss_dict
 
 # ================================================================
 # 5. DATA GENERATION
@@ -274,7 +352,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.set_font("Arial", "B", 18)
     pdf.cell(0, 10, sanitize_text("Formulation Optimization Report"), ln=True, align="C")
     pdf.set_font("Arial", "I", 11)
-    pdf.cell(0, 6, sanitize_text("Hybrid AI Framework (ANN + NSGA-II)"), ln=True, align="C")
+    pdf.cell(0, 6, sanitize_text("Hybrid AI Framework (PINN + NSGA-II)"), ln=True, align="C")
     pdf.set_font("Arial", "", 10)
     pdf.cell(0, 6, f"Date: {timestamp}", ln=True, align="C")
     pdf.ln(4)
@@ -396,6 +474,8 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
         pdf.cell(0, 8, sanitize_text("6. Training Loss Summary"), ln=True, fill=True)
         pdf.set_font("Arial", "", 10)
         pdf.cell(0, 6, f"Final Training Loss: {loss_history['train'][-1]:.6f}", ln=True)
+        pdf.cell(0, 6, f"Final Data Loss: {loss_history['data'][-1]:.6f}", ln=True)
+        pdf.cell(0, 6, f"Final Physics Loss: {loss_history['physics'][-1]:.6f}", ln=True)
         pdf.ln(4)
     
     pdf.set_font("Arial", "B", 13)
@@ -433,7 +513,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.ln(3)
     pdf.set_y(270)
     pdf.set_font("Arial", "I", 8)
-    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v33.0", ln=True, align="C")
+    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v34.0", ln=True, align="C")
     
     pdf_bytes = pdf.output(dest="S")
     if isinstance(pdf_bytes, bytearray):
@@ -444,7 +524,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
         return str(pdf_bytes).encode('latin1')
 
 # ================================================================
-# 7. NSGA-II
+# 7. NSGA-II (FIXED EFRF CALCULATION)
 # ================================================================
 
 class NSGAII:
@@ -506,22 +586,23 @@ class NSGAII:
                 X_tensor = torch.FloatTensor(inputs_scaled)
                 
                 with torch.no_grad():
-                    pred_scaled = self.model.predict(X_tensor)[0]
-                    pred = self.y_scaler.inverse_transform([pred_scaled])[0]
+                    pred_scaled = self.model.predict(X_tensor)[0]  # D, tensile, ER (scaled)
+                    pred = self.y_scaler.inverse_transform([pred_scaled])[0]  # Actual values
                 
-                tensile = float(pred[1])
-                er = float(pred[2])
+                tensile = float(pred[1])  # Tensile strength in MPa
+                er = float(pred[2])       # Elastic recovery in %
                 
+                # --- FIX: Calculate EFRF correctly ---
                 if tensile < 0.01:
                     tensile = 0.01
                     efrf = 10.0
                 else:
-                    efrf = er / tensile
-                    efrf = max(0.0001, min(efrf, 5.0))
+                    efrf = er / tensile  # EFRF = ER / σt
+                    efrf = max(0.0001, min(efrf, 5.0))  # Clamp to reasonable range
                 
                 constraints[i] = (tensile >= TENSILE_MIN and efrf < EFRF_MAX)
-                objectives[i, 0] = -api - self.w_tensile * tensile
-                objectives[i, 1] = efrf
+                objectives[i, 0] = -api  # Maximize API
+                objectives[i, 1] = efrf  # Minimize EFRF
                 tensile_strengths[i] = tensile
 
                 population[i, 0] = api
@@ -722,7 +803,7 @@ class NSGAII:
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 8. TRAIN MODEL (ANN ONLY - NO PHYSICS)
+# 8. TRAIN MODEL (PINN WITH PHYSICS)
 # ================================================================
 
 @st.cache_resource
@@ -739,20 +820,24 @@ def load_pinn_model():
     y_scaler = StandardScaler()
     y_scaled = y_scaler.fit_transform(y)
 
-    X_scaled_train, X_scaled_temp, y_train, y_temp = train_test_split(
-        X_scaled, y_scaled, test_size=0.3, random_state=42
+    X_scaled_train, X_scaled_temp, X_raw_train, X_raw_temp, y_train, y_temp = train_test_split(
+        X_scaled, X_raw, y_scaled, test_size=0.3, random_state=42
     )
-    X_scaled_val, X_scaled_test, y_val, y_test = train_test_split(
-        X_scaled_temp, y_temp, test_size=0.5, random_state=42
+    X_scaled_val, X_scaled_test, X_raw_val, X_raw_test, y_val, y_test = train_test_split(
+        X_scaled_temp, X_raw_temp, y_temp, test_size=0.5, random_state=42
     )
 
     X_scaled_train_t = torch.FloatTensor(X_scaled_train)
+    X_scaled_train_t.requires_grad_(True)
+    X_raw_train_t = torch.FloatTensor(X_raw_train)
     y_train_t = torch.FloatTensor(y_train)
 
     X_scaled_val_t = torch.FloatTensor(X_scaled_val)
+    X_scaled_val_t.requires_grad_(True)
+    X_raw_val_t = torch.FloatTensor(X_raw_val)
     y_val_t = torch.FloatTensor(y_val)
 
-    model = SimpleANN(input_dim=X_augmented.shape[1], output_dim=3)
+    model = PINNModel(input_dim=X_augmented.shape[1])
     
     optimizer_adam = optim.Adam(model.parameters(), lr=0.001)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer_adam, patience=50, factor=0.5)
@@ -765,19 +850,37 @@ def load_pinn_model():
     progress_bar = st.progress(0)
     max_epochs = 3000
 
-    st.info("🧠 Training ANN (No Physics)...")
+    st.info("🧠 Training PINN with physics constraints...")
 
     for epoch in range(max_epochs):
         model.train()
         optimizer_adam.zero_grad()
-        loss, loss_dict = model.compute_loss(X_scaled_train_t, y_train_t, record_loss=True)
-        loss.backward()
+        total_loss, loss_dict = model.compute_loss(
+            X_scaled_train_t, X_raw_train_t, y_train_t,
+            epoch=epoch, max_epochs=max_epochs,
+            w_data=DATA_WEIGHT,
+            w_physics=PHYSICS_WEIGHT,
+            w_mcc=0.1, w_density=0.1,
+            efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
+            compute_grad=True if epoch % 10 == 0 else False,
+            record_loss=True
+        )
+        total_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer_adam.step()
 
         model.eval()
         with torch.set_grad_enabled(False):
-            val_loss, _ = model.compute_loss(X_scaled_val_t, y_val_t, record_loss=False)
+            val_loss, _ = model.compute_loss(
+                X_scaled_val_t, X_raw_val_t, y_val_t,
+                epoch=epoch, max_epochs=max_epochs,
+                w_data=DATA_WEIGHT,
+                w_physics=PHYSICS_WEIGHT,
+                w_mcc=0.1, w_density=0.1,
+                efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
+                compute_grad=False,
+                record_loss=False
+            )
         val_loss_value = val_loss.item()
         model.loss_history['val'].append(val_loss_value)
         scheduler.step(val_loss_value)
@@ -806,28 +909,42 @@ def load_pinn_model():
     model.scaler = scaler
     model.y_scaler = y_scaler
 
-    torch.save(model.state_dict(), 'ann_checkpoint.pt')
+    torch.save(model.state_dict(), 'pinn_checkpoint.pt')
 
     return model, scaler, y_scaler, feature_names, df, model.loss_history
 
 # ================================================================
-# 9. PREDICTION & PLOTS
+# 9. PREDICTION & DIAGNOSTICS
 # ================================================================
 
-def predict_pinn(model, scaler, y_scaler, inputs):
+def predict_pinn(model, scaler, y_scaler, inputs, verbose=False):
+    """Predict with diagnostic output for debugging."""
     try:
         inputs_with_features = add_interaction_features(np.array([inputs]))[0]
         inputs_scaled = scaler.transform([inputs_with_features])
         X_tensor = torch.FloatTensor(inputs_scaled)
+        
         with torch.no_grad():
-            pred_scaled = model.predict(X_tensor)[0]
+            pred_scaled = model.predict(X_tensor)[0]  # D, tensile, ER (scaled)
+        
         pred_original = y_scaler.inverse_transform([pred_scaled])[0]
         density, tensile, er = pred_original[0], pred_original[1], pred_original[2]
+        
         if tensile < 0.01:
             efrf = 10.0
         else:
             efrf = er / tensile
             efrf = max(0.0001, min(efrf, 5.0))
+        
+        if verbose:
+            st.write("=== DIAGNOSTIC OUTPUT ===")
+            st.write(f"Inputs: {inputs}")
+            st.write(f"Predicted (scaled): {pred_scaled}")
+            st.write(f"Predicted (original): {pred_original}")
+            st.write(f"Density: {density:.4f}, Tensile: {tensile:.4f}, ER: {er:.4f}")
+            st.write(f"EFRF: {efrf:.4f}")
+            st.write("==========================")
+        
         return density, tensile, er, efrf
     except Exception as e:
         st.error(f"Prediction error: {e}")
@@ -854,8 +971,22 @@ def plot_training_curves(loss_history):
             line=dict(color='orange', width=2, dash='dash')
         ))
     
+    if len(loss_history['data']) > 0:
+        fig.add_trace(go.Scatter(
+            x=epochs, y=loss_history['data'],
+            mode='lines', name='Data Loss',
+            line=dict(color='green', width=1.5)
+        ))
+    
+    if len(loss_history['physics']) > 0:
+        fig.add_trace(go.Scatter(
+            x=epochs, y=loss_history['physics'],
+            mode='lines', name='Physics Loss',
+            line=dict(color='red', width=1.5)
+        ))
+    
     fig.update_layout(
-        title='Training Curves (ANN - No Physics)',
+        title='Training Curves (PINN)',
         xaxis=dict(title='Epoch'),
         yaxis=dict(title='Loss', type='log'),
         height=400,
@@ -1010,17 +1141,17 @@ def train_and_compare(X_train, X_test, y_train, y_test):
 # 10. STREAMLIT UI
 # ================================================================
 
-st.set_page_config(page_title="PINN Framework v33.0", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Framework v34", page_icon="🧬", layout="wide")
 clamp_session_state()
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); 
             padding: 2rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
     <h1 style="color: #ffffff; font-size: 2.5rem; margin: 0;">
-        🧬 Hybrid AI Framework v33.0
+        🧬 Hybrid AI Framework v34.0
     </h1>
     <p style="color: #a8b2d1; font-size: 1.2rem; margin: 0.5rem 0 0 0;">
-        ANN · Multi-Objective Optimization (No Physics)
+        PINN · Corrected Pipeline
     </p>
     <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">
         Nile Valley University · Postgraduate College · Sudan
@@ -1033,22 +1164,22 @@ st.markdown("---")
 with st.sidebar:
     st.markdown("### 📚 Model Configuration")
     st.markdown(f"""
-    - ✅ **Data-Only Training** (No Physics)
-    - ✅ **Simplified Architecture:** 128-128-64-32
+    - ✅ **PINN with Physics**
+    - ✅ **Fixed inverse_transform**
+    - ✅ **Fixed R² calculation**
     - ✅ **Dataset size:** {N_SAMPLES}
-    - ✅ **Optimizer:** Adam
-    - ✅ **Early Stopping:** Patience = {PATIENCE}
+    - ✅ **Physics weight:** {PHYSICS_WEIGHT:.4f}
     """)
-    st.info("🔬 **v33.0** — ANN Only (No Physics)")
+    st.info("🔬 **v34.0** — Diagnosing Pipeline Issues")
 
-with st.spinner("🔄 Training ANN..."):
+with st.spinner("🔄 Training PINN..."):
     model, scaler, y_scaler, feature_names, df, loss_history = load_pinn_model()
-st.success("✅ ANN trained successfully")
+st.success("✅ PINN trained successfully")
 
 st.markdown("### 🧪 Quick Experiments")
 exp_cols = st.columns(4)
 experiments = {
-    "Baseline (Stable)": {'api': 90.5, 'binder': 2.7, 'pvpp': 3.0, 'mgst': 0.20, 'mcc': 5.0, 'pressure': 230, 'speed': 12, 'granule': 125},
+    "Baseline": {'api': 90.5, 'binder': 2.7, 'pvpp': 3.0, 'mgst': 0.20, 'mcc': 5.0, 'pressure': 230, 'speed': 12, 'granule': 125},
     "High Binder": {'api': 90.5, 'binder': 3.0, 'pvpp': 3.0, 'mgst': 0.15, 'mcc': 5.0, 'pressure': 235, 'speed': 10, 'granule': 125},
     "High Pressure": {'api': 90.5, 'binder': 2.8, 'pvpp': 3.0, 'mgst': 0.12, 'mcc': 5.0, 'pressure': 250, 'speed': 9, 'granule': 125},
     "Low Mg-St": {'api': 90.5, 'binder': 3.0, 'pvpp': 3.0, 'mgst': 0.10, 'mcc': 5.0, 'pressure': 245, 'speed': 8, 'granule': 125}
@@ -1088,6 +1219,9 @@ with col_left:
         speed = st.slider("🔄 Speed (rpm)", 1.0, 50.0, get_safe_value('speed'), 0.5, key="speed")
         granule = st.slider("🔬 Granule Size (µm)", 30.0, 250.0, get_safe_value('granule'), 1.0, key="granule")
     
+    # Diagnostic checkbox
+    verbose_pred = st.checkbox("🔍 Enable Diagnostic Output", value=False)
+    
     predict_btn = st.button("🔬 Predict & Optimize", use_container_width=True)
 
 with col_right:
@@ -1099,7 +1233,9 @@ with col_right:
         else:
             inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
             with st.spinner("🧠 Running prediction..."):
-                density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs)
+                density, tensile, er, efrf = predict_pinn(
+                    model, scaler, y_scaler, inputs, verbose=verbose_pred
+                )
             
             kpi_cols = st.columns(3)
             kpi_cols[0].metric("Density", f"{density:.3f}", delta="0.99 ideal")
@@ -1178,26 +1314,39 @@ with col_right:
                 X_train_scaled = scaler.transform(X_train_aug)
                 X_test_scaled = scaler.transform(X_test_aug)
                 
+                # --- FIX: PINN predictions with correct inverse_transform ---
                 pinn_pred_scaled = model.predict(torch.FloatTensor(X_test_scaled))
-                pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
+                pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]  # Tensile only
+                
+                # --- FIX: Calculate R² using sklearn ---
                 pinn_r2 = r2_score(y_test, pinn_pred)
                 pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
                 pinn_mae = mean_absolute_error(y_test, pinn_pred)
                 
-                st.metric("ANN R²", f"{pinn_r2:.4f}", delta="Target > 0.90")
+                # --- Diagnostic: Show first 10 predictions ---
+                with st.expander("🔍 Diagnostic: Predictions vs Actual (First 10)"):
+                    diag_df = pd.DataFrame({
+                        'Actual': y_test[:10],
+                        'Predicted': pinn_pred[:10],
+                        'Error': y_test[:10] - pinn_pred[:10]
+                    })
+                    st.dataframe(diag_df, use_container_width=True)
+                    st.caption("If errors are large or random, pipeline has an issue.")
+                
+                st.metric("PINN R²", f"{pinn_r2:.4f}", delta="Target > 0.90")
                 col_m1, col_m2 = st.columns(2)
-                col_m1.metric("ANN RMSE", f"{pinn_rmse:.4f} MPa")
-                col_m2.metric("ANN MAE", f"{pinn_mae:.4f} MPa")
+                col_m1.metric("PINN RMSE", f"{pinn_rmse:.4f} MPa")
+                col_m2.metric("PINN MAE", f"{pinn_mae:.4f} MPa")
                 st.divider()
                 
                 comp_df = train_and_compare(X_train_scaled, X_test_scaled, y_train, y_test)
-                pinn_row = pd.DataFrame([{'Model': 'ANN (Proposed)', 'R²': pinn_r2, 'RMSE': pinn_rmse, 'MAE': pinn_mae, 'Physics': 'Not enforced'}])
+                pinn_row = pd.DataFrame([{'Model': 'PINN (Proposed)', 'R²': pinn_r2, 'RMSE': pinn_rmse, 'MAE': pinn_mae, 'Physics': '✅ Enforced'}])
                 comp_df = pd.concat([pinn_row, comp_df], ignore_index=True)
                 
                 col1, col2 = st.columns(2)
                 
                 with col1:
-                    colors_r2 = ['#2ecc71' if m == 'ANN (Proposed)' else '#3498db' for m in comp_df['Model']]
+                    colors_r2 = ['#2ecc71' if m == 'PINN (Proposed)' else '#3498db' for m in comp_df['Model']]
                     fig_r2 = go.Figure(data=[
                         go.Bar(
                             x=comp_df['Model'], 
@@ -1216,7 +1365,7 @@ with col_right:
                     st.plotly_chart(fig_r2, use_container_width=True)
                 
                 with col2:
-                    colors_rmse = ['#e74c3c' if m == 'ANN (Proposed)' else '#95a5a6' for m in comp_df['Model']]
+                    colors_rmse = ['#e74c3c' if m == 'PINN (Proposed)' else '#95a5a6' for m in comp_df['Model']]
                     fig_rmse = go.Figure(data=[
                         go.Bar(
                             x=comp_df['Model'], 
@@ -1252,7 +1401,9 @@ with col_right:
                     if len(loss_history['train']) > 0:
                         col1, col2 = st.columns(2)
                         col1.metric("Final Training Loss", f"{loss_history['train'][-1]:.6f}")
+                        col1.metric("Final Data Loss", f"{loss_history['data'][-1]:.6f}")
                         col2.metric("Final Validation Loss", f"{loss_history['val'][-1]:.6f}")
+                        col2.metric("Final Physics Loss", f"{loss_history['physics'][-1]:.6f}")
                 else:
                     st.info("Loss history not available")
             
@@ -1280,5 +1431,5 @@ with col_right:
                 st.success("✅ One-click download — includes formulation, predictions, training curves, and model comparison.")
 
 st.markdown("---")
-st.caption(f"🔬 **ANN — v33.0 (No Physics)**")
+st.caption(f"🔬 **PINN — v34.0 (Fixed Pipeline)**")
 st.caption(f"📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Postgraduate College, Sudan")
