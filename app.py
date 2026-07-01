@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 27.0 (Stable, Fast, and Fully Annotated)
+Version: 28.0 (Enhanced Comparison Table, Colored Diagrams, PDF Report)
 """
 
 import streamlit as st
@@ -22,21 +22,22 @@ from fpdf import FPDF
 import datetime
 import warnings
 import plotly.graph_objects as go
+import plotly.express as px
 import time
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. USER-CONFIGURABLE PARAMETERS (EASY TO ADJUST)
+# 0. USER-CONFIGURABLE PARAMETERS
 # ================================================================
 
 TENSILE_MIN = 1.90          # MPa
-EFRF_MAX = 0.40             # dimensionless (set to 0.45 for exploration)
+EFRF_MAX = 0.40             # dimensionless
 MCC_MAX = 8.0               # %
 DENSITY_MAX = 0.99
 PRESSURE_MAX = 300.0        # MPa
 
-NSGA_POP_SIZE = 100         # Reduced for faster execution on Streamlit Cloud
-NSGA_GENERATIONS = 100      # Reduced from 200 for speed
+NSGA_POP_SIZE = 100
+NSGA_GENERATIONS = 100
 
 BINDER_MIN = 0.5
 BINDER_MAX = 5.0
@@ -118,7 +119,6 @@ clamp_session_state()
 # ================================================================
 
 def add_interaction_features(X_raw):
-    """Add interaction features with consistent clipping."""
     pressure = X_raw[:, 5:6]
     binder = X_raw[:, 4:5]
     api = X_raw[:, 0:1]
@@ -162,7 +162,6 @@ class MultiTaskTruePINN(nn.Module):
         return torch.cat([density, tensile, er, k, A], dim=1)
 
     def predict(self, X_scaled):
-        """Predict with explicit eval mode."""
         self.eval()
         with torch.no_grad():
             if not isinstance(X_scaled, torch.Tensor):
@@ -282,7 +281,6 @@ def generate_pinn_data(n_samples=600, random_state=42):
             speed = np.clip(np.random.normal(10, 3), 1, 50)
             granule = np.clip(np.random.normal(125, 20), 30, 250)
 
-        # Normalize to 100% with sum check
         total = api + binder + mgst + pvpp + mcc
         if total > 100:
             scale = 100 / total
@@ -323,7 +321,7 @@ def generate_pinn_data(n_samples=600, random_state=42):
     return df, feature_names
 
 # ================================================================
-# 6. PDF GENERATION (FIXED: Full Name, One-Click Download)
+# 6. PDF GENERATION (Full Report with Comparison Table)
 # ================================================================
 
 def sanitize_text(text):
@@ -334,21 +332,23 @@ def sanitize_text(text):
     return text
 
 @st.cache_data
-def generate_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
-                        density, tensile, er, efrf, status, timestamp):
-    """Generate a professional PDF report with full author details."""
+def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
+                             density, tensile, er, efrf, status, timestamp,
+                             model_comparison_df=None):
+    """Generate a detailed PDF report including model comparison."""
     pdf = FPDF()
     pdf.add_page()
     
+    # Header
     pdf.set_font("Arial", "B", 18)
-    pdf.cell(0, 10, sanitize_text("Formulation Report"), ln=True, align="C")
+    pdf.cell(0, 10, sanitize_text("Formulation Optimization Report"), ln=True, align="C")
     pdf.set_font("Arial", "I", 11)
-    pdf.cell(0, 6, sanitize_text("Hybrid AI Framework for Tablet Manufacturing Optimization"), ln=True, align="C")
+    pdf.cell(0, 6, sanitize_text("Hybrid AI Framework (PINN + NSGA-II)"), ln=True, align="C")
     pdf.set_font("Arial", "", 10)
     pdf.cell(0, 6, f"Date: {timestamp}", ln=True, align="C")
-    pdf.ln(8)
+    pdf.ln(4)
     
-    # Author with full name and degree
+    # Author
     pdf.set_font("Arial", "B", 12)
     pdf.set_text_color(0, 0, 150)
     pdf.cell(0, 8, "Chem. Eng. Babuker A. Abdalla, PhD Researcher", ln=True, align="C")
@@ -381,7 +381,7 @@ def generate_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
         pdf.cell(30, 6, sanitize_text(val), 1, 0, "C")
         pdf.cell(80, 6, sanitize_text(func), 1, 1, "L")
     
-    pdf.ln(5)
+    pdf.ln(4)
     
     # 2. Process Parameters
     pdf.set_font("Arial", "B", 13)
@@ -402,7 +402,7 @@ def generate_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
         pdf.cell(60, 6, sanitize_text(p), 1, 0, "L")
         pdf.cell(60, 6, sanitize_text(v), 1, 1, "C")
     
-    pdf.ln(5)
+    pdf.ln(4)
     
     # 3. Prediction Results
     pdf.set_font("Arial", "B", 13)
@@ -410,9 +410,9 @@ def generate_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
     pdf.cell(0, 8, sanitize_text("3. Prediction Results"), ln=True, fill=True)
     pdf.set_font("Arial", "", 10)
     
-    results = [("Density", f"{density:.3f}"),
+    results = [("Density", f"{density:.3f}", "-"),
                ("Tensile Strength", f"{tensile:.3f} MPa", f">= {TENSILE_MIN:.2f} MPa"),
-               ("Elastic Recovery", f"{er:.3f} %"),
+               ("Elastic Recovery", f"{er:.3f} %", "-"),
                ("EFRF", f"{efrf:.4f}", f"< {EFRF_MAX:.2f}")]
     
     pdf.set_font("Arial", "B", 10)
@@ -422,22 +422,16 @@ def generate_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
     
     pdf.set_font("Arial", "", 10)
     for r in results:
-        if len(r) == 2:
-            pdf.cell(45, 6, sanitize_text(r[0]), 1, 0, "L")
-            pdf.cell(35, 6, sanitize_text(r[1]), 1, 0, "C")
-            pdf.cell(45, 6, "-", 1, 1, "C")
-        else:
-            pdf.cell(45, 6, sanitize_text(r[0]), 1, 0, "L")
-            pdf.cell(35, 6, sanitize_text(r[1]), 1, 0, "C")
-            pdf.cell(45, 6, sanitize_text(r[2]), 1, 1, "C")
+        pdf.cell(45, 6, sanitize_text(r[0]), 1, 0, "L")
+        pdf.cell(35, 6, sanitize_text(r[1]), 1, 0, "C")
+        pdf.cell(45, 6, sanitize_text(r[2]), 1, 1, "C")
     
-    pdf.ln(5)
+    pdf.ln(4)
     
     # 4. Status
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, sanitize_text("4. Overall Status"), ln=True, fill=True)
-    
     pdf.set_font("Arial", "B", 14)
     if status == "PASS":
         pdf.set_text_color(0, 128, 0)
@@ -445,44 +439,61 @@ def generate_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
     else:
         pdf.set_text_color(255, 0, 0)
         pdf.cell(0, 8, sanitize_text("FAIL - Formulation Does NOT Satisfy All Constraints"), ln=True, align="C")
-    
     pdf.set_text_color(0, 0, 0)
-    pdf.ln(5)
+    pdf.ln(4)
     
-    # 5. Recommendations
+    # 5. Model Comparison (if provided)
+    if model_comparison_df is not None and not model_comparison_df.empty:
+        pdf.set_font("Arial", "B", 13)
+        pdf.set_fill_color(230, 230, 230)
+        pdf.cell(0, 8, sanitize_text("5. Model Performance Comparison"), ln=True, fill=True)
+        pdf.set_font("Arial", "", 10)
+        
+        pdf.set_font("Arial", "B", 10)
+        pdf.cell(40, 6, sanitize_text("Model"), 1, 0, "C")
+        pdf.cell(30, 6, sanitize_text("R²"), 1, 0, "C")
+        pdf.cell(30, 6, sanitize_text("RMSE"), 1, 0, "C")
+        pdf.cell(30, 6, sanitize_text("MAE"), 1, 0, "C")
+        pdf.cell(40, 6, sanitize_text("Physics"), 1, 1, "C")
+        
+        pdf.set_font("Arial", "", 10)
+        for _, row in model_comparison_df.iterrows():
+            pdf.cell(40, 6, sanitize_text(str(row['Model'])), 1, 0, "L")
+            pdf.cell(30, 6, f"{row['R²']:.4f}", 1, 0, "C")
+            pdf.cell(30, 6, f"{row['RMSE']:.4f}", 1, 0, "C")
+            pdf.cell(30, 6, f"{row['MAE']:.4f}", 1, 0, "C")
+            pdf.cell(40, 6, sanitize_text(str(row['Physics'])), 1, 1, "C")
+        pdf.ln(4)
+    
+    # 6. Recommendations
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
-    pdf.cell(0, 8, sanitize_text("5. Recommendations"), ln=True, fill=True)
+    pdf.cell(0, 8, sanitize_text("6. Recommendations"), ln=True, fill=True)
     pdf.set_font("Arial", "", 10)
     
     if status == "PASS":
-        recommendations = [
-            sanitize_text("1. Proceed with experimental validation."),
-            sanitize_text("2. Confirm tensile strength with physical testing."),
-            sanitize_text("3. Evaluate disintegration time and dissolution."),
-            sanitize_text("4. Assess stability under ICH conditions."),
-            sanitize_text("5. Scale-up for process optimization.")
-        ]
+        recs = ["1. Proceed with experimental validation.",
+                "2. Confirm tensile strength with physical testing.",
+                "3. Evaluate disintegration time and dissolution.",
+                "4. Assess stability under ICH conditions.",
+                "5. Scale-up for process optimization."]
     else:
-        recommendations = [
-            sanitize_text("1. Reduce API or adjust binder concentration."),
-            sanitize_text("2. Optimize Mg-St level."),
-            sanitize_text("3. Increase compaction pressure."),
-            sanitize_text("4. Reduce punch speed."),
-            sanitize_text("5. Re-run with adjusted parameters.")
-        ]
+        recs = ["1. Reduce API or adjust binder concentration.",
+                "2. Optimize Mg-St level.",
+                "3. Increase compaction pressure.",
+                "4. Reduce punch speed.",
+                "5. Re-run with adjusted parameters."]
     
-    for rec in recommendations:
-        pdf.cell(0, 6, rec, ln=True)
+    for rec in recs:
+        pdf.cell(0, 6, sanitize_text(rec), ln=True)
     
-    pdf.ln(5)
+    pdf.ln(4)
     
-    # 6. Contact
+    # 7. Contact
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
-    pdf.cell(0, 8, sanitize_text("6. Contact Information"), ln=True, fill=True)
+    pdf.cell(0, 8, sanitize_text("7. Contact Information"), ln=True, fill=True)
     pdf.set_font("Arial", "", 11)
-    
     pdf.cell(0, 8, "Chem. Eng. Babuker A. Abdalla, PhD Researcher", ln=True)
     pdf.cell(0, 7, "Email: babuker@protonmail.com", ln=True)
     pdf.cell(0, 7, "Phone: +249-123-638-638", ln=True)
@@ -491,7 +502,7 @@ def generate_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
     pdf.ln(3)
     pdf.set_y(270)
     pdf.set_font("Arial", "I", 8)
-    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v27.0", ln=True, align="C")
+    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v28.0", ln=True, align="C")
     
     pdf_bytes = pdf.output(dest="S")
     if isinstance(pdf_bytes, bytearray):
@@ -502,7 +513,7 @@ def generate_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
         return str(pdf_bytes).encode('latin1')
 
 # ================================================================
-# 7. NSGA-II (Optimized for Speed)
+# 7. NSGA-II
 # ================================================================
 
 class NSGAII:
@@ -536,9 +547,8 @@ class NSGAII:
 
         for i in range(n):
             try:
-                api, mcc, pvpp, mgst, binder, pressure, speed, granule = population[i, 0], population[i, 1], population[i, 2], population[i, 3], population[i, 4], population[i, 5], population[i, 6], population[i, 7]
+                api, mcc, pvpp, mgst, binder, pressure, speed, granule = population[i]
                 
-                # Normalize to 100%
                 used = api + binder + mgst + pvpp + mcc
                 if used > 100:
                     scale = 100 / used
@@ -779,7 +789,7 @@ class NSGAII:
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 8. TRAIN MODEL (with caching)
+# 8. TRAIN MODEL
 # ================================================================
 
 @st.cache_resource
@@ -922,18 +932,16 @@ def load_pinn_model():
     return model, scaler, y_scaler, feature_names, df, {'train': [], 'val': []}
 
 # ================================================================
-# 9. PREDICTION & PLOTS (Fixed Double Inverse)
+# 9. PREDICTION & PLOTS
 # ================================================================
 
 def predict_pinn(model, scaler, y_scaler, inputs):
-    """Predict with correct scaling (no double inverse)."""
     try:
         inputs_with_features = add_interaction_features(np.array([inputs]))[0]
         inputs_scaled = scaler.transform([inputs_with_features])
         X_tensor = torch.FloatTensor(inputs_scaled)
         with torch.no_grad():
             pred_scaled = model.predict(X_tensor)[0]
-        # Inverse transform only once
         pred_original = y_scaler.inverse_transform([pred_scaled])[0]
         density, tensile, er = pred_original[0], pred_original[1], pred_original[2]
         if tensile < 0.01:
@@ -947,7 +955,6 @@ def predict_pinn(model, scaler, y_scaler, inputs):
         return 0.5, 0.0, 1.0, 1.0
 
 def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
-    """Pareto front with annotations and legend."""
     try:
         if len(fronts) > 0 and len(fronts[0]) > 0:
             front0 = fronts[0]
@@ -1000,8 +1007,8 @@ def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
                     name='Selected Formulation'
                 ))
 
-            # Add shaded optimal region
-            fig.add_hrect(y0=0, y1=EFRF_MAX, line_width=0, fillcolor="green", opacity=0.1, annotation_text=f"Safe Zone (EFRF < {EFRF_MAX:.2f})", annotation_position="top left")
+            fig.add_hrect(y0=0, y1=EFRF_MAX, line_width=0, fillcolor="green", opacity=0.1, 
+                          annotation_text=f"Safe Zone (EFRF < {EFRF_MAX:.2f})", annotation_position="top left")
             fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='red', annotation_text=f'EFRF Threshold: {EFRF_MAX:.2f}')
             
             fig.update_layout(
@@ -1013,7 +1020,6 @@ def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
                 legend=dict(x=0.02, y=0.98, bgcolor='rgba(255,255,255,0.8)')
             )
             
-            # Add annotation for optimal point
             if feasible_indices:
                 best_idx = np.argmax([pareto_api[i] for i in feasible_indices])
                 best_idx = feasible_indices[best_idx]
@@ -1057,7 +1063,8 @@ def plot_sensitivity_plotly(inputs, model, scaler, y_scaler):
             text=[f"{v:.4f}" for v in sorted_values],
             textposition='outside'
         ))
-        fig.add_vline(x=np.mean(sensitivities), line_dash='dash', line_color='red', annotation_text=f'Avg: {np.mean(sensitivities):.4f}')
+        fig.add_vline(x=np.mean(sensitivities), line_dash='dash', line_color='red', 
+                      annotation_text=f'Avg: {np.mean(sensitivities):.4f}')
         fig.update_layout(
             title='Sensitivity Analysis (EFRF)',
             xaxis_title='Sensitivity (ΔEFRF)',
@@ -1069,7 +1076,6 @@ def plot_sensitivity_plotly(inputs, model, scaler, y_scaler):
         return None
 
 def train_and_compare(X_train, X_test, y_train, y_test):
-    """Model comparison with proper train/test split."""
     models = {}
     models['MLP'] = MLPRegressor(hidden_layer_sizes=(64, 64, 64), max_iter=1000, random_state=42)
     models['Random Forest'] = RandomForestRegressor(n_estimators=100, random_state=42)
@@ -1090,18 +1096,18 @@ def train_and_compare(X_train, X_test, y_train, y_test):
     return pd.DataFrame(results)
 
 # ================================================================
-# 10. STREAMLIT UI (With Tabs and One-Click PDF)
+# 10. STREAMLIT UI
 # ================================================================
 
-st.set_page_config(page_title="PINN Framework v27", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Framework v28", page_icon="🧬", layout="wide")
 clamp_session_state()
 
-# --- HERO SECTION (Updated with Postgraduate College) ---
+# --- HERO SECTION ---
 st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); 
             padding: 2rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
     <h1 style="color: #ffffff; font-size: 2.5rem; margin: 0;">
-        🧬 Hybrid AI Framework v27.0
+        🧬 Hybrid AI Framework v28.0
     </h1>
     <p style="color: #a8b2d1; font-size: 1.2rem; margin: 0.5rem 0 0 0;">
         Physics-Informed Neural Network · Multi-Objective Optimization
@@ -1127,15 +1133,11 @@ with st.sidebar:
     
     **Multi-Task PINN:**
     - 5 outputs (D, σt, ER, k, A)
-    - k and A learned directly
     - Adam → LBFGS hybrid
-    - Feature engineering
-    - Output normalization
     - **NSGA-II:** pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS}
     - **Binder max:** {BINDER_MAX:.1f}%
-    - **Physics weight:** {PHYSICS_WEIGHT_INIT:.1f}
     """)
-    st.info("🔬 **v27.0** — Stable, Fast, and Fully Annotated")
+    st.info("🔬 **v28.0** — Enhanced Comparison & PDF Report")
 
 # --- LOAD MODEL ---
 with st.spinner("🔄 Training Multi-Task PINN..."):
@@ -1144,8 +1146,6 @@ st.success("✅ Multi-Task True PINN trained successfully")
 
 # --- EXPERIMENTS ---
 st.markdown("### 🧪 Quick Experiments")
-st.caption("Click any button to auto-set parameters")
-
 exp_cols = st.columns(4)
 experiments = {
     "Baseline (Stable)": {'api': 90.5, 'binder': 2.7, 'pvpp': 3.0, 'mgst': 0.20, 'mcc': 5.0, 'pressure': 230, 'speed': 12, 'granule': 125},
@@ -1175,7 +1175,6 @@ with col_left:
         mgst = st.slider("🧴 Mg-St (%)", 0.01, 1.2, get_safe_value('mgst'), 0.01, key="mgst")
         mcc = st.slider("📦 MCC (%)", 0.0, MCC_MAX, get_safe_value('mcc'), 0.1, key="mcc")
         
-        # Dynamic sum check with warning
         total = api + binder + pvpp + mgst + mcc
         if abs(total - 100) < 0.1:
             st.success(f"✅ Total = {total:.2f}%")
@@ -1283,8 +1282,10 @@ with col_right:
                     st.info("Sensitivity analysis not available")
             
             with tab3:
-                st.markdown("### 📊 Model Comparison (Hold-out Test Set)")
-                # Use a separate test set for fair comparison
+                st.markdown("### 📊 Model Performance Comparison")
+                st.caption("Hold-out test set (20% of data) — R², RMSE, MAE")
+                
+                # Prepare data
                 X_train, X_test, y_train, y_test = train_test_split(
                     df[feature_names].values, df['Tensile_Strength_MPa'].values,
                     test_size=0.2, random_state=42
@@ -1294,36 +1295,95 @@ with col_right:
                 X_train_scaled = scaler.transform(X_train_aug)
                 X_test_scaled = scaler.transform(X_test_aug)
                 
-                # PINN on the same test set
+                # PINN predictions on test set
                 pinn_pred_scaled = model.predict(torch.FloatTensor(X_test_scaled))
                 pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
                 pinn_r2 = r2_score(y_test, pinn_pred)
                 pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
                 pinn_mae = mean_absolute_error(y_test, pinn_pred)
                 
+                # Baseline models
                 comp_df = train_and_compare(X_train_scaled, X_test_scaled, y_train, y_test)
                 pinn_row = pd.DataFrame([{'Model': 'PINN (Proposed)', 'R²': pinn_r2, 'RMSE': pinn_rmse, 'MAE': pinn_mae, 'Physics': '✅ Enforced'}])
                 comp_df = pd.concat([pinn_row, comp_df], ignore_index=True)
-                st.dataframe(comp_df.style.highlight_max(subset=['R²'], color='lightgreen'), use_container_width=True, hide_index=True)
+                
+                # --- Colored Diagrams ---
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # R² Bar Chart (Colored)
+                    colors_r2 = ['#2ecc71' if m == 'PINN (Proposed)' else '#3498db' for m in comp_df['Model']]
+                    fig_r2 = go.Figure(data=[
+                        go.Bar(
+                            x=comp_df['Model'], 
+                            y=comp_df['R²'],
+                            marker_color=colors_r2,
+                            text=[f"{v:.4f}" for v in comp_df['R²']],
+                            textposition='outside'
+                        )
+                    ])
+                    fig_r2.update_layout(
+                        title='<b>R² Score Comparison</b>',
+                        yaxis=dict(title='R² Score', range=[0, 1.05]),
+                        height=350,
+                        showlegend=False
+                    )
+                    st.plotly_chart(fig_r2, use_container_width=True)
+                
+                with col2:
+                    # RMSE Bar Chart (Colored)
+                    colors_rmse = ['#e74c3c' if m == 'PINN (Proposed)' else '#95a5a6' for m in comp_df['Model']]
+                    fig_rmse = go.Figure(data=[
+                        go.Bar(
+                            x=comp_df['Model'], 
+                            y=comp_df['RMSE'],
+                            marker_color=colors_rmse,
+                            text=[f"{v:.4f}" for v in comp_df['RMSE']],
+                            textposition='outside'
+                        )
+                    ])
+                    fig_rmse.update_layout(
+                        title='<b>RMSE Comparison</b>',
+                        yaxis=dict(title='RMSE (MPa)'),
+                        height=350,
+                        showlegend=False
+                    )
+                    st.plotly_chart(fig_rmse, use_container_width=True)
+                
+                # --- Comparison Table (Stylized) ---
+                st.dataframe(
+                    comp_df.style.highlight_max(subset=['R²'], color='lightgreen')
+                              .highlight_min(subset=['RMSE', 'MAE'], color='lightcoral'),
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                # Store comparison for PDF
+                comp_df_for_pdf = comp_df.copy()
             
             with tab4:
-                st.markdown("### 📄 Report")
-                # One-click PDF download
+                st.markdown("### 📄 Comprehensive Report (PDF)")
+                st.caption("Download a complete report with formulation details, predictions, and model comparison.")
+                
                 status = "PASS" if (tensile >= TENSILE_MIN and efrf < EFRF_MAX) else "FAIL"
                 timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                pdf_data = generate_pdf_report(
+                
+                # Generate PDF with comparison data
+                pdf_data = generate_full_pdf_report(
                     api, mcc, pvpp, mgst, binder, pressure, speed, granule,
-                    density, tensile, er, efrf, status, timestamp
+                    density, tensile, er, efrf, status, timestamp,
+                    model_comparison_df=comp_df
                 )
+                
                 st.download_button(
-                    label="📥 Download Formulation Report (PDF)",
+                    label="📥 Download Full Report (PDF)",
                     data=pdf_data,
                     file_name=f"formulation_report_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
                     mime="application/pdf",
                     use_container_width=True
                 )
-                st.caption("✅ One-click download — no extra steps")
+                st.success("✅ One-click download — includes formulation, predictions, and model comparison.")
 
 st.markdown("---")
-st.caption(f"🔬 **Multi-Task True PINN — v27.0 (Stable & Fast)**")
+st.caption(f"🔬 **Multi-Task True PINN — v28.0 (Enhanced Comparison & PDF)**")
 st.caption(f"📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Postgraduate College, Sudan")
