@@ -8,3 +8,4 @@ scikit-learn>=1.3.0
 scipy>=1.10.0
 torch>=2.2.0
 fpdf2>=2.7.8
+# xgboost is optional; if installed, it will be used in model comparison
