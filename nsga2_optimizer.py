@@ -7,8 +7,6 @@ from pymoo.operators.crossover.sbx import SBX
 from pymoo.operators.mutation.pm import PM
 from pymoo.optimize import minimize
 from pymoo.termination import get_termination
-from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
-
 from pinn_model import FEATURE_NAMES, TENSILE_MIN, EFRF_MAX, MCC_MAX, BINDER_MIN, BINDER_MAX
 
 BOUNDS = np.array([
@@ -35,7 +33,6 @@ class TabletOptimizationProblem(Problem):
 
     def repair(self, X):
         Xr = X.copy()
-
         Xr[:, 0] = np.clip(Xr[:, 0], 85, 95)
         Xr[:, 1] = np.clip(Xr[:, 1], 0, MCC_MAX)
         Xr[:, 2] = np.clip(Xr[:, 2], 0.5, 6.0)
@@ -101,9 +98,8 @@ def run_nsga2(trainer, pop_size=100, n_gen=80, seed=42):
         save_history=False
     )
 
-    X_opt = res.X
+    X_opt = problem.repair(res.X)
     F_opt = res.F
-    X_opt = problem.repair(X_opt)
 
     pred = trainer.predict(X_opt)
     efrf = pred[:, 2] / (pred[:, 1] + 1e-8)
@@ -115,7 +111,10 @@ def run_nsga2(trainer, pop_size=100, n_gen=80, seed=42):
     opt_df["Pred_Tensile"] = pred[:, 1]
     opt_df["Pred_ER"] = pred[:, 2]
     opt_df["Pred_EFRF"] = efrf
-    opt_df["Feasible"] = (opt_df["Pred_Tensile"] >= TENSILE_MIN) & (opt_df["Pred_EFRF"] <= EFRF_MAX)
+    opt_df["Feasible"] = (
+        (opt_df["Pred_Tensile"] >= TENSILE_MIN) &
+        (opt_df["Pred_EFRF"] <= EFRF_MAX)
+    )
 
     feasible_df = opt_df[opt_df["Feasible"]].copy()
     if len(feasible_df) > 0:
