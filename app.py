@@ -3,8 +3,8 @@ True Physics-Informed Neural Network (PINN) - Complete Professional Framework
 Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
-Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 30.0 (Balanced Physics - R² Recovery)
+Khartoum , Sudan
+Version: 30.0 
 """
 
 import streamlit as st
