@@ -1,10 +1,10 @@
 """
-Physics-Informed Neural Network (PINN) - Separated Output Heads
+Physics-Informed Neural Network (PINN) - Diagnostic Release
 Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 35.0 (Separated k, A from primary outputs)
+Version: 36.0 (Loss Tracking & Physics Compatibility Test)
 """
 
 import streamlit as st
@@ -41,7 +41,8 @@ NSGA_GENERATIONS = 80
 BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
-PHYSICS_WEIGHT = 0.0001     # Very light physics
+# --- Diagnostic: can be set to 0.0 to test PINN without physics ---
+PHYSICS_WEIGHT = 0.0001     # Set to 0.0 to disable physics
 DATA_WEIGHT = 1.0
 N_SAMPLES = 3000
 PATIENCE = 150
@@ -140,14 +141,13 @@ def add_interaction_features(X_raw):
     ], axis=1)
 
 # ================================================================
-# 4. PINN MODEL WITH SEPARATED HEADS (v35)
+# 4. PINN MODEL (DIAGNOSTIC VERSION)
 # ================================================================
 
 class PINNSeparatedHeads(nn.Module):
     def __init__(self, input_dim=13):
         super(PINNSeparatedHeads, self).__init__()
         
-        # Shared backbone
         self.backbone = nn.Sequential(
             nn.Linear(input_dim, 128),
             nn.BatchNorm1d(128),
@@ -163,12 +163,9 @@ class PINNSeparatedHeads(nn.Module):
             nn.Dropout(0.05),
         )
         
-        # Separate heads for primary outputs (D, σt, ER)
         self.head_density = nn.Linear(64, 1)
         self.head_tensile = nn.Linear(64, 1)
         self.head_er = nn.Linear(64, 1)
-        
-        # Separate heads for latent physics parameters (k, A)
         self.head_k = nn.Linear(64, 1)
         self.head_A = nn.Linear(64, 1)
         
@@ -176,20 +173,14 @@ class PINNSeparatedHeads(nn.Module):
 
     def forward(self, X):
         features = self.backbone(X)
-        
-        # Primary outputs (with physical activation functions)
         density = torch.sigmoid(self.head_density(features))
         tensile = torch.nn.functional.softplus(self.head_tensile(features))
         er = torch.nn.functional.softplus(self.head_er(features))
-        
-        # Latent physics parameters (k must be positive, A can be any)
         k = torch.nn.functional.softplus(self.head_k(features))
         A = self.head_A(features)
-        
         return density, tensile, er, k, A
 
     def predict_primary(self, X_scaled):
-        """Return only D, tensile, ER for evaluation."""
         self.eval()
         with torch.no_grad():
             if not isinstance(X_scaled, torch.Tensor):
@@ -207,70 +198,86 @@ class PINNSeparatedHeads(nn.Module):
         pressure_real = X_raw[:, 5]
         mcc_real = X_raw[:, 1]
         
-        # Forward pass
         density_pred, tensile_pred, er_pred, k_pred, A_pred = self.forward(X_scaled)
         
-        # Data loss: only on primary outputs (D, σt, ER)
+        # Data loss: only on primary outputs
         data_loss = nn.MSELoss()(torch.cat([density_pred, tensile_pred, er_pred], dim=1), y_true)
         
-        # Physics loss using k and A (Heckel equation, EFRF, monotonicity, etc.)
-        D_clamped = torch.clamp(density_pred, 0.01, 0.99)
-        heckel_pred = torch.log(1.0 / (1.0 - D_clamped))
-        heckel_target = k_pred * pressure_real + A_pred
-        heckel_loss = torch.mean((heckel_pred - heckel_target) ** 2)
-        
-        efrf_pred = er_pred / (tensile_pred + 1e-8)
-        efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
-        
-        mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
-        density_penalty = torch.mean(torch.relu(density_pred - DENSITY_MAX) ** 2)
-        
-        if compute_grad:
-            if not X_scaled.requires_grad:
-                X_scaled.requires_grad_(True)
-            # Compute gradient of density w.r.t. pressure for monotonicity
-            density_grad, _, _, _, _ = self.forward(X_scaled)
-            grad_density = torch.autograd.grad(
-                outputs=density_grad,
-                inputs=X_scaled,
-                grad_outputs=torch.ones_like(density_grad),
-                create_graph=True, retain_graph=True
-            )[0]
-            grad_pressure = grad_density[:, 5]
-            monotonic_loss = torch.mean(torch.relu(-grad_pressure) ** 2)
+        # Physics loss components (only if w_physics > 0)
+        if w_physics > 0:
+            D_clamped = torch.clamp(density_pred, 0.01, 0.99)
+            heckel_pred = torch.log(1.0 / (1.0 - D_clamped))
+            heckel_target = k_pred * pressure_real + A_pred
+            heckel_loss = torch.mean((heckel_pred - heckel_target) ** 2)
+            
+            efrf_pred = er_pred / (tensile_pred + 1e-8)
+            efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
+            
+            mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
+            density_penalty = torch.mean(torch.relu(density_pred - DENSITY_MAX) ** 2)
+            
+            if compute_grad:
+                if not X_scaled.requires_grad:
+                    X_scaled.requires_grad_(True)
+                density_grad, _, _, _, _ = self.forward(X_scaled)
+                grad_density = torch.autograd.grad(
+                    outputs=density_grad,
+                    inputs=X_scaled,
+                    grad_outputs=torch.ones_like(density_grad),
+                    create_graph=True, retain_graph=True
+                )[0]
+                grad_pressure = grad_density[:, 5]
+                monotonic_loss = torch.mean(torch.relu(-grad_pressure) ** 2)
+            else:
+                monotonic_loss = torch.tensor(0.0, device=X_scaled.device)
+            
+            mask_low = (pressure_real < 120).float()
+            mask_high = (pressure_real > 230).float()
+            boundary_loss = (
+                torch.mean(mask_low * torch.relu(0.5 - density_pred) ** 2) +
+                torch.mean(mask_high * torch.relu(density_pred - 0.98) ** 2)
+            )
+            
+            k_reg = torch.mean(torch.relu(k_pred - 0.1) ** 2) + torch.mean(torch.relu(0.005 - k_pred) ** 2)
+            A_reg = torch.mean(torch.relu(A_pred - 2.0) ** 2) + torch.mean(torch.relu(0.5 - A_pred) ** 2)
+            
+            physics_loss = heckel_loss + efrf_loss + monotonic_loss + boundary_loss
+            total_loss = (
+                w_data * data_loss +
+                w_physics * physics_loss +
+                w_mcc * mcc_loss +
+                w_density * density_penalty +
+                0.01 * k_reg + 0.01 * A_reg
+            )
+            
+            loss_dict = {
+                'data_loss': data_loss.item(),
+                'heckel_loss': heckel_loss.item(),
+                'efrf_loss': efrf_loss.item(),
+                'monotonic_loss': monotonic_loss.item(),
+                'boundary_loss': boundary_loss.item(),
+                'physics_loss': physics_loss.item(),
+                'total_loss': total_loss.item(),
+                'w_physics': w_physics
+            }
         else:
-            monotonic_loss = torch.tensor(0.0, device=X_scaled.device)
-        
-        mask_low = (pressure_real < 120).float()
-        mask_high = (pressure_real > 230).float()
-        boundary_loss = (
-            torch.mean(mask_low * torch.relu(0.5 - density_pred) ** 2) +
-            torch.mean(mask_high * torch.relu(density_pred - 0.98) ** 2)
-        )
-        
-        # Regularization for k and A to keep them physically plausible
-        k_reg = torch.mean(torch.relu(k_pred - 0.1) ** 2) + torch.mean(torch.relu(0.005 - k_pred) ** 2)
-        A_reg = torch.mean(torch.relu(A_pred - 2.0) ** 2) + torch.mean(torch.relu(0.5 - A_pred) ** 2)
-        
-        physics_loss = heckel_loss + efrf_loss + monotonic_loss + boundary_loss
-        total_loss = (
-            w_data * data_loss +
-            w_physics * physics_loss +
-            w_mcc * mcc_loss +
-            w_density * density_penalty +
-            0.01 * k_reg + 0.01 * A_reg
-        )
-        
-        loss_dict = {
-            'data_loss': data_loss.item(),
-            'physics_loss': physics_loss.item(),
-            'total_loss': total_loss.item()
-        }
+            # Physics disabled
+            total_loss = w_data * data_loss
+            loss_dict = {
+                'data_loss': data_loss.item(),
+                'heckel_loss': 0.0,
+                'efrf_loss': 0.0,
+                'monotonic_loss': 0.0,
+                'boundary_loss': 0.0,
+                'physics_loss': 0.0,
+                'total_loss': total_loss.item(),
+                'w_physics': 0.0
+            }
         
         if record_loss:
             self.loss_history['train'].append(total_loss.item())
             self.loss_history['data'].append(data_loss.item())
-            self.loss_history['physics'].append(physics_loss.item())
+            self.loss_history['physics'].append(loss_dict['physics_loss'])
         
         return total_loss, loss_dict
 
@@ -343,7 +350,45 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# 6. PDF GENERATION
+# 6. HECKEL COMPATIBILITY TEST
+# ================================================================
+
+def test_heckel_compatibility(df, tol=0.05):
+    """Check what percentage of data satisfies Heckel equation within tolerance."""
+    # Estimate k and A from data
+    X = df[['API_%', 'Binder_%', 'Speed_rpm', 'MgSt_%']].values
+    pressure = df['Pressure_MPa'].values
+    density = df['Density'].values
+    
+    # Approximate k and A using simple linear regression on Heckel
+    # ln(1/(1-D)) = k*P + A
+    heckel_y = np.log(1.0 / (1.0 - density + 1e-8))
+    heckel_X = np.column_stack([pressure, np.ones_like(pressure)])
+    
+    # Solve for k and A using least squares (only for positive pressures)
+    try:
+        k_est, A_est = np.linalg.lstsq(heckel_X, heckel_y, rcond=None)[0]
+    except:
+        k_est, A_est = 0.035, 1.2
+    
+    # Compute predicted Heckel
+    heckel_pred = k_est * pressure + A_est
+    heckel_actual = heckel_y
+    
+    # Compute relative error
+    rel_error = np.abs((heckel_pred - heckel_actual) / (heckel_actual + 1e-8))
+    compatible = rel_error < tol
+    
+    return {
+        'k_estimated': k_est,
+        'A_estimated': A_est,
+        'compatible_fraction': np.mean(compatible),
+        'mean_rel_error': np.mean(rel_error),
+        'std_rel_error': np.std(rel_error)
+    }
+
+# ================================================================
+# 7. PDF GENERATION
 # ================================================================
 
 def sanitize_text(text):
@@ -356,14 +401,15 @@ def sanitize_text(text):
 @st.cache_data
 def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
                              density, tensile, er, efrf, status, timestamp,
-                             model_comparison_df=None, loss_history=None):
+                             model_comparison_df=None, loss_history=None, loss_dict=None,
+                             heckel_compat=None):
     pdf = FPDF()
     pdf.add_page()
     
     pdf.set_font("Arial", "B", 18)
     pdf.cell(0, 10, sanitize_text("Formulation Optimization Report"), ln=True, align="C")
     pdf.set_font("Arial", "I", 11)
-    pdf.cell(0, 6, sanitize_text("Hybrid AI Framework (PINN - Separated Heads)"), ln=True, align="C")
+    pdf.cell(0, 6, sanitize_text("Hybrid AI Framework (PINN - v36 Diagnostic)"), ln=True, align="C")
     pdf.set_font("Arial", "", 10)
     pdf.cell(0, 6, f"Date: {timestamp}", ln=True, align="C")
     pdf.ln(4)
@@ -444,9 +490,50 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     
     pdf.ln(4)
     
+    # --- Loss Components (NEW) ---
+    if loss_dict:
+        pdf.set_font("Arial", "B", 13)
+        pdf.set_fill_color(230, 230, 230)
+        pdf.cell(0, 8, sanitize_text("4. Loss Components (Final)"), ln=True, fill=True)
+        pdf.set_font("Arial", "", 10)
+        
+        items = [
+            ("Data Loss", f"{loss_dict.get('data_loss', 0):.6f}"),
+            ("Heckel Loss", f"{loss_dict.get('heckel_loss', 0):.6f}"),
+            ("EFRF Loss", f"{loss_dict.get('efrf_loss', 0):.6f}"),
+            ("Monotonicity Loss", f"{loss_dict.get('monotonic_loss', 0):.6f}"),
+            ("Physics Loss", f"{loss_dict.get('physics_loss', 0):.6f}"),
+            ("Total Loss", f"{loss_dict.get('total_loss', 0):.6f}"),
+            ("Physics Weight", f"{loss_dict.get('w_physics', 0):.4f}")
+        ]
+        
+        pdf.set_font("Arial", "B", 10)
+        pdf.cell(60, 6, sanitize_text("Component"), 1, 0, "C")
+        pdf.cell(60, 6, sanitize_text("Value"), 1, 1, "C")
+        
+        pdf.set_font("Arial", "", 10)
+        for label, value in items:
+            pdf.cell(60, 6, sanitize_text(label), 1, 0, "L")
+            pdf.cell(60, 6, sanitize_text(value), 1, 1, "C")
+        pdf.ln(4)
+    
+    # --- Heckel Compatibility (NEW) ---
+    if heckel_compat:
+        pdf.set_font("Arial", "B", 13)
+        pdf.set_fill_color(230, 230, 230)
+        pdf.cell(0, 8, sanitize_text("5. Heckel Compatibility Test"), ln=True, fill=True)
+        pdf.set_font("Arial", "", 10)
+        
+        pdf.cell(0, 6, f"k (estimated): {heckel_compat['k_estimated']:.4f}", ln=True)
+        pdf.cell(0, 6, f"A (estimated): {heckel_compat['A_estimated']:.4f}", ln=True)
+        pdf.cell(0, 6, f"Compatible fraction (tolerance 5%): {heckel_compat['compatible_fraction']:.2%}", ln=True)
+        pdf.cell(0, 6, f"Mean relative error: {heckel_compat['mean_rel_error']:.2%}", ln=True)
+        pdf.cell(0, 6, f"Std relative error: {heckel_compat['std_rel_error']:.2%}", ln=True)
+        pdf.ln(4)
+    
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
-    pdf.cell(0, 8, sanitize_text("4. Overall Status"), ln=True, fill=True)
+    pdf.cell(0, 8, sanitize_text("6. Overall Status"), ln=True, fill=True)
     pdf.set_font("Arial", "B", 14)
     if status == "PASS":
         pdf.set_text_color(0, 128, 0)
@@ -460,7 +547,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     if model_comparison_df is not None and not model_comparison_df.empty:
         pdf.set_font("Arial", "B", 13)
         pdf.set_fill_color(230, 230, 230)
-        pdf.cell(0, 8, sanitize_text("5. Model Performance Comparison"), ln=True, fill=True)
+        pdf.cell(0, 8, sanitize_text("7. Model Performance Comparison"), ln=True, fill=True)
         pdf.set_font("Arial", "", 10)
         
         pdf.set_font("Arial", "B", 10)
@@ -482,7 +569,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     if loss_history and len(loss_history['train']) > 0:
         pdf.set_font("Arial", "B", 13)
         pdf.set_fill_color(230, 230, 230)
-        pdf.cell(0, 8, sanitize_text("6. Training Loss Summary"), ln=True, fill=True)
+        pdf.cell(0, 8, sanitize_text("8. Training Loss Summary"), ln=True, fill=True)
         pdf.set_font("Arial", "", 10)
         pdf.cell(0, 6, f"Final Training Loss: {loss_history['train'][-1]:.6f}", ln=True)
         pdf.cell(0, 6, f"Final Data Loss: {loss_history['data'][-1]:.6f}", ln=True)
@@ -491,7 +578,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
-    pdf.cell(0, 8, sanitize_text("7. Recommendations"), ln=True, fill=True)
+    pdf.cell(0, 8, sanitize_text("9. Recommendations"), ln=True, fill=True)
     pdf.set_font("Arial", "", 10)
     
     if status == "PASS":
@@ -514,7 +601,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
-    pdf.cell(0, 8, sanitize_text("8. Contact Information"), ln=True, fill=True)
+    pdf.cell(0, 8, sanitize_text("10. Contact Information"), ln=True, fill=True)
     pdf.set_font("Arial", "", 11)
     pdf.cell(0, 8, "Chem. Eng. Babuker A. Abdalla, PhD Researcher", ln=True)
     pdf.cell(0, 7, "Email: babuker@protonmail.com", ln=True)
@@ -524,7 +611,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.ln(3)
     pdf.set_y(270)
     pdf.set_font("Arial", "I", 8)
-    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v35.0", ln=True, align="C")
+    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v36.0 (Diagnostic)", ln=True, align="C")
     
     pdf_bytes = pdf.output(dest="S")
     if isinstance(pdf_bytes, bytearray):
@@ -535,7 +622,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
         return str(pdf_bytes).encode('latin1')
 
 # ================================================================
-# 7. NSGA-II (UPDATED FOR SEPARATED HEADS)
+# 8. NSGA-II
 # ================================================================
 
 class NSGAII:
@@ -597,11 +684,11 @@ class NSGAII:
                 X_tensor = torch.FloatTensor(inputs_scaled)
                 
                 with torch.no_grad():
-                    pred_scaled = self.model.predict_primary(X_tensor)[0]  # D, tensile, ER (scaled)
-                    pred = self.y_scaler.inverse_transform([pred_scaled])[0]  # Actual values
+                    pred_scaled = self.model.predict_primary(X_tensor)[0]
+                    pred = self.y_scaler.inverse_transform([pred_scaled])[0]
                 
-                tensile = float(pred[1])  # Tensile strength in MPa
-                er = float(pred[2])       # Elastic recovery in %
+                tensile = float(pred[1])
+                er = float(pred[2])
                 
                 if tensile < 0.01:
                     tensile = 0.01
@@ -813,7 +900,7 @@ class NSGAII:
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 8. TRAIN MODEL (PINN WITH SEPARATED HEADS)
+# 9. TRAIN MODEL (DIAGNOSTIC)
 # ================================================================
 
 @st.cache_resource
@@ -827,7 +914,6 @@ def load_pinn_model():
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_augmented)
 
-    # Scale only the primary outputs (D, σt, ER)
     y_scaler = StandardScaler()
     y_scaled = y_scaler.fit_transform(y)
 
@@ -857,11 +943,12 @@ def load_pinn_model():
     patience = PATIENCE
     counter = 0
     best_state = None
+    final_loss_dict = {}
 
     progress_bar = st.progress(0)
     max_epochs = 3000
 
-    st.info("🧠 Training PINN with separated heads (k, A latent)...")
+    st.info(f"🧠 Training PINN with physics_weight = {PHYSICS_WEIGHT:.4f}...")
 
     for epoch in range(max_epochs):
         model.train()
@@ -900,6 +987,8 @@ def load_pinn_model():
             best_val_loss = val_loss_value
             counter = 0
             best_state = model.state_dict().copy()
+            # Save final loss dict for reporting
+            final_loss_dict = loss_dict.copy()
         else:
             counter += 1
 
@@ -919,13 +1008,14 @@ def load_pinn_model():
     model.feature_names = feature_names
     model.scaler = scaler
     model.y_scaler = y_scaler
+    model.final_loss_dict = final_loss_dict
 
-    torch.save(model.state_dict(), 'pinn_separated_checkpoint.pt')
+    torch.save(model.state_dict(), 'pinn_diagnostic_checkpoint.pt')
 
-    return model, scaler, y_scaler, feature_names, df, model.loss_history
+    return model, scaler, y_scaler, feature_names, df, model.loss_history, final_loss_dict
 
 # ================================================================
-# 9. PREDICTION & DIAGNOSTICS
+# 10. PREDICTION & PLOTS
 # ================================================================
 
 def predict_pinn(model, scaler, y_scaler, inputs, verbose=False):
@@ -935,7 +1025,7 @@ def predict_pinn(model, scaler, y_scaler, inputs, verbose=False):
         X_tensor = torch.FloatTensor(inputs_scaled)
         
         with torch.no_grad():
-            pred_scaled = model.predict_primary(X_tensor)[0]  # D, tensile, ER (scaled)
+            pred_scaled = model.predict_primary(X_tensor)[0]
         
         pred_original = y_scaler.inverse_transform([pred_scaled])[0]
         density, tensile, er = pred_original[0], pred_original[1], pred_original[2]
@@ -996,7 +1086,7 @@ def plot_training_curves(loss_history):
         ))
     
     fig.update_layout(
-        title='Training Curves (PINN - Separated Heads)',
+        title=f'Training Curves (v36 - Physics Weight = {PHYSICS_WEIGHT:.4f})',
         xaxis=dict(title='Epoch'),
         yaxis=dict(title='Loss', type='log'),
         height=400,
@@ -1148,20 +1238,20 @@ def train_and_compare(X_train, X_test, y_train, y_test):
     return pd.DataFrame(results)
 
 # ================================================================
-# 10. STREAMLIT UI
+# 11. STREAMLIT UI
 # ================================================================
 
-st.set_page_config(page_title="PINN Framework v35", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Framework v36", page_icon="🧬", layout="wide")
 clamp_session_state()
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); 
             padding: 2rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
     <h1 style="color: #ffffff; font-size: 2.5rem; margin: 0;">
-        🧬 Hybrid AI Framework v35.0
+        🧬 Hybrid AI Framework v36.0
     </h1>
     <p style="color: #a8b2d1; font-size: 1.2rem; margin: 0.5rem 0 0 0;">
-        PINN · Separated Heads (k, A latent)
+        PINN · Diagnostic Release (Loss Tracking & Compatibility)
     </p>
     <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">
         Nile Valley University · Postgraduate College · Sudan
@@ -1172,21 +1262,51 @@ st.markdown("""
 st.markdown("---")
 
 with st.sidebar:
-    st.markdown("### 📚 Model Configuration")
+    st.markdown("### 📚 Diagnostic Configuration")
     st.markdown(f"""
-    - ✅ **PINN with Physics**
-    - ✅ **Separated Heads:** D, σt, ER (primary) + k, A (latent)
-    - ✅ **Data Loss & R² only on primary**
-    - ✅ **Physics Loss uses k, A**
+    - ✅ **PINN with Separated Heads**
+    - ✅ **Physics Weight:** {PHYSICS_WEIGHT:.4f}
     - ✅ **Dataset size:** {N_SAMPLES}
-    - ✅ **Physics weight:** {PHYSICS_WEIGHT:.4f}
+    - ✅ **Loss Tracking:** ✅ Enabled
+    - ✅ **Heckel Compatibility Test:** ✅ Enabled
     """)
-    st.info("🔬 **v35.0** — k, A isolated from evaluation")
+    st.info("🔬 **v36.0** — The Diagnostic Release")
+    if PHYSICS_WEIGHT == 0.0:
+        st.success("⚠️ **Physics is DISABLED** (w_physics = 0.0)")
 
-with st.spinner("🔄 Training PINN (separated heads)..."):
-    model, scaler, y_scaler, feature_names, df, loss_history = load_pinn_model()
+with st.spinner("🔄 Training PINN (diagnostic mode)..."):
+    model, scaler, y_scaler, feature_names, df, loss_history, final_loss_dict = load_pinn_model()
 st.success("✅ PINN trained successfully")
 
+# --- Display Loss Components ---
+st.markdown("### 📊 Loss Components (Final)")
+loss_df = pd.DataFrame([
+    {"Component": "Data Loss", "Value": f"{final_loss_dict.get('data_loss', 0):.6f}"},
+    {"Component": "Heckel Loss", "Value": f"{final_loss_dict.get('heckel_loss', 0):.6f}"},
+    {"Component": "EFRF Loss", "Value": f"{final_loss_dict.get('efrf_loss', 0):.6f}"},
+    {"Component": "Monotonicity Loss", "Value": f"{final_loss_dict.get('monotonic_loss', 0):.6f}"},
+    {"Component": "Physics Loss", "Value": f"{final_loss_dict.get('physics_loss', 0):.6f}"},
+    {"Component": "Total Loss", "Value": f"{final_loss_dict.get('total_loss', 0):.6f}"},
+    {"Component": "Physics Weight", "Value": f"{final_loss_dict.get('w_physics', 0):.4f}"}
+])
+st.dataframe(loss_df, hide_index=True, use_container_width=True)
+st.caption("If Heckel Loss >> Data Loss, physics dominates despite low weight.")
+
+st.markdown("---")
+
+# --- Heckel Compatibility Test ---
+st.markdown("### 🔬 Heckel Compatibility Test")
+compat = test_heckel_compatibility(df, tol=0.05)
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("k (estimated)", f"{compat['k_estimated']:.4f}")
+col2.metric("A (estimated)", f"{compat['A_estimated']:.4f}")
+col3.metric("Compatible (5%)", f"{compat['compatible_fraction']:.1%}")
+col4.metric("Mean Relative Error", f"{compat['mean_rel_error']:.1%}")
+st.caption("If compatible fraction < 50%, data does NOT follow Heckel physics.")
+
+st.markdown("---")
+
+# --- Quick Experiments ---
 st.markdown("### 🧪 Quick Experiments")
 exp_cols = st.columns(4)
 experiments = {
@@ -1324,9 +1444,8 @@ with col_right:
                 X_train_scaled = scaler.transform(X_train_aug)
                 X_test_scaled = scaler.transform(X_test_aug)
                 
-                # PINN predictions with separated heads
                 pinn_pred_scaled = model.predict_primary(torch.FloatTensor(X_test_scaled))
-                pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]  # Tensile only
+                pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
                 
                 pinn_r2 = r2_score(y_test, pinn_pred)
                 pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
@@ -1341,14 +1460,14 @@ with col_right:
                     st.dataframe(diag_df, use_container_width=True)
                     st.caption("If errors are large or random, pipeline has an issue.")
                 
-                st.metric("PINN R²", f"{pinn_r2:.4f}", delta="Target > 0.90")
+                st.metric(f"PINN R² (physics_weight={PHYSICS_WEIGHT:.4f})", f"{pinn_r2:.4f}", delta="Target > 0.90")
                 col_m1, col_m2 = st.columns(2)
                 col_m1.metric("PINN RMSE", f"{pinn_rmse:.4f} MPa")
                 col_m2.metric("PINN MAE", f"{pinn_mae:.4f} MPa")
                 st.divider()
                 
                 comp_df = train_and_compare(X_train_scaled, X_test_scaled, y_train, y_test)
-                pinn_row = pd.DataFrame([{'Model': 'PINN (Proposed)', 'R²': pinn_r2, 'RMSE': pinn_rmse, 'MAE': pinn_mae, 'Physics': '✅ Enforced'}])
+                pinn_row = pd.DataFrame([{'Model': 'PINN (Proposed)', 'R²': pinn_r2, 'RMSE': pinn_rmse, 'MAE': pinn_mae, 'Physics': f'✅ {PHYSICS_WEIGHT:.4f}'}])
                 comp_df = pd.concat([pinn_row, comp_df], ignore_index=True)
                 
                 col1, col2 = st.columns(2)
@@ -1426,18 +1545,20 @@ with col_right:
                     api, mcc, pvpp, mgst, binder, pressure, speed, granule,
                     density, tensile, er, efrf, status, timestamp,
                     model_comparison_df=comp_df,
-                    loss_history=loss_history
+                    loss_history=loss_history,
+                    loss_dict=final_loss_dict,
+                    heckel_compat=compat
                 )
                 
                 st.download_button(
                     label="📥 Download Full Report (PDF)",
                     data=pdf_data,
-                    file_name=f"formulation_report_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                    file_name=f"formulation_report_v36_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
                     mime="application/pdf",
                     use_container_width=True
                 )
-                st.success("✅ One-click download — includes formulation, predictions, training curves, and model comparison.")
+                st.success("✅ One-click download — includes formulation, predictions, loss components, and Heckel compatibility.")
 
 st.markdown("---")
-st.caption(f"🔬 **PINN — v35.0 (Separated Heads)**")
+st.caption(f"🔬 **PINN — v36.0 (Diagnostic Release)**")
 st.caption(f"📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Postgraduate College, Sudan")
