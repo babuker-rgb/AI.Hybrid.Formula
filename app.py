@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 24.3 (Robust Session State Fix)
+Version: 24.3 (Production-Ready)
 """
 
 import streamlit as st
