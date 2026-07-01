@@ -28,7 +28,17 @@ import plotly.express as px
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. SAFE IMPORTS WITH FALLBACKS
+# 0. GLOBAL CONSTANTS (Unified Constraints)
+# ================================================================
+
+TENSILE_MIN = 1.90          # MPa
+EFRF_MAX = 0.40             # dimensionless
+MCC_MAX = 8.0               # %
+DENSITY_MAX = 0.99          # dimensionless
+EFRF_TARGET = EFRF_MAX      # used for physics loss
+
+# ================================================================
+# 1. SAFE IMPORTS WITH FALLBACKS
 # ================================================================
 
 try:
@@ -38,7 +48,7 @@ except ImportError:
     XGB_AVAILABLE = False
 
 # ================================================================
-# 1. SESSION STATE MANAGEMENT (ROBUST)
+# 2. SESSION STATE MANAGEMENT (ROBUST)
 # ================================================================
 
 DEFAULTS = {
@@ -70,8 +80,7 @@ def safe_initialize():
             st.session_state[key] = DEFAULTS[key]
         else:
             try:
-                val = float(st.session_state[key])
-                # If value is not a number, reset to default
+                float(st.session_state[key])
             except (ValueError, TypeError):
                 st.session_state[key] = DEFAULTS[key]
 
@@ -105,7 +114,7 @@ safe_initialize()
 clamp_session_state()
 
 # ================================================================
-# 2. FEATURE ENGINEERING (SAFE)
+# 3. FEATURE ENGINEERING (SAFE)
 # ================================================================
 
 def add_interaction_features(X_raw):
@@ -144,7 +153,7 @@ def add_interaction_features(X_raw):
     ], axis=1)
 
 # ================================================================
-# 3. MULTI-TASK TRUE PINN MODEL
+# 4. MULTI-TASK TRUE PINN MODEL
 # ================================================================
 
 class MultiTaskTruePINN(nn.Module):
@@ -197,8 +206,8 @@ class MultiTaskTruePINN(nn.Module):
                      w_data_init=2.0, w_physics_init=0.2,
                      w_data_final=1.0, w_physics_final=1.0,
                      w_mcc=0.5, w_density=0.5,
-                     efrf_target=0.35,
-                     mcc_max=8.0,
+                     efrf_target=EFRF_TARGET,
+                     mcc_max=MCC_MAX,
                      compute_grad=True):
         pressure_real = X_raw[:, 5]
         mcc_real = X_raw[:, 1]
@@ -226,7 +235,7 @@ class MultiTaskTruePINN(nn.Module):
 
         mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
 
-        density_penalty = torch.mean(torch.relu(density_pred - 0.99) ** 2)
+        density_penalty = torch.mean(torch.relu(density_pred - DENSITY_MAX) ** 2)
 
         if compute_grad:
             if not X_scaled.requires_grad:
@@ -293,7 +302,7 @@ class MultiTaskTruePINN(nn.Module):
 
 
 # ================================================================
-# 4. DATA GENERATION
+# 5. DATA GENERATION
 # ================================================================
 
 def generate_pinn_data(n_samples=600, random_state=42):
@@ -331,28 +340,31 @@ def generate_pinn_data(n_samples=600, random_state=42):
             granule = np.random.normal(125, 20)
             granule = np.clip(granule, 30, 250)
 
-        total_others = api + binder + mgst + pvpp + mcc
-        if total_others > 100:
-            scale = 100 / total_others
+        # Robust normalization to ensure sum = 100% and MCC ≤ 8%
+        total = api + binder + mgst + pvpp + mcc
+        if total > 100:
+            scale = 100 / total
             api *= scale
             binder *= scale
             mgst *= scale
             pvpp *= scale
             mcc *= scale
         else:
-            remainder = 100 - (api + binder + mgst + pvpp)
-            if mcc + remainder <= 8.0:
+            # Add remainder to MCC but cap at 8%
+            remainder = 100 - total
+            if mcc + remainder <= MCC_MAX:
                 mcc += remainder
             else:
-                excess = (mcc + remainder) - 8.0
-                mcc = 8.0
-                api -= excess
+                excess = (mcc + remainder) - MCC_MAX
+                mcc = MCC_MAX
+                api -= excess  # reduce API to maintain 100%
 
+        # Clamp again to enforce bounds
         api = np.clip(api, 85, 95)
         binder = np.clip(binder, 0.5, 4.0)
         mgst = np.clip(mgst, 0.01, 1.2)
         pvpp = np.clip(pvpp, 0.5, 6.0)
-        mcc = np.clip(mcc, 0, 8.0)
+        mcc = np.clip(mcc, 0, MCC_MAX)
 
         X[i] = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
 
@@ -380,7 +392,7 @@ def generate_pinn_data(n_samples=600, random_state=42):
 
 
 # ================================================================
-# 5. PDF GENERATION (NO UNICODE ERRORS)
+# 6. PDF GENERATION (NO UNICODE ERRORS)
 # ================================================================
 
 def sanitize_text(text):
@@ -479,9 +491,9 @@ def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
     
     results = [
         ("Density", f"{density:.3f}"),
-        ("Tensile Strength", f"{tensile:.3f} MPa", ">= 2.0 MPa"),
+        ("Tensile Strength", f"{tensile:.3f} MPa", f">= {TENSILE_MIN:.2f} MPa"),
         ("Elastic Recovery", f"{er:.3f} %"),
-        ("EFRF", f"{efrf:.4f}", "< 0.35")
+        ("EFRF", f"{efrf:.4f}", f"< {EFRF_MAX:.2f}")
     ]
     
     pdf.set_font("Arial", "B", 10)
@@ -576,7 +588,7 @@ def create_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
 
 
 # ================================================================
-# 6. NSGA-II IMPLEMENTATION
+# 7. NSGA-II IMPLEMENTATION
 # ================================================================
 
 class NSGAII:
@@ -618,20 +630,19 @@ class NSGAII:
                     pvpp *= scale
                     mcc *= scale
                 elif used < 100:
-                    # Add remainder to MCC but cap at 8%
                     remainder = 100 - used
-                    if mcc + remainder <= 8.0:
+                    if mcc + remainder <= MCC_MAX:
                         mcc += remainder
                     else:
-                        excess = (mcc + remainder) - 8.0
-                        mcc = 8.0
+                        excess = (mcc + remainder) - MCC_MAX
+                        mcc = MCC_MAX
                         api -= excess
 
                 api = np.clip(api, 85, 95)
                 binder = np.clip(binder, 0.5, 4.0)
                 mgst = np.clip(mgst, 0.01, 1.2)
                 pvpp = np.clip(pvpp, 0.5, 6.0)
-                mcc = np.clip(mcc, 0, 8.0)
+                mcc = np.clip(mcc, 0, MCC_MAX)
 
                 inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
                 inputs_with_features = add_interaction_features(np.array([inputs]))[0]
@@ -651,7 +662,7 @@ class NSGAII:
                     efrf = er / tensile
                     efrf = max(0.0001, min(efrf, 5.0))
                 
-                constraints[i] = (tensile >= 1.99 and efrf < 0.35)
+                constraints[i] = (tensile >= TENSILE_MIN and efrf < EFRF_MAX)
                 objectives[i, 0] = -api
                 objectives[i, 1] = efrf
                 tensile_strengths[i] = tensile
@@ -855,7 +866,7 @@ class NSGAII:
 
 
 # ================================================================
-# 7. TRAIN MODEL
+# 8. TRAIN MODEL
 # ================================================================
 
 @st.cache_resource
@@ -912,7 +923,7 @@ def load_pinn_model():
             w_data_init=2.0, w_physics_init=0.2,
             w_data_final=1.0, w_physics_final=1.0,
             w_mcc=0.5, w_density=0.5,
-            efrf_target=0.35, mcc_max=8.0, compute_grad=True
+            efrf_target=EFRF_TARGET, mcc_max=MCC_MAX, compute_grad=True
         )
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -926,7 +937,7 @@ def load_pinn_model():
                 w_data_init=2.0, w_physics_init=0.2,
                 w_data_final=1.0, w_physics_final=1.0,
                 w_mcc=0.5, w_density=0.5,
-                efrf_target=0.35, mcc_max=8.0, compute_grad=False
+                efrf_target=EFRF_TARGET, mcc_max=MCC_MAX, compute_grad=False
             )
         val_loss_value = val_loss.item()
         scheduler.step(val_loss_value)
@@ -957,7 +968,7 @@ def load_pinn_model():
             w_data_init=1.0, w_physics_init=1.0,
             w_data_final=1.0, w_physics_final=1.0,
             w_mcc=0.5, w_density=0.5,
-            efrf_target=0.35, mcc_max=8.0, compute_grad=True
+            efrf_target=EFRF_TARGET, mcc_max=MCC_MAX, compute_grad=True
         )
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -976,7 +987,7 @@ def load_pinn_model():
                 w_data_init=1.0, w_physics_init=1.0,
                 w_data_final=1.0, w_physics_final=1.0,
                 w_mcc=0.5, w_density=0.5,
-                efrf_target=0.35, mcc_max=8.0, compute_grad=False
+                efrf_target=EFRF_TARGET, mcc_max=MCC_MAX, compute_grad=False
             )
             val_loss_value = val_loss.item()
             if val_loss_value < best_val_loss:
@@ -999,7 +1010,7 @@ def load_pinn_model():
 
 
 # ================================================================
-# 8. PREDICTION
+# 9. PREDICTION
 # ================================================================
 
 def predict_pinn(model, scaler, y_scaler, inputs):
@@ -1023,7 +1034,7 @@ def predict_pinn(model, scaler, y_scaler, inputs):
 
 
 # ================================================================
-# 9. PLOT FUNCTIONS
+# 10. PLOT FUNCTIONS
 # ================================================================
 
 def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
@@ -1078,7 +1089,7 @@ def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
                     name='Your Formulation'
                 ))
 
-            fig.add_hline(y=0.35, line_dash='dash', line_color='red', annotation_text='EFRF=0.35')
+            fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='red', annotation_text=f'EFRF={EFRF_MAX:.2f}')
             fig.update_layout(
                 title='Pareto Front (NSGA-II)',
                 xaxis=dict(title='API Loading (%)', range=[85, 95]),
@@ -1130,7 +1141,7 @@ def plot_sensitivity_plotly(inputs, model, scaler, y_scaler):
 
 
 # ================================================================
-# 10. MODEL COMPARISON (FIXED XGBOOST IMPORT)
+# 11. MODEL COMPARISON
 # ================================================================
 
 def train_and_compare(X_train, X_test, y_train, y_test):
@@ -1164,7 +1175,7 @@ def train_and_compare(X_train, X_test, y_train, y_test):
 
 
 # ================================================================
-# 11. STREAMLIT UI
+# 12. STREAMLIT UI
 # ================================================================
 
 st.set_page_config(page_title="PINN Framework", page_icon="🧬", layout="wide")
@@ -1193,12 +1204,12 @@ st.markdown("---")
 # --- SIDEBAR ---
 with st.sidebar:
     st.markdown("### 📚 Physics Constraints")
-    st.markdown("""
+    st.markdown(f"""
     - ✅ **Heckel:** ln(1/(1-D)) = kP + A
-    - ✅ **EFRF:** ER / σt < 0.35
+    - ✅ **EFRF:** ER / σt < {EFRF_MAX:.2f}
     - ✅ **Monotonicity:** ∂D/∂P > 0
     - ✅ **Boundary:** 0.4 < D < 0.98
-    - ✅ **MCC:** ≤ 8%
+    - ✅ **MCC:** ≤ {MCC_MAX:.1f}%
     - ✅ **Density:** ≤ 1.0
     
     **Multi-Task PINN:**
@@ -1231,7 +1242,6 @@ for i, (name, params) in enumerate(experiments.items()):
         if st.button(f"📌 {name}", key=f"exp_{i}", use_container_width=True):
             for key in params:
                 st.session_state[key] = params[key]
-            # Clamp after setting
             clamp_session_state()
             st.rerun()
 
@@ -1244,12 +1254,11 @@ with col_left:
     st.markdown("### 📊 Formulation Parameters")
     
     with st.container(border=True):
-        # Use get_safe_value to ensure valid defaults
         api = st.slider("🧪 API Loading (%)", 85.0, 95.0, get_safe_value('api'), 0.1, key="api")
         binder = st.slider("🔗 Binder (%)", 0.5, 4.0, get_safe_value('binder'), 0.1, key="binder")
         pvpp = st.slider("💊 PVPP (%)", 0.5, 6.0, get_safe_value('pvpp'), 0.1, key="pvpp")
         mgst = st.slider("🧴 Mg-St (%)", 0.01, 1.2, get_safe_value('mgst'), 0.01, key="mgst")
-        mcc = st.slider("📦 MCC (%)", 0.0, 8.0, get_safe_value('mcc'), 0.1, key="mcc")
+        mcc = st.slider("📦 MCC (%)", 0.0, MCC_MAX, get_safe_value('mcc'), 0.1, key="mcc")
         
         total = api + binder + pvpp + mgst + mcc
         if abs(total - 100) < 0.1:
@@ -1281,24 +1290,24 @@ with col_right:
             # --- KPIs ---
             kpi_cols = st.columns(3)
             kpi_cols[0].metric("Density", f"{density:.3f}", delta="0.99 ideal")
-            kpi_cols[1].metric("Tensile", f"{tensile:.3f} MPa", delta=">= 2.0 PASS" if tensile >= 2.0 else "< 2.0 FAIL")
-            kpi_cols[2].metric("EFRF", f"{efrf:.4f}", delta="< 0.35 PASS" if efrf < 0.35 else ">= 0.35 FAIL")
+            kpi_cols[1].metric("Tensile", f"{tensile:.3f} MPa", delta=f">= {TENSILE_MIN:.2f} PASS" if tensile >= TENSILE_MIN else f"< {TENSILE_MIN:.2f} FAIL")
+            kpi_cols[2].metric("EFRF", f"{efrf:.4f}", delta=f"< {EFRF_MAX:.2f} PASS" if efrf < EFRF_MAX else f">= {EFRF_MAX:.2f} FAIL")
             
             st.markdown("---")
             
             # --- Status ---
-            if tensile >= 2.0 and efrf < 0.35:
-                st.success("✅ Formulation satisfies all constraints!")
-            elif tensile >= 2.0 and efrf < 0.40:
-                st.warning("⚠️ Feasible but EFRF > 0.35")
+            if tensile >= TENSILE_MIN and efrf < EFRF_MAX:
+                st.success(f"✅ Formulation satisfies all constraints (σt ≥ {TENSILE_MIN:.2f}, EFRF < {EFRF_MAX:.2f})")
+            elif tensile >= TENSILE_MIN and efrf < 0.45:
+                st.warning(f"⚠️ EFRF = {efrf:.4f} is above {EFRF_MAX:.2f} but within acceptable range")
             else:
-                st.error("❌ Formulation fails constraints")
+                st.error(f"❌ Formulation fails constraints")
             
             # --- Feasibility ---
             st.markdown("### ✅ Feasibility")
             pass_cols = st.columns(2)
-            pass_cols[0].metric("σt ≥ 2.0 MPa", "✅ PASS" if tensile >= 2.0 else "❌ FAIL")
-            pass_cols[1].metric("EFRF < 0.40", "✅ PASS" if efrf < 0.40 else "❌ FAIL")
+            pass_cols[0].metric(f"σt ≥ {TENSILE_MIN:.2f} MPa", "✅ PASS" if tensile >= TENSILE_MIN else "❌ FAIL")
+            pass_cols[1].metric(f"EFRF < {EFRF_MAX:.2f}", "✅ PASS" if efrf < EFRF_MAX else "❌ FAIL")
             
             # --- Physics Verification ---
             with st.expander("🔬 Physics Verification"):
@@ -1318,7 +1327,7 @@ with col_right:
             # --- NSGA-II ---
             st.markdown("### ⚙️ NSGA-II")
             bounds = np.array([
-                [85, 95], [0, 8], [0.5, 6.0], [0.01, 1.2], [0.5, 4.0],
+                [85, 95], [0, MCC_MAX], [0.5, 6.0], [0.01, 1.2], [0.5, 4.0],
                 [80, 280], [1, 50], [30, 250]
             ])
             with st.spinner("🔄 Running NSGA-II..."):
@@ -1382,7 +1391,7 @@ with col_right:
             st.markdown("### 📄 Report")
             if st.button("📥 Download PDF Report", use_container_width=True):
                 try:
-                    status = "PASS" if (tensile >= 2.0 and efrf < 0.35) else "FAIL"
+                    status = "PASS" if (tensile >= TENSILE_MIN and efrf < EFRF_MAX) else "FAIL"
                     timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     pdf_data = create_pdf_report(
                         api, mcc, pvpp, mgst, binder, pressure, speed, granule,
@@ -1399,5 +1408,5 @@ with col_right:
                     st.error(f"PDF generation error: {e}")
 
 st.markdown("---")
-st.caption("🔬 **Multi-Task True PINN — Production-Ready**")
-st.caption("📧 Contact: babuker@protonmail.com")
+st.caption(f"🔬 **Multi-Task True PINN — Production-Ready**")
+st.caption(f"📧 Contact: babuker@protonmail.com")
