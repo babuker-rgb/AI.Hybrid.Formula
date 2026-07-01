@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 24.1 (XGBoost Import Fix)
+Version: 24.2 (Session State Clamping Fix)
 """
 
 import streamlit as st
@@ -36,10 +36,9 @@ try:
     XGB_AVAILABLE = True
 except ImportError:
     XGB_AVAILABLE = False
-    st.warning("XGBoost not available. Model comparison will exclude XGBoost.")
 
 # ================================================================
-# 1. SESSION STATE INITIALIZATION
+# 1. SESSION STATE INITIALIZATION WITH CLAMPING
 # ================================================================
 
 DEFAULTS = {
@@ -47,7 +46,7 @@ DEFAULTS = {
     'binder': 2.7,
     'pvpp': 3.0,
     'mgst': 0.20,
-    'mcc': 5.0,      # MCC is now a slider
+    'mcc': 5.0,
     'pressure': 230.0,
     'speed': 12.0,
     'granule': 125.0
@@ -77,7 +76,23 @@ def safe_initialize():
             except (ValueError, TypeError):
                 st.session_state[key] = DEFAULTS[key]
 
+def clamp_session_state():
+    """Ensure all session state values are within their valid ranges."""
+    for key in DEFAULTS:
+        if key in st.session_state:
+            try:
+                val = float(st.session_state[key])
+                min_val, max_val = RANGES[key]
+                if val < min_val:
+                    st.session_state[key] = min_val
+                elif val > max_val:
+                    st.session_state[key] = max_val
+            except (ValueError, TypeError):
+                st.session_state[key] = DEFAULTS[key]
+
+# Initialize and clamp
 safe_initialize()
+clamp_session_state()
 
 # ================================================================
 # 2. FEATURE ENGINEERING (SAFE)
@@ -637,7 +652,7 @@ class NSGAII:
                 population[i, 3] = mgst
                 population[i, 4] = binder
                 
-            except Exception as e:
+            except Exception:
                 objectives[i, 0] = 100.0
                 objectives[i, 1] = 100.0
                 constraints[i] = False
@@ -1144,6 +1159,9 @@ def train_and_compare(X_train, X_test, y_train, y_test):
 
 st.set_page_config(page_title="PINN Framework", page_icon="🧬", layout="wide")
 
+# --- CLAMP SESSION STATE BEFORE UI ---
+clamp_session_state()
+
 # --- HERO SECTION ---
 st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); 
@@ -1203,6 +1221,8 @@ for i, (name, params) in enumerate(experiments.items()):
         if st.button(f"📌 {name}", key=f"exp_{i}", use_container_width=True):
             for key in params:
                 st.session_state[key] = params[key]
+            # Clamp after setting
+            clamp_session_state()
             st.rerun()
 
 st.markdown("---")
@@ -1214,6 +1234,7 @@ with col_left:
     st.markdown("### 📊 Formulation Parameters")
     
     with st.container(border=True):
+        # Use clamped values directly from session state
         api = st.slider("🧪 API Loading (%)", 85.0, 95.0, st.session_state.api, 0.1, key="api")
         binder = st.slider("🔗 Binder (%)", 0.5, 4.0, st.session_state.binder, 0.1, key="binder")
         pvpp = st.slider("💊 PVPP (%)", 0.5, 6.0, st.session_state.pvpp, 0.1, key="pvpp")
@@ -1223,10 +1244,10 @@ with col_left:
         total = api + binder + pvpp + mgst + mcc
         if abs(total - 100) < 0.1:
             st.success(f"✅ Total = {total:.2f}%")
-        elif total > 100:
+        elif total > 100.1:
             st.error(f"❌ Total = {total:.2f}% (exceeds 100%)")
         else:
-            st.warning(f"⚠️ Total = {total:.2f}% (adds to 100%)")
+            st.warning(f"⚠️ Total = {total:.2f}% (adjust to 100%)")
     
     st.markdown("### ⚙️ Process Parameters")
     with st.container(border=True):
