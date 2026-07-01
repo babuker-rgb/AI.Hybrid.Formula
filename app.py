@@ -1,10 +1,10 @@
 """
-Physics-Informed Neural Network (PINN) - Diagnostic Release
+Physics-Informed Neural Network (PINN) - Diagnostic Release v37
 Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 36.0 (Loss Tracking & Physics Compatibility Test)
+Version: 37.0 (Per-Output R² & ANN Comparison)
 """
 
 import streamlit as st
@@ -41,8 +41,8 @@ NSGA_GENERATIONS = 80
 BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
-# --- Diagnostic: can be set to 0.0 to test PINN without physics ---
-PHYSICS_WEIGHT = 0.0001     # Set to 0.0 to disable physics
+# --- Set to 0.0 to disable physics (for testing) ---
+PHYSICS_WEIGHT = 0.0001
 DATA_WEIGHT = 1.0
 N_SAMPLES = 3000
 PATIENCE = 150
@@ -141,7 +141,7 @@ def add_interaction_features(X_raw):
     ], axis=1)
 
 # ================================================================
-# 4. PINN MODEL (DIAGNOSTIC VERSION)
+# 4. PINN MODEL (SEPARATED HEADS)
 # ================================================================
 
 class PINNSeparatedHeads(nn.Module):
@@ -355,27 +355,20 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
 
 def test_heckel_compatibility(df, tol=0.05):
     """Check what percentage of data satisfies Heckel equation within tolerance."""
-    # Estimate k and A from data
-    X = df[['API_%', 'Binder_%', 'Speed_rpm', 'MgSt_%']].values
     pressure = df['Pressure_MPa'].values
     density = df['Density'].values
     
-    # Approximate k and A using simple linear regression on Heckel
-    # ln(1/(1-D)) = k*P + A
     heckel_y = np.log(1.0 / (1.0 - density + 1e-8))
     heckel_X = np.column_stack([pressure, np.ones_like(pressure)])
     
-    # Solve for k and A using least squares (only for positive pressures)
     try:
         k_est, A_est = np.linalg.lstsq(heckel_X, heckel_y, rcond=None)[0]
     except:
         k_est, A_est = 0.035, 1.2
     
-    # Compute predicted Heckel
     heckel_pred = k_est * pressure + A_est
     heckel_actual = heckel_y
     
-    # Compute relative error
     rel_error = np.abs((heckel_pred - heckel_actual) / (heckel_actual + 1e-8))
     compatible = rel_error < tol
     
@@ -401,15 +394,16 @@ def sanitize_text(text):
 @st.cache_data
 def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
                              density, tensile, er, efrf, status, timestamp,
-                             model_comparison_df=None, loss_history=None, loss_dict=None,
-                             heckel_compat=None):
+                             model_comparison_df=None, loss_history=None,
+                             loss_dict=None, heckel_compat=None,
+                             r2_per_output=None, ann_r2_per_output=None):
     pdf = FPDF()
     pdf.add_page()
     
     pdf.set_font("Arial", "B", 18)
     pdf.cell(0, 10, sanitize_text("Formulation Optimization Report"), ln=True, align="C")
     pdf.set_font("Arial", "I", 11)
-    pdf.cell(0, 6, sanitize_text("Hybrid AI Framework (PINN - v36 Diagnostic)"), ln=True, align="C")
+    pdf.cell(0, 6, sanitize_text("Hybrid AI Framework (PINN - v37 Diagnostic)"), ln=True, align="C")
     pdf.set_font("Arial", "", 10)
     pdf.cell(0, 6, f"Date: {timestamp}", ln=True, align="C")
     pdf.ln(4)
@@ -490,7 +484,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     
     pdf.ln(4)
     
-    # --- Loss Components (NEW) ---
+    # Loss Components
     if loss_dict:
         pdf.set_font("Arial", "B", 13)
         pdf.set_fill_color(230, 230, 230)
@@ -517,13 +511,12 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
             pdf.cell(60, 6, sanitize_text(value), 1, 1, "C")
         pdf.ln(4)
     
-    # --- Heckel Compatibility (NEW) ---
+    # Heckel Compatibility
     if heckel_compat:
         pdf.set_font("Arial", "B", 13)
         pdf.set_fill_color(230, 230, 230)
         pdf.cell(0, 8, sanitize_text("5. Heckel Compatibility Test"), ln=True, fill=True)
         pdf.set_font("Arial", "", 10)
-        
         pdf.cell(0, 6, f"k (estimated): {heckel_compat['k_estimated']:.4f}", ln=True)
         pdf.cell(0, 6, f"A (estimated): {heckel_compat['A_estimated']:.4f}", ln=True)
         pdf.cell(0, 6, f"Compatible fraction (tolerance 5%): {heckel_compat['compatible_fraction']:.2%}", ln=True)
@@ -531,9 +524,29 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
         pdf.cell(0, 6, f"Std relative error: {heckel_compat['std_rel_error']:.2%}", ln=True)
         pdf.ln(4)
     
+    # R² per output
+    if r2_per_output is not None and ann_r2_per_output is not None:
+        pdf.set_font("Arial", "B", 13)
+        pdf.set_fill_color(230, 230, 230)
+        pdf.cell(0, 8, sanitize_text("6. R² per Output (PINN vs ANN)"), ln=True, fill=True)
+        pdf.set_font("Arial", "", 10)
+        pdf.set_font("Arial", "B", 10)
+        pdf.cell(40, 6, sanitize_text("Output"), 1, 0, "C")
+        pdf.cell(40, 6, sanitize_text("PINN R²"), 1, 0, "C")
+        pdf.cell(40, 6, sanitize_text("ANN R²"), 1, 0, "C")
+        pdf.cell(40, 6, sanitize_text("Difference"), 1, 1, "C")
+        pdf.set_font("Arial", "", 10)
+        outputs = ['Density', 'Tensile', 'ER', 'Average']
+        for i, out in enumerate(outputs):
+            pdf.cell(40, 6, sanitize_text(out), 1, 0, "L")
+            pdf.cell(40, 6, f"{r2_per_output[i]:.4f}", 1, 0, "C")
+            pdf.cell(40, 6, f"{ann_r2_per_output[i]:.4f}", 1, 0, "C")
+            pdf.cell(40, 6, f"{ann_r2_per_output[i] - r2_per_output[i]:.4f}", 1, 1, "C")
+        pdf.ln(4)
+    
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
-    pdf.cell(0, 8, sanitize_text("6. Overall Status"), ln=True, fill=True)
+    pdf.cell(0, 8, sanitize_text("7. Overall Status"), ln=True, fill=True)
     pdf.set_font("Arial", "B", 14)
     if status == "PASS":
         pdf.set_text_color(0, 128, 0)
@@ -547,16 +560,14 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     if model_comparison_df is not None and not model_comparison_df.empty:
         pdf.set_font("Arial", "B", 13)
         pdf.set_fill_color(230, 230, 230)
-        pdf.cell(0, 8, sanitize_text("7. Model Performance Comparison"), ln=True, fill=True)
+        pdf.cell(0, 8, sanitize_text("8. Model Performance Comparison"), ln=True, fill=True)
         pdf.set_font("Arial", "", 10)
-        
         pdf.set_font("Arial", "B", 10)
         pdf.cell(40, 6, sanitize_text("Model"), 1, 0, "C")
         pdf.cell(30, 6, sanitize_text("R²"), 1, 0, "C")
         pdf.cell(30, 6, sanitize_text("RMSE"), 1, 0, "C")
         pdf.cell(30, 6, sanitize_text("MAE"), 1, 0, "C")
         pdf.cell(40, 6, sanitize_text("Physics"), 1, 1, "C")
-        
         pdf.set_font("Arial", "", 10)
         for _, row in model_comparison_df.iterrows():
             pdf.cell(40, 6, sanitize_text(str(row['Model'])), 1, 0, "L")
@@ -569,7 +580,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     if loss_history and len(loss_history['train']) > 0:
         pdf.set_font("Arial", "B", 13)
         pdf.set_fill_color(230, 230, 230)
-        pdf.cell(0, 8, sanitize_text("8. Training Loss Summary"), ln=True, fill=True)
+        pdf.cell(0, 8, sanitize_text("9. Training Loss Summary"), ln=True, fill=True)
         pdf.set_font("Arial", "", 10)
         pdf.cell(0, 6, f"Final Training Loss: {loss_history['train'][-1]:.6f}", ln=True)
         pdf.cell(0, 6, f"Final Data Loss: {loss_history['data'][-1]:.6f}", ln=True)
@@ -578,7 +589,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
-    pdf.cell(0, 8, sanitize_text("9. Recommendations"), ln=True, fill=True)
+    pdf.cell(0, 8, sanitize_text("10. Recommendations"), ln=True, fill=True)
     pdf.set_font("Arial", "", 10)
     
     if status == "PASS":
@@ -601,7 +612,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
-    pdf.cell(0, 8, sanitize_text("10. Contact Information"), ln=True, fill=True)
+    pdf.cell(0, 8, sanitize_text("11. Contact Information"), ln=True, fill=True)
     pdf.set_font("Arial", "", 11)
     pdf.cell(0, 8, "Chem. Eng. Babuker A. Abdalla, PhD Researcher", ln=True)
     pdf.cell(0, 7, "Email: babuker@protonmail.com", ln=True)
@@ -611,7 +622,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.ln(3)
     pdf.set_y(270)
     pdf.set_font("Arial", "I", 8)
-    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v36.0 (Diagnostic)", ln=True, align="C")
+    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v37.0", ln=True, align="C")
     
     pdf_bytes = pdf.output(dest="S")
     if isinstance(pdf_bytes, bytearray):
@@ -900,7 +911,7 @@ class NSGAII:
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 9. TRAIN MODEL (DIAGNOSTIC)
+# 9. TRAIN MODEL
 # ================================================================
 
 @st.cache_resource
@@ -987,7 +998,6 @@ def load_pinn_model():
             best_val_loss = val_loss_value
             counter = 0
             best_state = model.state_dict().copy()
-            # Save final loss dict for reporting
             final_loss_dict = loss_dict.copy()
         else:
             counter += 1
@@ -1086,7 +1096,7 @@ def plot_training_curves(loss_history):
         ))
     
     fig.update_layout(
-        title=f'Training Curves (v36 - Physics Weight = {PHYSICS_WEIGHT:.4f})',
+        title=f'Training Curves (v37 - Physics Weight = {PHYSICS_WEIGHT:.4f})',
         xaxis=dict(title='Epoch'),
         yaxis=dict(title='Loss', type='log'),
         height=400,
@@ -1241,17 +1251,17 @@ def train_and_compare(X_train, X_test, y_train, y_test):
 # 11. STREAMLIT UI
 # ================================================================
 
-st.set_page_config(page_title="PINN Framework v36", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Framework v37", page_icon="🧬", layout="wide")
 clamp_session_state()
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); 
             padding: 2rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
     <h1 style="color: #ffffff; font-size: 2.5rem; margin: 0;">
-        🧬 Hybrid AI Framework v36.0
+        🧬 Hybrid AI Framework v37.0
     </h1>
     <p style="color: #a8b2d1; font-size: 1.2rem; margin: 0.5rem 0 0 0;">
-        PINN · Diagnostic Release (Loss Tracking & Compatibility)
+        PINN · Per-Output R² & ANN Comparison
     </p>
     <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">
         Nile Valley University · Postgraduate College · Sudan
@@ -1267,18 +1277,18 @@ with st.sidebar:
     - ✅ **PINN with Separated Heads**
     - ✅ **Physics Weight:** {PHYSICS_WEIGHT:.4f}
     - ✅ **Dataset size:** {N_SAMPLES}
-    - ✅ **Loss Tracking:** ✅ Enabled
-    - ✅ **Heckel Compatibility Test:** ✅ Enabled
+    - ✅ **Loss Tracking:** Enabled
+    - ✅ **Heckel Compatibility:** Enabled
+    - ✅ **Per-Output R²:** Enabled
+    - ✅ **ANN Comparison:** Enabled
     """)
-    st.info("🔬 **v36.0** — The Diagnostic Release")
-    if PHYSICS_WEIGHT == 0.0:
-        st.success("⚠️ **Physics is DISABLED** (w_physics = 0.0)")
+    st.info("🔬 **v37.0** — Diagnostic Release")
 
-with st.spinner("🔄 Training PINN (diagnostic mode)..."):
+with st.spinner("🔄 Training PINN..."):
     model, scaler, y_scaler, feature_names, df, loss_history, final_loss_dict = load_pinn_model()
 st.success("✅ PINN trained successfully")
 
-# --- Display Loss Components ---
+# --- Loss Components ---
 st.markdown("### 📊 Loss Components (Final)")
 loss_df = pd.DataFrame([
     {"Component": "Data Loss", "Value": f"{final_loss_dict.get('data_loss', 0):.6f}"},
@@ -1294,7 +1304,7 @@ st.caption("If Heckel Loss >> Data Loss, physics dominates despite low weight.")
 
 st.markdown("---")
 
-# --- Heckel Compatibility Test ---
+# --- Heckel Compatibility ---
 st.markdown("### 🔬 Heckel Compatibility Test")
 compat = test_heckel_compatibility(df, tol=0.05)
 col1, col2, col3, col4 = st.columns(4)
@@ -1433,10 +1443,11 @@ with col_right:
             
             with tab3:
                 st.markdown("### 📊 Model Performance Comparison")
-                st.caption("Hold-out test set (20% of data) — R², RMSE, MAE")
+                st.caption("Hold-out test set (20% of data) — Overall and per-output metrics")
                 
+                # Prepare test data
                 X_train, X_test, y_train, y_test = train_test_split(
-                    df[feature_names].values, df['Tensile_Strength_MPa'].values,
+                    df[feature_names].values, df[['Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']].values,
                     test_size=0.2, random_state=42
                 )
                 X_train_aug = add_interaction_features(X_train)
@@ -1444,34 +1455,58 @@ with col_right:
                 X_train_scaled = scaler.transform(X_train_aug)
                 X_test_scaled = scaler.transform(X_test_aug)
                 
+                # PINN predictions
                 pinn_pred_scaled = model.predict_primary(torch.FloatTensor(X_test_scaled))
-                pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
+                pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)
                 
-                pinn_r2 = r2_score(y_test, pinn_pred)
-                pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
-                pinn_mae = mean_absolute_error(y_test, pinn_pred)
+                # ANN training and predictions
+                ann = MLPRegressor(hidden_layer_sizes=(128, 128, 64, 32), max_iter=1000, random_state=42)
+                ann.fit(X_train_scaled, y_train)
+                ann_pred = ann.predict(X_test_scaled)
                 
-                with st.expander("🔍 Diagnostic: Predictions vs Actual (First 10)"):
-                    diag_df = pd.DataFrame({
-                        'Actual': y_test[:10],
-                        'Predicted': pinn_pred[:10],
-                        'Error': y_test[:10] - pinn_pred[:10]
-                    })
-                    st.dataframe(diag_df, use_container_width=True)
-                    st.caption("If errors are large or random, pipeline has an issue.")
+                # --- R² per output ---
+                r2_density_pinn = r2_score(y_test[:, 0], pinn_pred[:, 0])
+                r2_tensile_pinn = r2_score(y_test[:, 1], pinn_pred[:, 1])
+                r2_er_pinn = r2_score(y_test[:, 2], pinn_pred[:, 2])
+                r2_avg_pinn = np.mean([r2_density_pinn, r2_tensile_pinn, r2_er_pinn])
                 
-                st.metric(f"PINN R² (physics_weight={PHYSICS_WEIGHT:.4f})", f"{pinn_r2:.4f}", delta="Target > 0.90")
-                col_m1, col_m2 = st.columns(2)
-                col_m1.metric("PINN RMSE", f"{pinn_rmse:.4f} MPa")
-                col_m2.metric("PINN MAE", f"{pinn_mae:.4f} MPa")
+                r2_density_ann = r2_score(y_test[:, 0], ann_pred[:, 0])
+                r2_tensile_ann = r2_score(y_test[:, 1], ann_pred[:, 1])
+                r2_er_ann = r2_score(y_test[:, 2], ann_pred[:, 2])
+                r2_avg_ann = np.mean([r2_density_ann, r2_tensile_ann, r2_er_ann])
+                
+                # --- Display per-output R² ---
+                st.markdown("#### 📊 R² per Output (PINN vs ANN)")
+                r2_df = pd.DataFrame({
+                    'Output': ['Density', 'Tensile', 'Elastic Recovery', 'Average'],
+                    'PINN R²': [r2_density_pinn, r2_tensile_pinn, r2_er_pinn, r2_avg_pinn],
+                    'ANN R²': [r2_density_ann, r2_tensile_ann, r2_er_ann, r2_avg_ann],
+                    'Difference': [r2_density_ann - r2_density_pinn, r2_tensile_ann - r2_tensile_pinn,
+                                   r2_er_ann - r2_er_pinn, r2_avg_ann - r2_avg_pinn]
+                })
+                st.dataframe(r2_df.style.highlight_max(subset=['PINN R²', 'ANN R²'], color='lightgreen'), hide_index=True, use_container_width=True)
+                st.caption("If ER R² is much lower than Density and Tensile, the problem is isolated to ER prediction.")
+                
+                # --- Also display the overall metrics (single output Tensile) for backward compatibility ---
+                pinn_r2_tensile_only = r2_score(y_test[:, 1], pinn_pred[:, 1])
+                pinn_rmse_tensile = np.sqrt(mean_squared_error(y_test[:, 1], pinn_pred[:, 1]))
+                pinn_mae_tensile = mean_absolute_error(y_test[:, 1], pinn_pred[:, 1])
+                
                 st.divider()
+                st.metric(f"PINN R² (Tensile only, physics_weight={PHYSICS_WEIGHT:.4f})", f"{pinn_r2_tensile_only:.4f}", delta="Target > 0.90")
+                col_m1, col_m2 = st.columns(2)
+                col_m1.metric("PINN RMSE (Tensile)", f"{pinn_rmse_tensile:.4f} MPa")
+                col_m2.metric("PINN MAE (Tensile)", f"{pinn_mae_tensile:.4f} MPa")
                 
-                comp_df = train_and_compare(X_train_scaled, X_test_scaled, y_train, y_test)
-                pinn_row = pd.DataFrame([{'Model': 'PINN (Proposed)', 'R²': pinn_r2, 'RMSE': pinn_rmse, 'MAE': pinn_mae, 'Physics': f'✅ {PHYSICS_WEIGHT:.4f}'}])
+                # --- Model comparison table for overall (using Tensile only) ---
+                st.divider()
+                comp_df = train_and_compare(X_train_scaled, X_test_scaled, y_train[:, 1], y_test[:, 1])
+                pinn_row = pd.DataFrame([{'Model': 'PINN (Proposed)', 'R²': pinn_r2_tensile_only,
+                                          'RMSE': pinn_rmse_tensile, 'MAE': pinn_mae_tensile,
+                                          'Physics': f'✅ {PHYSICS_WEIGHT:.4f}'}])
                 comp_df = pd.concat([pinn_row, comp_df], ignore_index=True)
                 
                 col1, col2 = st.columns(2)
-                
                 with col1:
                     colors_r2 = ['#2ecc71' if m == 'PINN (Proposed)' else '#3498db' for m in comp_df['Model']]
                     fig_r2 = go.Figure(data=[
@@ -1518,6 +1553,8 @@ with col_right:
                 )
                 
                 comp_df_for_pdf = comp_df.copy()
+                r2_per_output = [r2_density_pinn, r2_tensile_pinn, r2_er_pinn, r2_avg_pinn]
+                ann_r2_per_output = [r2_density_ann, r2_tensile_ann, r2_er_ann, r2_avg_ann]
             
             with tab4:
                 st.markdown("### 📈 Training Curves")
@@ -1536,7 +1573,7 @@ with col_right:
             
             with tab5:
                 st.markdown("### 📄 Comprehensive Report (PDF)")
-                st.caption("Download a complete report with formulation details, predictions, training curves, and model comparison.")
+                st.caption("Download a complete report with formulation details, predictions, loss components, Heckel compatibility, and per-output R².")
                 
                 status = "PASS" if (tensile >= TENSILE_MIN and efrf < EFRF_MAX) else "FAIL"
                 timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -1547,18 +1584,20 @@ with col_right:
                     model_comparison_df=comp_df,
                     loss_history=loss_history,
                     loss_dict=final_loss_dict,
-                    heckel_compat=compat
+                    heckel_compat=compat,
+                    r2_per_output=r2_per_output,
+                    ann_r2_per_output=ann_r2_per_output
                 )
                 
                 st.download_button(
                     label="📥 Download Full Report (PDF)",
                     data=pdf_data,
-                    file_name=f"formulation_report_v36_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                    file_name=f"formulation_report_v37_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
                     mime="application/pdf",
                     use_container_width=True
                 )
-                st.success("✅ One-click download — includes formulation, predictions, loss components, and Heckel compatibility.")
+                st.success("✅ One-click download — includes formulation, predictions, loss components, Heckel compatibility, and per-output R².")
 
 st.markdown("---")
-st.caption(f"🔬 **PINN — v36.0 (Diagnostic Release)**")
+st.caption(f"🔬 **PINN — v37.0 (Per-Output R² & ANN Comparison)**")
 st.caption(f"📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Postgraduate College, Sudan")
