@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Sudan
-Version: 24.0 (All Issues Fixed - Production Ready)
+Version: 24.1 (XGBoost Import Fix)
 """
 
 import streamlit as st
@@ -32,11 +32,11 @@ warnings.filterwarnings('ignore')
 # ================================================================
 
 try:
-    import xgboost as xgb
+    from xgboost import XGBRegressor
     XGB_AVAILABLE = True
 except ImportError:
     XGB_AVAILABLE = False
-    st.warning("XGBoost not available. Some comparison features will be limited.")
+    st.warning("XGBoost not available. Model comparison will exclude XGBoost.")
 
 # ================================================================
 # 1. SESSION STATE INITIALIZATION
@@ -1105,7 +1105,7 @@ def plot_sensitivity_plotly(inputs, model, scaler, y_scaler):
 
 
 # ================================================================
-# 10. MODEL COMPARISON
+# 10. MODEL COMPARISON (FIXED XGBOOST IMPORT)
 # ================================================================
 
 def train_and_compare(X_train, X_test, y_train, y_test):
