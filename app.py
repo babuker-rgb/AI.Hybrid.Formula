@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 28.0 (Enhanced Comparison Table, Colored Diagrams, PDF Report)
+Version: 29.0 (Training Curves & Detailed Metrics)
 """
 
 import streamlit as st
@@ -27,7 +27,7 @@ import time
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. USER-CONFIGURABLE PARAMETERS
+# 0. USER-CONFIGURABLE PARAMETERS (BALANCED)
 # ================================================================
 
 TENSILE_MIN = 1.90          # MPa
@@ -42,7 +42,8 @@ NSGA_GENERATIONS = 100
 BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
-PHYSICS_WEIGHT_INIT = 0.5
+# Balanced physics weight (reduced to prevent collapse)
+PHYSICS_WEIGHT_INIT = 0.3   # was 0.5
 
 # ================================================================
 # 1. SAFE IMPORTS
@@ -151,6 +152,7 @@ class MultiTaskTruePINN(nn.Module):
             nn.Linear(64, 32), nn.BatchNorm1d(32), nn.Tanh(),
             nn.Linear(32, output_dim)
         )
+        self.loss_history = {'train': [], 'val': [], 'data': [], 'physics': []}
 
     def forward(self, X):
         raw = self.network(X)
@@ -174,7 +176,7 @@ class MultiTaskTruePINN(nn.Module):
                      w_data_final=1.0, w_physics_final=1.0,
                      w_mcc=0.5, w_density=0.5,
                      efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
-                     compute_grad=True):
+                     compute_grad=True, record_loss=False):
         pressure_real = X_raw[:, 5]
         mcc_real = X_raw[:, 1]
 
@@ -228,9 +230,10 @@ class MultiTaskTruePINN(nn.Module):
         k_reg = torch.mean(torch.relu(k_pred - 0.1) ** 2) + torch.mean(torch.relu(0.005 - k_pred) ** 2)
         A_reg = torch.mean(torch.relu(A_pred - 2.0) ** 2) + torch.mean(torch.relu(0.5 - A_pred) ** 2)
 
+        physics_loss = heckel_loss + efrf_loss + monotonic_loss + boundary_loss
         total_loss = (
             w_data * data_loss +
-            w_physics * (heckel_loss + efrf_loss + monotonic_loss + boundary_loss) +
+            w_physics * physics_loss +
             w_mcc * mcc_loss +
             w_density * density_penalty +
             0.1 * k_reg + 0.1 * A_reg
@@ -238,6 +241,7 @@ class MultiTaskTruePINN(nn.Module):
 
         loss_dict = {
             'data_loss': data_loss.item(),
+            'physics_loss': physics_loss.item(),
             'heckel_loss': heckel_loss.item(),
             'efrf_loss': efrf_loss.item(),
             'mcc_loss': mcc_loss.item(),
@@ -250,6 +254,12 @@ class MultiTaskTruePINN(nn.Module):
             'w_physics': w_physics,
             'total_loss': total_loss.item()
         }
+
+        if record_loss:
+            self.loss_history['train'].append(total_loss.item())
+            self.loss_history['data'].append(data_loss.item())
+            self.loss_history['physics'].append(physics_loss.item())
+
         return total_loss, loss_dict
 
 # ================================================================
@@ -321,7 +331,7 @@ def generate_pinn_data(n_samples=600, random_state=42):
     return df, feature_names
 
 # ================================================================
-# 6. PDF GENERATION (Full Report with Comparison Table)
+# 6. PDF GENERATION
 # ================================================================
 
 def sanitize_text(text):
@@ -334,8 +344,7 @@ def sanitize_text(text):
 @st.cache_data
 def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
                              density, tensile, er, efrf, status, timestamp,
-                             model_comparison_df=None):
-    """Generate a detailed PDF report including model comparison."""
+                             model_comparison_df=None, loss_history=None):
     pdf = FPDF()
     pdf.add_page()
     
@@ -442,7 +451,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.set_text_color(0, 0, 0)
     pdf.ln(4)
     
-    # 5. Model Comparison (if provided)
+    # 5. Model Comparison
     if model_comparison_df is not None and not model_comparison_df.empty:
         pdf.set_font("Arial", "B", 13)
         pdf.set_fill_color(230, 230, 230)
@@ -465,10 +474,21 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
             pdf.cell(40, 6, sanitize_text(str(row['Physics'])), 1, 1, "C")
         pdf.ln(4)
     
-    # 6. Recommendations
+    # 6. Training Loss Summary (if available)
+    if loss_history and len(loss_history['train']) > 0:
+        pdf.set_font("Arial", "B", 13)
+        pdf.set_fill_color(230, 230, 230)
+        pdf.cell(0, 8, sanitize_text("6. Training Loss Summary"), ln=True, fill=True)
+        pdf.set_font("Arial", "", 10)
+        pdf.cell(0, 6, f"Final Training Loss: {loss_history['train'][-1]:.6f}", ln=True)
+        pdf.cell(0, 6, f"Final Data Loss: {loss_history['data'][-1]:.6f}", ln=True)
+        pdf.cell(0, 6, f"Final Physics Loss: {loss_history['physics'][-1]:.6f}", ln=True)
+        pdf.ln(4)
+    
+    # 7. Recommendations
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
-    pdf.cell(0, 8, sanitize_text("6. Recommendations"), ln=True, fill=True)
+    pdf.cell(0, 8, sanitize_text("7. Recommendations"), ln=True, fill=True)
     pdf.set_font("Arial", "", 10)
     
     if status == "PASS":
@@ -489,10 +509,10 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     
     pdf.ln(4)
     
-    # 7. Contact
+    # 8. Contact
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
-    pdf.cell(0, 8, sanitize_text("7. Contact Information"), ln=True, fill=True)
+    pdf.cell(0, 8, sanitize_text("8. Contact Information"), ln=True, fill=True)
     pdf.set_font("Arial", "", 11)
     pdf.cell(0, 8, "Chem. Eng. Babuker A. Abdalla, PhD Researcher", ln=True)
     pdf.cell(0, 7, "Email: babuker@protonmail.com", ln=True)
@@ -502,7 +522,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.ln(3)
     pdf.set_y(270)
     pdf.set_font("Arial", "I", 8)
-    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v28.0", ln=True, align="C")
+    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v29.0", ln=True, align="C")
     
     pdf_bytes = pdf.output(dest="S")
     if isinstance(pdf_bytes, bytearray):
@@ -789,7 +809,7 @@ class NSGAII:
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 8. TRAIN MODEL
+# 8. TRAIN MODEL (WITH LOSS HISTORY)
 # ================================================================
 
 @st.cache_resource
@@ -846,7 +866,8 @@ def load_pinn_model():
             w_data_init=2.0, w_physics_init=PHYSICS_WEIGHT_INIT,
             w_data_final=1.0, w_physics_final=1.0,
             w_mcc=0.5, w_density=0.5,
-            efrf_target=EFRF_MAX, mcc_max=MCC_MAX, compute_grad=True
+            efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
+            compute_grad=True, record_loss=True
         )
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -860,9 +881,11 @@ def load_pinn_model():
                 w_data_init=2.0, w_physics_init=PHYSICS_WEIGHT_INIT,
                 w_data_final=1.0, w_physics_final=1.0,
                 w_mcc=0.5, w_density=0.5,
-                efrf_target=EFRF_MAX, mcc_max=MCC_MAX, compute_grad=False
+                efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
+                compute_grad=False, record_loss=False
             )
         val_loss_value = val_loss.item()
+        model.loss_history['val'].append(val_loss_value)
         scheduler.step(val_loss_value)
 
         if val_loss_value < best_val_loss:
@@ -891,7 +914,8 @@ def load_pinn_model():
             w_data_init=1.0, w_physics_init=PHYSICS_WEIGHT_INIT,
             w_data_final=1.0, w_physics_final=1.0,
             w_mcc=0.5, w_density=0.5,
-            efrf_target=EFRF_MAX, mcc_max=MCC_MAX, compute_grad=True
+            efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
+            compute_grad=True, record_loss=False
         )
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -910,9 +934,11 @@ def load_pinn_model():
                 w_data_init=1.0, w_physics_init=PHYSICS_WEIGHT_INIT,
                 w_data_final=1.0, w_physics_final=1.0,
                 w_mcc=0.5, w_density=0.5,
-                efrf_target=EFRF_MAX, mcc_max=MCC_MAX, compute_grad=False
+                efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
+                compute_grad=False, record_loss=False
             )
             val_loss_value = val_loss.item()
+            model.loss_history['val'].append(val_loss_value)
             if val_loss_value < best_val_loss:
                 best_val_loss = val_loss_value
                 best_state = model.state_dict().copy()
@@ -929,7 +955,7 @@ def load_pinn_model():
 
     torch.save(model.state_dict(), 'true_pinn_checkpoint.pt')
 
-    return model, scaler, y_scaler, feature_names, df, {'train': [], 'val': []}
+    return model, scaler, y_scaler, feature_names, df, model.loss_history
 
 # ================================================================
 # 9. PREDICTION & PLOTS
@@ -953,6 +979,53 @@ def predict_pinn(model, scaler, y_scaler, inputs):
     except Exception as e:
         st.error(f"Prediction error: {e}")
         return 0.5, 0.0, 1.0, 1.0
+
+def plot_training_curves(loss_history):
+    """Plot training, validation, data, and physics losses."""
+    if not loss_history or len(loss_history['train']) == 0:
+        return None
+    
+    epochs = list(range(1, len(loss_history['train']) + 1))
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Scatter(
+        x=epochs, y=loss_history['train'],
+        mode='lines', name='Training Loss',
+        line=dict(color='blue', width=2)
+    ))
+    
+    if len(loss_history['val']) > 0:
+        fig.add_trace(go.Scatter(
+            x=epochs[:len(loss_history['val'])], y=loss_history['val'],
+            mode='lines', name='Validation Loss',
+            line=dict(color='orange', width=2, dash='dash')
+        ))
+    
+    if len(loss_history['data']) > 0:
+        fig.add_trace(go.Scatter(
+            x=epochs, y=loss_history['data'],
+            mode='lines', name='Data Loss',
+            line=dict(color='green', width=1.5)
+        ))
+    
+    if len(loss_history['physics']) > 0:
+        fig.add_trace(go.Scatter(
+            x=epochs, y=loss_history['physics'],
+            mode='lines', name='Physics Loss',
+            line=dict(color='red', width=1.5)
+        ))
+    
+    fig.update_layout(
+        title='Training Curves',
+        xaxis=dict(title='Epoch'),
+        yaxis=dict(title='Loss', type='log'),
+        height=400,
+        hovermode='x unified',
+        legend=dict(x=0.02, y=0.98, bgcolor='rgba(255,255,255,0.8)')
+    )
+    
+    return fig
 
 def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
     try:
@@ -1099,7 +1172,7 @@ def train_and_compare(X_train, X_test, y_train, y_test):
 # 10. STREAMLIT UI
 # ================================================================
 
-st.set_page_config(page_title="PINN Framework v28", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Framework v29", page_icon="🧬", layout="wide")
 clamp_session_state()
 
 # --- HERO SECTION ---
@@ -1107,7 +1180,7 @@ st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); 
             padding: 2rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
     <h1 style="color: #ffffff; font-size: 2.5rem; margin: 0;">
-        🧬 Hybrid AI Framework v28.0
+        🧬 Hybrid AI Framework v29.0
     </h1>
     <p style="color: #a8b2d1; font-size: 1.2rem; margin: 0.5rem 0 0 0;">
         Physics-Informed Neural Network · Multi-Objective Optimization
@@ -1136,8 +1209,9 @@ with st.sidebar:
     - Adam → LBFGS hybrid
     - **NSGA-II:** pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS}
     - **Binder max:** {BINDER_MAX:.1f}%
+    - **Physics weight:** {PHYSICS_WEIGHT_INIT:.1f} (balanced)
     """)
-    st.info("🔬 **v28.0** — Enhanced Comparison & PDF Report")
+    st.info("🔬 **v29.0** — Training Curves & Detailed Metrics")
 
 # --- LOAD MODEL ---
 with st.spinner("🔄 Training Multi-Task PINN..."):
@@ -1263,7 +1337,10 @@ with col_right:
                         st.warning("No feasible solutions found")
             
             # --- TABS FOR ORGANIZED RESULTS ---
-            tab1, tab2, tab3, tab4 = st.tabs(["📉 Pareto Front", "🔍 Sensitivity", "📊 Model Comparison", "📄 Report"])
+            tab1, tab2, tab3, tab4, tab5 = st.tabs(
+                ["📉 Pareto Front", "🔍 Sensitivity", "📊 Model Comparison", 
+                 "📈 Training Curves", "📄 Report"]
+            )
             
             with tab1:
                 st.markdown("### 📉 Pareto Front")
@@ -1302,6 +1379,13 @@ with col_right:
                 pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
                 pinn_mae = mean_absolute_error(y_test, pinn_pred)
                 
+                # Display PINN metrics prominently
+                st.metric("PINN R²", f"{pinn_r2:.4f}", delta="Target > 0.90")
+                col_m1, col_m2 = st.columns(2)
+                col_m1.metric("PINN RMSE", f"{pinn_rmse:.4f} MPa")
+                col_m2.metric("PINN MAE", f"{pinn_mae:.4f} MPa")
+                st.divider()
+                
                 # Baseline models
                 comp_df = train_and_compare(X_train_scaled, X_test_scaled, y_train, y_test)
                 pinn_row = pd.DataFrame([{'Model': 'PINN (Proposed)', 'R²': pinn_r2, 'RMSE': pinn_rmse, 'MAE': pinn_mae, 'Physics': '✅ Enforced'}])
@@ -1311,7 +1395,6 @@ with col_right:
                 col1, col2 = st.columns(2)
                 
                 with col1:
-                    # R² Bar Chart (Colored)
                     colors_r2 = ['#2ecc71' if m == 'PINN (Proposed)' else '#3498db' for m in comp_df['Model']]
                     fig_r2 = go.Figure(data=[
                         go.Bar(
@@ -1331,7 +1414,6 @@ with col_right:
                     st.plotly_chart(fig_r2, use_container_width=True)
                 
                 with col2:
-                    # RMSE Bar Chart (Colored)
                     colors_rmse = ['#e74c3c' if m == 'PINN (Proposed)' else '#95a5a6' for m in comp_df['Model']]
                     fig_rmse = go.Figure(data=[
                         go.Bar(
@@ -1362,17 +1444,35 @@ with col_right:
                 comp_df_for_pdf = comp_df.copy()
             
             with tab4:
+                st.markdown("### 📈 Training Curves")
+                st.caption("Training Loss, Validation Loss, Data Loss, and Physics Loss")
+                
+                fig_loss = plot_training_curves(loss_history)
+                if fig_loss:
+                    st.plotly_chart(fig_loss, use_container_width=True)
+                    
+                    # Summary stats
+                    if len(loss_history['train']) > 0:
+                        st.metric("Final Training Loss", f"{loss_history['train'][-1]:.6f}")
+                        st.metric("Final Validation Loss", f"{loss_history['val'][-1]:.6f}")
+                        st.metric("Final Data Loss", f"{loss_history['data'][-1]:.6f}")
+                        st.metric("Final Physics Loss", f"{loss_history['physics'][-1]:.6f}")
+                else:
+                    st.info("Loss history not available")
+            
+            with tab5:
                 st.markdown("### 📄 Comprehensive Report (PDF)")
-                st.caption("Download a complete report with formulation details, predictions, and model comparison.")
+                st.caption("Download a complete report with formulation details, predictions, training curves, and model comparison.")
                 
                 status = "PASS" if (tensile >= TENSILE_MIN and efrf < EFRF_MAX) else "FAIL"
                 timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 
-                # Generate PDF with comparison data
+                # Generate PDF with comparison data and loss summary
                 pdf_data = generate_full_pdf_report(
                     api, mcc, pvpp, mgst, binder, pressure, speed, granule,
                     density, tensile, er, efrf, status, timestamp,
-                    model_comparison_df=comp_df
+                    model_comparison_df=comp_df,
+                    loss_history=loss_history
                 )
                 
                 st.download_button(
@@ -1382,8 +1482,8 @@ with col_right:
                     mime="application/pdf",
                     use_container_width=True
                 )
-                st.success("✅ One-click download — includes formulation, predictions, and model comparison.")
+                st.success("✅ One-click download — includes formulation, predictions, training curves, and model comparison.")
 
 st.markdown("---")
-st.caption(f"🔬 **Multi-Task True PINN — v28.0 (Enhanced Comparison & PDF)**")
+st.caption(f"🔬 **Multi-Task True PINN — v29.0 (Training Curves & Detailed Metrics)**")
 st.caption(f"📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Postgraduate College, Sudan")
