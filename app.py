@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 40.0 (Final Diagnosis - True Std & Pearson Correlation)
+Version: 41.0 (Data Distribution Audit & True Std Display)
 """
 
 import streamlit as st
@@ -43,8 +43,8 @@ NSGA_GENERATIONS = 80
 BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
-# --- Set to 0.0 to test if physics is the cause ---
-PHYSICS_WEIGHT = 0.0001     # Change to 0.0 to disable physics
+# --- Physics weight (can be set to 0.0 for testing) ---
+PHYSICS_WEIGHT = 0.0001
 DATA_WEIGHT = 1.0
 N_SAMPLES = 3000
 PATIENCE = 150
@@ -396,15 +396,15 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
                              density, tensile, er, efrf, status, timestamp,
                              model_comparison_df=None, loss_history=None,
                              loss_dict=None, heckel_compat=None,
-                             r2_per_output=None, ann_r2_per_output=None,
-                             stats_df=None, corr_df=None):
+                             data_distribution_df=None, stats_df=None, corr_df=None,
+                             r2_df=None):
     pdf = FPDF()
     pdf.add_page()
     
     pdf.set_font("Arial", "B", 18)
     pdf.cell(0, 10, sanitize_text("Formulation Optimization Report"), ln=True, align="C")
     pdf.set_font("Arial", "I", 11)
-    pdf.cell(0, 6, sanitize_text("Hybrid AI Framework (PINN - v40.0)"), ln=True, align="C")
+    pdf.cell(0, 6, sanitize_text("Hybrid AI Framework (PINN - v41.0)"), ln=True, align="C")
     pdf.set_font("Arial", "", 10)
     pdf.cell(0, 6, f"Date: {timestamp}", ln=True, align="C")
     pdf.ln(4)
@@ -488,11 +488,32 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     
     pdf.ln(4)
     
-    # 4. Loss Components
+    # 4. Data Distribution Audit
+    if data_distribution_df is not None:
+        pdf.set_font("Arial", "B", 13)
+        pdf.set_fill_color(230, 230, 230)
+        pdf.cell(0, 8, sanitize_text("4. Data Distribution Audit (Original Data)"), ln=True, fill=True)
+        pdf.set_font("Arial", "", 10)
+        pdf.set_font("Arial", "B", 10)
+        pdf.cell(30, 6, sanitize_text("Variable"), 1, 0, "C")
+        pdf.cell(25, 6, sanitize_text("Min"), 1, 0, "C")
+        pdf.cell(25, 6, sanitize_text("Max"), 1, 0, "C")
+        pdf.cell(25, 6, sanitize_text("Mean"), 1, 0, "C")
+        pdf.cell(25, 6, sanitize_text("Std"), 1, 1, "C")
+        pdf.set_font("Arial", "", 10)
+        for _, row in data_distribution_df.iterrows():
+            pdf.cell(30, 6, sanitize_text(row['Variable']), 1, 0, "L")
+            pdf.cell(25, 6, f"{row['Min']:.4f}", 1, 0, "C")
+            pdf.cell(25, 6, f"{row['Max']:.4f}", 1, 0, "C")
+            pdf.cell(25, 6, f"{row['Mean']:.4f}", 1, 0, "C")
+            pdf.cell(25, 6, f"{row['Std']:.4f}", 1, 1, "C")
+        pdf.ln(4)
+    
+    # 5. Loss Components
     if loss_dict:
         pdf.set_font("Arial", "B", 13)
         pdf.set_fill_color(230, 230, 230)
-        pdf.cell(0, 8, sanitize_text("4. Loss Components (Final)"), ln=True, fill=True)
+        pdf.cell(0, 8, sanitize_text("5. Loss Components (Final)"), ln=True, fill=True)
         pdf.set_font("Arial", "", 10)
         items = [
             ("Data Loss", f"{loss_dict.get('data_loss', 0):.6f}"),
@@ -512,11 +533,11 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
             pdf.cell(60, 6, sanitize_text(value), 1, 1, "C")
         pdf.ln(4)
     
-    # 5. Heckel Compatibility
+    # 6. Heckel Compatibility
     if heckel_compat:
         pdf.set_font("Arial", "B", 13)
         pdf.set_fill_color(230, 230, 230)
-        pdf.cell(0, 8, sanitize_text("5. Heckel Compatibility Test"), ln=True, fill=True)
+        pdf.cell(0, 8, sanitize_text("6. Heckel Compatibility Test"), ln=True, fill=True)
         pdf.set_font("Arial", "", 10)
         pdf.cell(0, 6, f"k (estimated): {heckel_compat['k_estimated']:.4f}", ln=True)
         pdf.cell(0, 6, f"A (estimated): {heckel_compat['A_estimated']:.4f}", ln=True)
@@ -525,11 +546,11 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
         pdf.cell(0, 6, f"Std relative error: {heckel_compat['std_rel_error']:.2%}", ln=True)
         pdf.ln(4)
     
-    # 6. Statistics & Correlation
+    # 7. Statistics & Correlation
     if stats_df is not None and corr_df is not None:
         pdf.set_font("Arial", "B", 13)
         pdf.set_fill_color(230, 230, 230)
-        pdf.cell(0, 8, sanitize_text("6. Prediction Statistics & Correlation"), ln=True, fill=True)
+        pdf.cell(0, 8, sanitize_text("7. Prediction Statistics & Correlation"), ln=True, fill=True)
         pdf.set_font("Arial", "", 10)
         pdf.set_font("Arial", "B", 10)
         # Statistics table
@@ -562,11 +583,11 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
             pdf.cell(40, 6, f"{row['R²']:.4f}", 1, 1, "C")
         pdf.ln(4)
     
-    # 7. R² per Output (PINN vs ANN)
-    if r2_per_output is not None and ann_r2_per_output is not None:
+    # 8. R² per Output
+    if r2_df is not None:
         pdf.set_font("Arial", "B", 13)
         pdf.set_fill_color(230, 230, 230)
-        pdf.cell(0, 8, sanitize_text("7. R² per Output (PINN vs ANN)"), ln=True, fill=True)
+        pdf.cell(0, 8, sanitize_text("8. R² per Output (PINN vs ANN)"), ln=True, fill=True)
         pdf.set_font("Arial", "", 10)
         pdf.set_font("Arial", "B", 10)
         pdf.cell(40, 6, sanitize_text("Output"), 1, 0, "C")
@@ -574,18 +595,17 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
         pdf.cell(40, 6, sanitize_text("ANN R²"), 1, 0, "C")
         pdf.cell(40, 6, sanitize_text("Difference"), 1, 1, "C")
         pdf.set_font("Arial", "", 10)
-        outputs = ['Density', 'Tensile', 'ER', 'Average']
-        for i, out in enumerate(outputs):
-            pdf.cell(40, 6, sanitize_text(out), 1, 0, "L")
-            pdf.cell(40, 6, f"{r2_per_output[i]:.4f}", 1, 0, "C")
-            pdf.cell(40, 6, f"{ann_r2_per_output[i]:.4f}", 1, 0, "C")
-            pdf.cell(40, 6, f"{ann_r2_per_output[i] - r2_per_output[i]:.4f}", 1, 1, "C")
+        for _, row in r2_df.iterrows():
+            pdf.cell(40, 6, sanitize_text(row['Output']), 1, 0, "L")
+            pdf.cell(40, 6, f"{row['PINN R²']:.4f}", 1, 0, "C")
+            pdf.cell(40, 6, f"{row['ANN R²']:.4f}", 1, 0, "C")
+            pdf.cell(40, 6, f"{row['Difference']:.4f}", 1, 1, "C")
         pdf.ln(4)
     
-    # 8. Status
+    # 9. Status
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
-    pdf.cell(0, 8, sanitize_text("8. Overall Status"), ln=True, fill=True)
+    pdf.cell(0, 8, sanitize_text("9. Overall Status"), ln=True, fill=True)
     pdf.set_font("Arial", "B", 14)
     if status == "PASS":
         pdf.set_text_color(0, 128, 0)
@@ -596,11 +616,11 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.set_text_color(0, 0, 0)
     pdf.ln(4)
     
-    # 9. Model Comparison
+    # 10. Model Comparison
     if model_comparison_df is not None and not model_comparison_df.empty:
         pdf.set_font("Arial", "B", 13)
         pdf.set_fill_color(230, 230, 230)
-        pdf.cell(0, 8, sanitize_text("9. Model Performance Comparison"), ln=True, fill=True)
+        pdf.cell(0, 8, sanitize_text("10. Model Performance Comparison"), ln=True, fill=True)
         pdf.set_font("Arial", "", 10)
         pdf.set_font("Arial", "B", 10)
         pdf.cell(40, 6, sanitize_text("Model"), 1, 0, "C")
@@ -617,21 +637,21 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
             pdf.cell(40, 6, sanitize_text(str(row['Physics'])), 1, 1, "C")
         pdf.ln(4)
     
-    # 10. Training Loss Summary
+    # 11. Training Loss Summary
     if loss_history and len(loss_history['train']) > 0:
         pdf.set_font("Arial", "B", 13)
         pdf.set_fill_color(230, 230, 230)
-        pdf.cell(0, 8, sanitize_text("10. Training Loss Summary"), ln=True, fill=True)
+        pdf.cell(0, 8, sanitize_text("11. Training Loss Summary"), ln=True, fill=True)
         pdf.set_font("Arial", "", 10)
         pdf.cell(0, 6, f"Final Training Loss: {loss_history['train'][-1]:.6f}", ln=True)
         pdf.cell(0, 6, f"Final Data Loss: {loss_history['data'][-1]:.6f}", ln=True)
         pdf.cell(0, 6, f"Final Physics Loss: {loss_history['physics'][-1]:.6f}", ln=True)
         pdf.ln(4)
     
-    # 11. Recommendations
+    # 12. Recommendations
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
-    pdf.cell(0, 8, sanitize_text("11. Recommendations"), ln=True, fill=True)
+    pdf.cell(0, 8, sanitize_text("12. Recommendations"), ln=True, fill=True)
     pdf.set_font("Arial", "", 10)
     if status == "PASS":
         recs = ["1. Proceed with experimental validation.",
@@ -649,10 +669,10 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
         pdf.cell(0, 6, sanitize_text(rec), ln=True)
     pdf.ln(4)
     
-    # 12. Contact
+    # 13. Contact
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
-    pdf.cell(0, 8, sanitize_text("12. Contact Information"), ln=True, fill=True)
+    pdf.cell(0, 8, sanitize_text("13. Contact Information"), ln=True, fill=True)
     pdf.set_font("Arial", "", 11)
     pdf.cell(0, 8, "Chem. Eng. Babuker A. Abdalla, PhD Researcher", ln=True)
     pdf.cell(0, 7, "Email: babuker@protonmail.com", ln=True)
@@ -662,7 +682,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.ln(3)
     pdf.set_y(270)
     pdf.set_font("Arial", "I", 8)
-    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v40.0", ln=True, align="C")
+    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v41.0", ln=True, align="C")
     
     pdf_bytes = pdf.output(dest="S")
     if isinstance(pdf_bytes, bytearray):
@@ -1136,7 +1156,7 @@ def plot_training_curves(loss_history):
         ))
     
     fig.update_layout(
-        title=f'Training Curves (v40.0 - Physics Weight = {PHYSICS_WEIGHT:.4f})',
+        title=f'Training Curves (v41.0 - Physics Weight = {PHYSICS_WEIGHT:.4f})',
         xaxis=dict(title='Epoch'),
         yaxis=dict(title='Loss', type='log'),
         height=400,
@@ -1291,17 +1311,17 @@ def train_and_compare(X_train, X_test, y_train, y_test):
 # 11. STREAMLIT UI
 # ================================================================
 
-st.set_page_config(page_title="PINN Framework v40", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Framework v41", page_icon="🧬", layout="wide")
 clamp_session_state()
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); 
             padding: 2rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
     <h1 style="color: #ffffff; font-size: 2.5rem; margin: 0;">
-        🧬 Hybrid AI Framework v40.0
+        🧬 Hybrid AI Framework v41.0
     </h1>
     <p style="color: #a8b2d1; font-size: 1.2rem; margin: 0.5rem 0 0 0;">
-        PINN · Final Diagnosis (True Std & Pearson Correlation)
+        PINN · Data Distribution Audit
     </p>
     <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">
         Nile Valley University · Postgraduate College · Sudan
@@ -1319,11 +1339,10 @@ with st.sidebar:
     - ✅ **Dataset size:** {N_SAMPLES}
     - ✅ **Loss Tracking:** Enabled
     - ✅ **Heckel Compatibility:** Enabled
-    - ✅ **True Std & Pearson Correlation:** Enabled (Auto-display)
+    - ✅ **Data Distribution Audit:** Enabled (Auto-display)
+    - ✅ **True Std & Correlation:** Enabled
     """)
-    st.info("🔬 **v40.0** — Final Diagnosis")
-    if PHYSICS_WEIGHT == 0.0:
-        st.warning("⚡ Physics is DISABLED (test mode)")
+    st.info("🔬 **v41.0** — Data Distribution Audit")
 
 with st.spinner("🔄 Training PINN..."):
     model, scaler, y_scaler, feature_names, df, loss_history, final_loss_dict = load_pinn_model()
@@ -1361,7 +1380,26 @@ st.caption("✅ Data follows Heckel physics (87.8% compatible).")
 
 st.markdown("---")
 
-# --- PREDICTION STATISTICS & CORRELATION (ALWAYS DISPLAYED) ---
+# --- DATA DISTRIBUTION AUDIT (ORIGINAL DATA) ---
+st.markdown("### 📊 Data Distribution Audit (Original Data)")
+data_audit = []
+for col in ['Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']:
+    data_audit.append({
+        'Variable': col,
+        'Min': df[col].min(),
+        'Max': df[col].max(),
+        'Mean': df[col].mean(),
+        'Std': df[col].std()
+    })
+data_distribution_df = pd.DataFrame(data_audit)
+st.dataframe(data_distribution_df.style.format({
+    'Min': '{:.4f}', 'Max': '{:.4f}', 'Mean': '{:.4f}', 'Std': '{:.4f}'
+}), hide_index=True, use_container_width=True)
+st.caption("If Std of Density is very small (e.g., < 0.05), the data itself is nearly constant.")
+
+st.markdown("---")
+
+# --- PREDICTION STATISTICS & CORRELATION ---
 st.markdown("### 📊 Prediction Statistics & Correlation")
 
 # Prepare test data
@@ -1701,7 +1739,7 @@ with col_right:
             
             with tab5:
                 st.markdown("### 📄 Comprehensive Report (PDF)")
-                st.caption("Download a complete report with formulation details, predictions, loss components, Heckel compatibility, statistics, correlation, and R² per output.")
+                st.caption("Download a complete report with formulation details, predictions, loss components, Heckel compatibility, data distribution, statistics, correlation, and R² per output.")
                 
                 status = "PASS" if (tensile >= TENSILE_MIN and efrf < EFRF_MAX) else "FAIL"
                 timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -1713,21 +1751,21 @@ with col_right:
                     loss_history=loss_history,
                     loss_dict=final_loss_dict,
                     heckel_compat=compat,
-                    r2_per_output=[r2_density_pinn, r2_tensile_pinn, r2_er_pinn, r2_avg_pinn],
-                    ann_r2_per_output=[r2_density_ann, r2_tensile_ann, r2_er_ann, r2_avg_ann],
+                    data_distribution_df=data_distribution_df,
                     stats_df=stats_df,
-                    corr_df=corr_df
+                    corr_df=corr_df,
+                    r2_df=r2_df
                 )
                 
                 st.download_button(
                     label="📥 Download Full Report (PDF)",
                     data=pdf_data,
-                    file_name=f"formulation_report_v40_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                    file_name=f"formulation_report_v41_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
                     mime="application/pdf",
                     use_container_width=True
                 )
                 st.success("✅ One-click download — includes full diagnostics.")
 
 st.markdown("---")
-st.caption(f"🔬 **PINN — v40.0 (Final Diagnosis with True Std & Pearson Correlation)**")
+st.caption(f"🔬 **PINN — v41.0 (Data Distribution Audit)**")
 st.caption(f"📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Postgraduate College, Sudan")
