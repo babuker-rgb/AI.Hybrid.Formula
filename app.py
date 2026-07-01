@@ -1,10 +1,10 @@
 """
-Physics-Informed Neural Network (PINN) - Corrected Pipeline
+Physics-Informed Neural Network (PINN) - Separated Output Heads
 Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 34.0 (Fixed inverse_transform & R² calculation)
+Version: 35.0 (Separated k, A from primary outputs)
 """
 
 import streamlit as st
@@ -41,8 +41,7 @@ NSGA_GENERATIONS = 80
 BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
-# --- PINN with very light physics ---
-PHYSICS_WEIGHT = 0.0001
+PHYSICS_WEIGHT = 0.0001     # Very light physics
 DATA_WEIGHT = 1.0
 N_SAMPLES = 3000
 PATIENCE = 150
@@ -141,13 +140,15 @@ def add_interaction_features(X_raw):
     ], axis=1)
 
 # ================================================================
-# 4. PINN MODEL (WITH PHYSICS)
+# 4. PINN MODEL WITH SEPARATED HEADS (v35)
 # ================================================================
 
-class PINNModel(nn.Module):
-    def __init__(self, input_dim=13, output_dim=5):
-        super(PINNModel, self).__init__()
-        self.network = nn.Sequential(
+class PINNSeparatedHeads(nn.Module):
+    def __init__(self, input_dim=13):
+        super(PINNSeparatedHeads, self).__init__()
+        
+        # Shared backbone
+        self.backbone = nn.Sequential(
             nn.Linear(input_dim, 128),
             nn.BatchNorm1d(128),
             nn.ReLU(),
@@ -160,29 +161,41 @@ class PINNModel(nn.Module):
             nn.BatchNorm1d(64),
             nn.ReLU(),
             nn.Dropout(0.05),
-            nn.Linear(64, 32),
-            nn.BatchNorm1d(32),
-            nn.ReLU(),
-            nn.Linear(32, output_dim)
         )
+        
+        # Separate heads for primary outputs (D, σt, ER)
+        self.head_density = nn.Linear(64, 1)
+        self.head_tensile = nn.Linear(64, 1)
+        self.head_er = nn.Linear(64, 1)
+        
+        # Separate heads for latent physics parameters (k, A)
+        self.head_k = nn.Linear(64, 1)
+        self.head_A = nn.Linear(64, 1)
+        
         self.loss_history = {'train': [], 'val': [], 'data': [], 'physics': []}
 
     def forward(self, X):
-        raw = self.network(X)
-        density = torch.sigmoid(raw[:, 0:1])
-        tensile = torch.nn.functional.softplus(raw[:, 1:2])
-        er = torch.nn.functional.softplus(raw[:, 2:3])
-        k = torch.nn.functional.softplus(raw[:, 3:4])
-        A = raw[:, 4:5]
-        return torch.cat([density, tensile, er, k, A], dim=1)
+        features = self.backbone(X)
+        
+        # Primary outputs (with physical activation functions)
+        density = torch.sigmoid(self.head_density(features))
+        tensile = torch.nn.functional.softplus(self.head_tensile(features))
+        er = torch.nn.functional.softplus(self.head_er(features))
+        
+        # Latent physics parameters (k must be positive, A can be any)
+        k = torch.nn.functional.softplus(self.head_k(features))
+        A = self.head_A(features)
+        
+        return density, tensile, er, k, A
 
-    def predict(self, X_scaled):
+    def predict_primary(self, X_scaled):
+        """Return only D, tensile, ER for evaluation."""
         self.eval()
         with torch.no_grad():
             if not isinstance(X_scaled, torch.Tensor):
                 X_scaled = torch.FloatTensor(X_scaled)
-            output = self.forward(X_scaled)
-            return output[:, :3].numpy()  # Return only D, tensile, ER
+            d, t, e, _, _ = self.forward(X_scaled)
+            return torch.cat([d, t, e], dim=1).numpy()
 
     def compute_loss(self, X_scaled, X_raw, y_true, epoch=0, max_epochs=3000,
                      w_data=DATA_WEIGHT,
@@ -190,36 +203,33 @@ class PINNModel(nn.Module):
                      w_mcc=0.1, w_density=0.1,
                      efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
                      compute_grad=False, record_loss=False):
+        
         pressure_real = X_raw[:, 5]
         mcc_real = X_raw[:, 1]
-
-        y_pred = self.forward(X_scaled)
-        density_pred = y_pred[:, 0]
-        tensile_pred = y_pred[:, 1]
-        er_pred = y_pred[:, 2]
-        k_pred = y_pred[:, 3]
-        A_pred = y_pred[:, 4]
-
-        # Data loss
-        data_loss = nn.MSELoss()(y_pred[:, :3], y_true)
-
-        # Physics loss
+        
+        # Forward pass
+        density_pred, tensile_pred, er_pred, k_pred, A_pred = self.forward(X_scaled)
+        
+        # Data loss: only on primary outputs (D, σt, ER)
+        data_loss = nn.MSELoss()(torch.cat([density_pred, tensile_pred, er_pred], dim=1), y_true)
+        
+        # Physics loss using k and A (Heckel equation, EFRF, monotonicity, etc.)
         D_clamped = torch.clamp(density_pred, 0.01, 0.99)
         heckel_pred = torch.log(1.0 / (1.0 - D_clamped))
         heckel_target = k_pred * pressure_real + A_pred
         heckel_loss = torch.mean((heckel_pred - heckel_target) ** 2)
-
+        
         efrf_pred = er_pred / (tensile_pred + 1e-8)
         efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
-
+        
         mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
         density_penalty = torch.mean(torch.relu(density_pred - DENSITY_MAX) ** 2)
-
+        
         if compute_grad:
             if not X_scaled.requires_grad:
                 X_scaled.requires_grad_(True)
-            y_pred_grad = self.forward(X_scaled)
-            density_grad = y_pred_grad[:, 0]
+            # Compute gradient of density w.r.t. pressure for monotonicity
+            density_grad, _, _, _, _ = self.forward(X_scaled)
             grad_density = torch.autograd.grad(
                 outputs=density_grad,
                 inputs=X_scaled,
@@ -230,17 +240,18 @@ class PINNModel(nn.Module):
             monotonic_loss = torch.mean(torch.relu(-grad_pressure) ** 2)
         else:
             monotonic_loss = torch.tensor(0.0, device=X_scaled.device)
-
+        
         mask_low = (pressure_real < 120).float()
         mask_high = (pressure_real > 230).float()
         boundary_loss = (
             torch.mean(mask_low * torch.relu(0.5 - density_pred) ** 2) +
             torch.mean(mask_high * torch.relu(density_pred - 0.98) ** 2)
         )
-
+        
+        # Regularization for k and A to keep them physically plausible
         k_reg = torch.mean(torch.relu(k_pred - 0.1) ** 2) + torch.mean(torch.relu(0.005 - k_pred) ** 2)
         A_reg = torch.mean(torch.relu(A_pred - 2.0) ** 2) + torch.mean(torch.relu(0.5 - A_pred) ** 2)
-
+        
         physics_loss = heckel_loss + efrf_loss + monotonic_loss + boundary_loss
         total_loss = (
             w_data * data_loss +
@@ -249,18 +260,18 @@ class PINNModel(nn.Module):
             w_density * density_penalty +
             0.01 * k_reg + 0.01 * A_reg
         )
-
+        
         loss_dict = {
             'data_loss': data_loss.item(),
             'physics_loss': physics_loss.item(),
             'total_loss': total_loss.item()
         }
-
+        
         if record_loss:
             self.loss_history['train'].append(total_loss.item())
             self.loss_history['data'].append(data_loss.item())
             self.loss_history['physics'].append(physics_loss.item())
-
+        
         return total_loss, loss_dict
 
 # ================================================================
@@ -352,7 +363,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.set_font("Arial", "B", 18)
     pdf.cell(0, 10, sanitize_text("Formulation Optimization Report"), ln=True, align="C")
     pdf.set_font("Arial", "I", 11)
-    pdf.cell(0, 6, sanitize_text("Hybrid AI Framework (PINN + NSGA-II)"), ln=True, align="C")
+    pdf.cell(0, 6, sanitize_text("Hybrid AI Framework (PINN - Separated Heads)"), ln=True, align="C")
     pdf.set_font("Arial", "", 10)
     pdf.cell(0, 6, f"Date: {timestamp}", ln=True, align="C")
     pdf.ln(4)
@@ -513,7 +524,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.ln(3)
     pdf.set_y(270)
     pdf.set_font("Arial", "I", 8)
-    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v34.0", ln=True, align="C")
+    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v35.0", ln=True, align="C")
     
     pdf_bytes = pdf.output(dest="S")
     if isinstance(pdf_bytes, bytearray):
@@ -524,7 +535,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
         return str(pdf_bytes).encode('latin1')
 
 # ================================================================
-# 7. NSGA-II (FIXED EFRF CALCULATION)
+# 7. NSGA-II (UPDATED FOR SEPARATED HEADS)
 # ================================================================
 
 class NSGAII:
@@ -586,23 +597,22 @@ class NSGAII:
                 X_tensor = torch.FloatTensor(inputs_scaled)
                 
                 with torch.no_grad():
-                    pred_scaled = self.model.predict(X_tensor)[0]  # D, tensile, ER (scaled)
+                    pred_scaled = self.model.predict_primary(X_tensor)[0]  # D, tensile, ER (scaled)
                     pred = self.y_scaler.inverse_transform([pred_scaled])[0]  # Actual values
                 
                 tensile = float(pred[1])  # Tensile strength in MPa
                 er = float(pred[2])       # Elastic recovery in %
                 
-                # --- FIX: Calculate EFRF correctly ---
                 if tensile < 0.01:
                     tensile = 0.01
                     efrf = 10.0
                 else:
-                    efrf = er / tensile  # EFRF = ER / σt
-                    efrf = max(0.0001, min(efrf, 5.0))  # Clamp to reasonable range
+                    efrf = er / tensile
+                    efrf = max(0.0001, min(efrf, 5.0))
                 
                 constraints[i] = (tensile >= TENSILE_MIN and efrf < EFRF_MAX)
-                objectives[i, 0] = -api  # Maximize API
-                objectives[i, 1] = efrf  # Minimize EFRF
+                objectives[i, 0] = -api
+                objectives[i, 1] = efrf
                 tensile_strengths[i] = tensile
 
                 population[i, 0] = api
@@ -803,7 +813,7 @@ class NSGAII:
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 8. TRAIN MODEL (PINN WITH PHYSICS)
+# 8. TRAIN MODEL (PINN WITH SEPARATED HEADS)
 # ================================================================
 
 @st.cache_resource
@@ -817,6 +827,7 @@ def load_pinn_model():
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_augmented)
 
+    # Scale only the primary outputs (D, σt, ER)
     y_scaler = StandardScaler()
     y_scaled = y_scaler.fit_transform(y)
 
@@ -837,7 +848,7 @@ def load_pinn_model():
     X_raw_val_t = torch.FloatTensor(X_raw_val)
     y_val_t = torch.FloatTensor(y_val)
 
-    model = PINNModel(input_dim=X_augmented.shape[1])
+    model = PINNSeparatedHeads(input_dim=X_augmented.shape[1])
     
     optimizer_adam = optim.Adam(model.parameters(), lr=0.001)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer_adam, patience=50, factor=0.5)
@@ -850,7 +861,7 @@ def load_pinn_model():
     progress_bar = st.progress(0)
     max_epochs = 3000
 
-    st.info("🧠 Training PINN with physics constraints...")
+    st.info("🧠 Training PINN with separated heads (k, A latent)...")
 
     for epoch in range(max_epochs):
         model.train()
@@ -909,7 +920,7 @@ def load_pinn_model():
     model.scaler = scaler
     model.y_scaler = y_scaler
 
-    torch.save(model.state_dict(), 'pinn_checkpoint.pt')
+    torch.save(model.state_dict(), 'pinn_separated_checkpoint.pt')
 
     return model, scaler, y_scaler, feature_names, df, model.loss_history
 
@@ -918,14 +929,13 @@ def load_pinn_model():
 # ================================================================
 
 def predict_pinn(model, scaler, y_scaler, inputs, verbose=False):
-    """Predict with diagnostic output for debugging."""
     try:
         inputs_with_features = add_interaction_features(np.array([inputs]))[0]
         inputs_scaled = scaler.transform([inputs_with_features])
         X_tensor = torch.FloatTensor(inputs_scaled)
         
         with torch.no_grad():
-            pred_scaled = model.predict(X_tensor)[0]  # D, tensile, ER (scaled)
+            pred_scaled = model.predict_primary(X_tensor)[0]  # D, tensile, ER (scaled)
         
         pred_original = y_scaler.inverse_transform([pred_scaled])[0]
         density, tensile, er = pred_original[0], pred_original[1], pred_original[2]
@@ -986,7 +996,7 @@ def plot_training_curves(loss_history):
         ))
     
     fig.update_layout(
-        title='Training Curves (PINN)',
+        title='Training Curves (PINN - Separated Heads)',
         xaxis=dict(title='Epoch'),
         yaxis=dict(title='Loss', type='log'),
         height=400,
@@ -1141,17 +1151,17 @@ def train_and_compare(X_train, X_test, y_train, y_test):
 # 10. STREAMLIT UI
 # ================================================================
 
-st.set_page_config(page_title="PINN Framework v34", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Framework v35", page_icon="🧬", layout="wide")
 clamp_session_state()
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); 
             padding: 2rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
     <h1 style="color: #ffffff; font-size: 2.5rem; margin: 0;">
-        🧬 Hybrid AI Framework v34.0
+        🧬 Hybrid AI Framework v35.0
     </h1>
     <p style="color: #a8b2d1; font-size: 1.2rem; margin: 0.5rem 0 0 0;">
-        PINN · Corrected Pipeline
+        PINN · Separated Heads (k, A latent)
     </p>
     <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">
         Nile Valley University · Postgraduate College · Sudan
@@ -1165,14 +1175,15 @@ with st.sidebar:
     st.markdown("### 📚 Model Configuration")
     st.markdown(f"""
     - ✅ **PINN with Physics**
-    - ✅ **Fixed inverse_transform**
-    - ✅ **Fixed R² calculation**
+    - ✅ **Separated Heads:** D, σt, ER (primary) + k, A (latent)
+    - ✅ **Data Loss & R² only on primary**
+    - ✅ **Physics Loss uses k, A**
     - ✅ **Dataset size:** {N_SAMPLES}
     - ✅ **Physics weight:** {PHYSICS_WEIGHT:.4f}
     """)
-    st.info("🔬 **v34.0** — Diagnosing Pipeline Issues")
+    st.info("🔬 **v35.0** — k, A isolated from evaluation")
 
-with st.spinner("🔄 Training PINN..."):
+with st.spinner("🔄 Training PINN (separated heads)..."):
     model, scaler, y_scaler, feature_names, df, loss_history = load_pinn_model()
 st.success("✅ PINN trained successfully")
 
@@ -1219,7 +1230,6 @@ with col_left:
         speed = st.slider("🔄 Speed (rpm)", 1.0, 50.0, get_safe_value('speed'), 0.5, key="speed")
         granule = st.slider("🔬 Granule Size (µm)", 30.0, 250.0, get_safe_value('granule'), 1.0, key="granule")
     
-    # Diagnostic checkbox
     verbose_pred = st.checkbox("🔍 Enable Diagnostic Output", value=False)
     
     predict_btn = st.button("🔬 Predict & Optimize", use_container_width=True)
@@ -1314,16 +1324,14 @@ with col_right:
                 X_train_scaled = scaler.transform(X_train_aug)
                 X_test_scaled = scaler.transform(X_test_aug)
                 
-                # --- FIX: PINN predictions with correct inverse_transform ---
-                pinn_pred_scaled = model.predict(torch.FloatTensor(X_test_scaled))
+                # PINN predictions with separated heads
+                pinn_pred_scaled = model.predict_primary(torch.FloatTensor(X_test_scaled))
                 pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]  # Tensile only
                 
-                # --- FIX: Calculate R² using sklearn ---
                 pinn_r2 = r2_score(y_test, pinn_pred)
                 pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
                 pinn_mae = mean_absolute_error(y_test, pinn_pred)
                 
-                # --- Diagnostic: Show first 10 predictions ---
                 with st.expander("🔍 Diagnostic: Predictions vs Actual (First 10)"):
                     diag_df = pd.DataFrame({
                         'Actual': y_test[:10],
@@ -1431,5 +1439,5 @@ with col_right:
                 st.success("✅ One-click download — includes formulation, predictions, training curves, and model comparison.")
 
 st.markdown("---")
-st.caption(f"🔬 **PINN — v34.0 (Fixed Pipeline)**")
+st.caption(f"🔬 **PINN — v35.0 (Separated Heads)**")
 st.caption(f"📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Postgraduate College, Sudan")
