@@ -1369,14 +1369,99 @@ st.caption(f"✅ Physics contribution = {final_loss_dict.get('w_physics', 0):.4f
 
 st.markdown("---")
 
-st.markdown("### 🔬 Heckel Compatibility Test")
-compat = test_heckel_compatibility(df, tol=0.05)
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("k (estimated)", f"{compat['k_estimated']:.4f}")
-col2.metric("A (estimated)", f"{compat['A_estimated']:.4f}")
-col3.metric("Compatible (5%)", f"{compat['compatible_fraction']:.1%}")
-col4.metric("Mean Relative Error", f"{compat['mean_rel_error']:.1%}")
-st.caption("✅ Data follows Heckel physics (87.8% compatible).")
+# ================================================================
+# DATA DISTRIBUTION AUDIT (ORIGINAL DATA)
+# ================================================================
+st.markdown("### 📊 Data Distribution Audit (Original Data)")
+data_audit = []
+for col in ['Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']:
+    data_audit.append({
+        'Variable': col,
+        'Min': df[col].min(),
+        'Max': df[col].max(),
+        'Mean': df[col].mean(),
+        'Std': df[col].std()
+    })
+data_distribution_df = pd.DataFrame(data_audit)
+st.dataframe(data_distribution_df.style.format({
+    'Min': '{:.4f}', 'Max': '{:.4f}', 'Mean': '{:.4f}', 'Std': '{:.4f}'
+}), hide_index=True, use_container_width=True)
+st.caption("If Std of Density is very small (e.g., < 0.05), the data itself is nearly constant.")
+
+st.markdown("---")
+
+# ================================================================
+# PREDICTION STATISTICS & CORRELATION
+# ================================================================
+st.markdown("### 📊 Prediction Statistics & Correlation")
+
+# Prepare test data
+X_train, X_test, y_train, y_test = train_test_split(
+    df[feature_names].values, df[['Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']].values,
+    test_size=0.2, random_state=42
+)
+X_train_aug = add_interaction_features(X_train)
+X_test_aug = add_interaction_features(X_test)
+X_train_scaled = scaler.transform(X_train_aug)
+X_test_scaled = scaler.transform(X_test_aug)
+
+# PINN predictions
+pinn_pred_scaled = model.predict_primary(torch.FloatTensor(X_test_scaled))
+pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)
+y_true = y_test
+
+# --- Statistics table with TRUE STD values ---
+output_names = ['Density', 'Tensile', 'ER']
+stats_data = []
+for i, name in enumerate(output_names):
+    true_mean = np.mean(y_true[:, i])
+    true_std = np.std(y_true[:, i])
+    pred_mean = np.mean(pinn_pred[:, i])
+    pred_std = np.std(pinn_pred[:, i])
+    std_ratio = pred_std / true_std if true_std > 0 else np.nan
+    stats_data.append({
+        'Output': name,
+        'True Mean': true_mean,
+        'Pred Mean': pred_mean,
+        'True Std': true_std,
+        'Pred Std': pred_std,
+        'Std Ratio': std_ratio
+    })
+stats_df = pd.DataFrame(stats_data)
+
+st.markdown("#### 📊 Statistics: True vs Predicted (with TRUE STD)")
+st.dataframe(stats_df.style.format({
+    'True Mean': '{:.4f}', 'Pred Mean': '{:.4f}',
+    'True Std': '{:.4f}', 'Pred Std': '{:.4f}',
+    'Std Ratio': '{:.2f}'
+}), hide_index=True, use_container_width=True)
+
+# Highlight collapse
+for i, row in stats_df.iterrows():
+    if row['Std Ratio'] < 0.5:
+        st.warning(f"⚠️ **{row['Output']}** Std Ratio = {row['Std Ratio']:.2f} (< 0.5) — possible collapse!")
+st.caption("If Std Ratio << 1.0, the model is collapsing to a constant value.")
+
+# --- Correlation & R² table ---
+corr_data = []
+for i, name in enumerate(output_names):
+    r2 = r2_score(y_true[:, i], pinn_pred[:, i])
+    corr, _ = pearsonr(y_true[:, i], pinn_pred[:, i])
+    corr_data.append({
+        'Output': name,
+        'Pearson Correlation': corr,
+        'R²': r2
+    })
+corr_df = pd.DataFrame(corr_data)
+
+st.markdown("#### 📊 Correlation & R²")
+st.dataframe(corr_df.style.format({
+    'Pearson Correlation': '{:.4f}',
+    'R²': '{:.4f}'
+}), hide_index=True, use_container_width=True)
+st.caption("If Pearson Correlation is high but R² is low, the issue is scale/calibration. If both are low, the model fails to learn the relationship.")
+
+st.markdown("---")
 
 st.markdown("---")
 
