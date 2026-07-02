@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 28.1 (Fixed EFRF & DENSITY_MAX)
+Version: 28.2 (Fixed Density Constraint Consistency)
 """
 
 import streamlit as st
@@ -33,7 +33,7 @@ warnings.filterwarnings('ignore')
 TENSILE_MIN = 1.90          # MPa
 EFRF_MAX = 0.40             # dimensionless
 MCC_MAX = 8.0               # %
-DENSITY_MAX = 0.97          # Changed from 0.99 to 0.97 (more realistic)
+DENSITY_MAX = 0.97          # More realistic upper bound
 PRESSURE_MAX = 300.0        # MPa
 
 NSGA_POP_SIZE = 100
@@ -43,6 +43,7 @@ BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
 PHYSICS_WEIGHT_INIT = 0.5
+W_DENSITY = 2.0             # Increased from 0.5 to enforce density constraint
 
 # ================================================================
 # 1. SAFE IMPORTS
@@ -138,7 +139,7 @@ def add_interaction_features(X_raw):
     ], axis=1)
 
 # ================================================================
-# 4. MULTI-TASK TRUE PINN MODEL (unchanged)
+# 4. MULTI-TASK TRUE PINN MODEL (updated w_density)
 # ================================================================
 
 class MultiTaskTruePINN(nn.Module):
@@ -172,7 +173,7 @@ class MultiTaskTruePINN(nn.Module):
     def compute_loss(self, X_scaled, X_raw, y_true, epoch=0, max_epochs=4000,
                      w_data_init=2.0, w_physics_init=PHYSICS_WEIGHT_INIT,
                      w_data_final=1.0, w_physics_final=1.0,
-                     w_mcc=0.5, w_density=0.5,
+                     w_mcc=0.5, w_density=W_DENSITY,  # Increased weight
                      efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
                      compute_grad=True):
         pressure_real = X_raw[:, 5]
@@ -321,7 +322,7 @@ def generate_pinn_data(n_samples=600, random_state=42):
     return df, feature_names
 
 # ================================================================
-# 6. PDF GENERATION (unchanged)
+# 6. PDF GENERATION (updated status condition)
 # ================================================================
 
 def sanitize_text(text):
@@ -355,6 +356,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.cell(0, 6, "Nile Valley University, Postgraduate College, Sudan", ln=True, align="C")
     pdf.ln(5)
     
+    # 1. Formulation Summary
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, sanitize_text("1. Formulation Summary"), ln=True, fill=True)
@@ -380,6 +382,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     
     pdf.ln(4)
     
+    # 2. Process Parameters
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, sanitize_text("2. Process Parameters"), ln=True, fill=True)
@@ -400,12 +403,13 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     
     pdf.ln(4)
     
+    # 3. Prediction Results
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, sanitize_text("3. Prediction Results"), ln=True, fill=True)
     pdf.set_font("Arial", "", 10)
     
-    results = [("Density", f"{density:.3f}", "-"),
+    results = [("Density", f"{density:.3f}", f"≤ {DENSITY_MAX:.2f}"),
                ("Tensile Strength", f"{tensile:.3f} MPa", f">= {TENSILE_MIN:.2f} MPa"),
                ("Elastic Recovery", f"{er:.3f} %", "-"),
                ("EFRF", f"{efrf:.4f}", f"< {EFRF_MAX:.2f}")]
@@ -417,12 +421,18 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     
     pdf.set_font("Arial", "", 10)
     for r in results:
-        pdf.cell(45, 6, sanitize_text(r[0]), 1, 0, "L")
-        pdf.cell(35, 6, sanitize_text(r[1]), 1, 0, "C")
-        pdf.cell(45, 6, sanitize_text(r[2]), 1, 1, "C")
+        if len(r) == 2:
+            pdf.cell(45, 6, sanitize_text(r[0]), 1, 0, "L")
+            pdf.cell(35, 6, sanitize_text(r[1]), 1, 0, "C")
+            pdf.cell(45, 6, "-", 1, 1, "C")
+        else:
+            pdf.cell(45, 6, sanitize_text(r[0]), 1, 0, "L")
+            pdf.cell(35, 6, sanitize_text(r[1]), 1, 0, "C")
+            pdf.cell(45, 6, sanitize_text(r[2]), 1, 1, "C")
     
     pdf.ln(4)
     
+    # 4. Overall Status (updated with density)
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, sanitize_text("4. Overall Status"), ln=True, fill=True)
@@ -436,6 +446,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.set_text_color(0, 0, 0)
     pdf.ln(4)
     
+    # 5. Model Comparison (if provided)
     if model_comparison_df is not None and not model_comparison_df.empty:
         pdf.set_font("Arial", "B", 13)
         pdf.set_fill_color(230, 230, 230)
@@ -458,6 +469,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
             pdf.cell(40, 6, sanitize_text(str(row['Physics'])), 1, 1, "L")
         pdf.ln(4)
     
+    # 6. Recommendations
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, sanitize_text("6. Recommendations"), ln=True, fill=True)
@@ -481,6 +493,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     
     pdf.ln(4)
     
+    # 7. Contact
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, sanitize_text("7. Contact Information"), ln=True, fill=True)
@@ -493,7 +506,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.ln(3)
     pdf.set_y(270)
     pdf.set_font("Arial", "I", 8)
-    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v28.1", ln=True, align="C")
+    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v28.2", ln=True, align="C")
     
     pdf_bytes = pdf.output(dest="S")
     if isinstance(pdf_bytes, bytearray):
@@ -504,7 +517,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
         return str(pdf_bytes).encode('latin1')
 
 # ================================================================
-# 7. NSGA-II (FIXED: Correct EFRF calculation)
+# 7. NSGA-II (updated constraints with density)
 # ================================================================
 
 class NSGAII:
@@ -567,7 +580,6 @@ class NSGAII:
                 
                 with torch.no_grad():
                     pred_scaled = self.model.predict(X_tensor)[0]
-                    # --- FIX: Inverse transform to get actual values ---
                     pred_actual = self.y_scaler.inverse_transform([pred_scaled])[0]
                 
                 density = float(pred_actual[0])
@@ -578,10 +590,11 @@ class NSGAII:
                     tensile = 0.01
                     efrf = 10.0
                 else:
-                    efrf = er / tensile  # Correct EFRF from actual values
+                    efrf = er / tensile
                     efrf = max(0.0001, min(efrf, 5.0))
                 
-                constraints[i] = (tensile >= TENSILE_MIN and efrf < EFRF_MAX)
+                # --- Updated constraints: include density ---
+                constraints[i] = (tensile >= TENSILE_MIN and efrf < EFRF_MAX and density <= DENSITY_MAX)
                 objectives[i, 0] = -api - self.w_tensile * tensile
                 objectives[i, 1] = efrf
                 tensile_strengths[i] = tensile
@@ -600,6 +613,7 @@ class NSGAII:
 
         return objectives, constraints, tensile_strengths, population
 
+    # The rest of NSGA-II methods remain identical
     def _fast_non_dominated_sort(self, objectives, constraints):
         n = objectives.shape[0]
         S = [[] for _ in range(n)]
@@ -840,7 +854,7 @@ def load_pinn_model():
             epoch=epoch, max_epochs=max_epochs,
             w_data_init=2.0, w_physics_init=PHYSICS_WEIGHT_INIT,
             w_data_final=1.0, w_physics_final=1.0,
-            w_mcc=0.5, w_density=0.5,
+            w_mcc=0.5, w_density=W_DENSITY,
             efrf_target=EFRF_MAX, mcc_max=MCC_MAX, compute_grad=True
         )
         total_loss.backward()
@@ -854,7 +868,7 @@ def load_pinn_model():
                 epoch=epoch, max_epochs=max_epochs,
                 w_data_init=2.0, w_physics_init=PHYSICS_WEIGHT_INIT,
                 w_data_final=1.0, w_physics_final=1.0,
-                w_mcc=0.5, w_density=0.5,
+                w_mcc=0.5, w_density=W_DENSITY,
                 efrf_target=EFRF_MAX, mcc_max=MCC_MAX, compute_grad=False
             )
         val_loss_value = val_loss.item()
@@ -885,7 +899,7 @@ def load_pinn_model():
             epoch=adam_epochs, max_epochs=max_epochs,
             w_data_init=1.0, w_physics_init=PHYSICS_WEIGHT_INIT,
             w_data_final=1.0, w_physics_final=1.0,
-            w_mcc=0.5, w_density=0.5,
+            w_mcc=0.5, w_density=W_DENSITY,
             efrf_target=EFRF_MAX, mcc_max=MCC_MAX, compute_grad=True
         )
         total_loss.backward()
@@ -904,7 +918,7 @@ def load_pinn_model():
                 max_epochs=max_epochs,
                 w_data_init=1.0, w_physics_init=PHYSICS_WEIGHT_INIT,
                 w_data_final=1.0, w_physics_final=1.0,
-                w_mcc=0.5, w_density=0.5,
+                w_mcc=0.5, w_density=W_DENSITY,
                 efrf_target=EFRF_MAX, mcc_max=MCC_MAX, compute_grad=False
             )
             val_loss_value = val_loss.item()
@@ -927,7 +941,7 @@ def load_pinn_model():
     return model, scaler, y_scaler, feature_names, df, {'train': [], 'val': []}
 
 # ================================================================
-# 9. PREDICTION & PLOTS (FIXED: use y_scaler)
+# 9. PREDICTION & PLOTS (updated metrics display)
 # ================================================================
 
 def predict_pinn(model, scaler, y_scaler, inputs):
@@ -1091,10 +1105,10 @@ def train_and_compare(X_train, X_test, y_train, y_test):
     return pd.DataFrame(results)
 
 # ================================================================
-# 10. STREAMLIT UI (UPDATED: pass y_scaler to NSGA-II)
+# 10. STREAMLIT UI (updated feasibility, status, KPI)
 # ================================================================
 
-st.set_page_config(page_title="PINN Framework v28.1", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Framework v28.2", page_icon="🧬", layout="wide")
 clamp_session_state()
 
 # --- HERO SECTION ---
@@ -1102,7 +1116,7 @@ st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); 
             padding: 2rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
     <h1 style="color: #ffffff; font-size: 2.5rem; margin: 0;">
-        🧬 Hybrid AI Framework v28.1
+        🧬 Hybrid AI Framework v28.2
     </h1>
     <p style="color: #a8b2d1; font-size: 1.2rem; margin: 0.5rem 0 0 0;">
         Physics-Informed Neural Network · Multi-Objective Optimization
@@ -1131,9 +1145,10 @@ with st.sidebar:
     - Adam → LBFGS hybrid
     - **NSGA-II:** pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS}
     - **Binder max:** {BINDER_MAX:.1f}%
-    - **Fixed EFRF calculation** ✅
+    - **Density penalty weight:** {W_DENSITY:.1f}
+    - **All constraints unified** ✅
     """)
-    st.info("🔬 **v28.1** — Fixed EFRF & DENSITY_MAX")
+    st.info("🔬 **v28.2** — Fixed Density Constraint Consistency")
 
 # --- LOAD MODEL ---
 with st.spinner("🔄 Training Multi-Task PINN..."):
@@ -1198,27 +1213,28 @@ with col_right:
             with st.spinner("🧠 Running prediction..."):
                 density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs)
             
-            # --- KPIs ---
+            # --- KPIs (updated density display) ---
             kpi_cols = st.columns(3)
-            kpi_cols[0].metric("Density", f"{density:.3f}", delta=f"≤ {DENSITY_MAX:.2f} ideal")
+            kpi_cols[0].metric("Density", f"{density:.3f}", delta=f"≤ {DENSITY_MAX:.2f} {'✅' if density <= DENSITY_MAX else '❌'}")
             kpi_cols[1].metric("Tensile", f"{tensile:.3f} MPa", delta=f">= {TENSILE_MIN:.2f} PASS" if tensile >= TENSILE_MIN else f"< {TENSILE_MIN:.2f} FAIL")
             kpi_cols[2].metric("EFRF", f"{efrf:.4f}", delta=f"< {EFRF_MAX:.2f} PASS" if efrf < EFRF_MAX else f">= {EFRF_MAX:.2f} FAIL")
             
             st.markdown("---")
             
-            # --- Status ---
-            if tensile >= TENSILE_MIN and efrf < EFRF_MAX:
-                st.success(f"✅ Formulation satisfies all constraints (σt ≥ {TENSILE_MIN:.2f}, EFRF < {EFRF_MAX:.2f})")
-            elif tensile >= TENSILE_MIN and efrf < 0.45:
-                st.warning(f"⚠️ EFRF = {efrf:.4f} is above {EFRF_MAX:.2f} but within acceptable range")
+            # --- Status (updated with density) ---
+            if tensile >= TENSILE_MIN and efrf < EFRF_MAX and density <= DENSITY_MAX:
+                st.success(f"✅ Formulation satisfies all constraints (σt ≥ {TENSILE_MIN:.2f}, EFRF < {EFRF_MAX:.2f}, Density ≤ {DENSITY_MAX:.2f})")
+            elif tensile >= TENSILE_MIN and efrf < EFRF_MAX and density > DENSITY_MAX:
+                st.error(f"❌ Formulation violates DENSITY constraint (Density = {density:.3f} > {DENSITY_MAX:.2f})")
             else:
-                st.error(f"❌ Formulation fails constraints")
+                st.error(f"❌ Formulation violates one or more constraints")
             
-            # --- Feasibility ---
+            # --- Feasibility (updated with 3 conditions) ---
             st.markdown("### ✅ Feasibility")
-            pass_cols = st.columns(2)
+            pass_cols = st.columns(3)
             pass_cols[0].metric(f"σt ≥ {TENSILE_MIN:.2f} MPa", "✅ PASS" if tensile >= TENSILE_MIN else "❌ FAIL")
             pass_cols[1].metric(f"EFRF < {EFRF_MAX:.2f}", "✅ PASS" if efrf < EFRF_MAX else "❌ FAIL")
+            pass_cols[2].metric(f"Density ≤ {DENSITY_MAX:.2f}", "✅ PASS" if density <= DENSITY_MAX else "❌ FAIL")
             
             # --- Physics Verification ---
             with st.expander("🔬 Physics Verification"):
@@ -1233,7 +1249,7 @@ with col_right:
                 except:
                     pass
             
-            # --- NSGA-II ---
+            # --- NSGA-II (updated with density in constraints) ---
             st.markdown("### ⚙️ NSGA-II")
             bounds = np.array([
                 [85, 95], [0, MCC_MAX], [0.5, 6.0], [0.01, 1.2], 
@@ -1241,7 +1257,6 @@ with col_right:
             ])
             with st.spinner(f"🔄 Running NSGA-II (pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS})..."):
                 start_time = time.time()
-                # Pass y_scaler to NSGA-II
                 nsga = NSGAII(model, scaler, y_scaler, bounds, pop_size=NSGA_POP_SIZE, n_generations=NSGA_GENERATIONS, w_tensile=0.0)
                 pop, objectives, constraints, fronts = nsga.run()
                 elapsed = time.time() - start_time
@@ -1354,7 +1369,8 @@ with col_right:
                 st.markdown("### 📄 Comprehensive Report (PDF)")
                 st.caption("Download a complete report with formulation details, predictions, and model comparison.")
                 
-                status = "PASS" if (tensile >= TENSILE_MIN and efrf < EFRF_MAX) else "FAIL"
+                # --- Status for PDF (updated with density) ---
+                status = "PASS" if (tensile >= TENSILE_MIN and efrf < EFRF_MAX and density <= DENSITY_MAX) else "FAIL"
                 timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 
                 pdf_data = generate_full_pdf_report(
@@ -1373,5 +1389,5 @@ with col_right:
                 st.success("✅ One-click download — includes formulation, predictions, and model comparison.")
 
 st.markdown("---")
-st.caption(f"🔬 **Multi-Task True PINN — v28.1 (Fixed EFRF & DENSITY_MAX)**")
+st.caption(f"🔬 **Multi-Task True PINN — v28.2 (Fixed Density Constraint Consistency)**")
 st.caption(f"📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Postgraduate College, Sudan")
