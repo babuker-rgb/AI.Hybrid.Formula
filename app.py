@@ -59,7 +59,7 @@ except ImportError:
     XGB_AVAILABLE = False
 
 # ================================================================
-# 2. SESSION STATE (unchanged)
+# 2. SESSION STATE
 # ================================================================
 
 DEFAULTS = {
@@ -119,7 +119,7 @@ safe_initialize()
 clamp_session_state()
 
 # ================================================================
-# 3. FEATURE ENGINEERING (unchanged)
+# 3. FEATURE ENGINEERING
 # ================================================================
 
 def add_interaction_features(X_raw):
@@ -148,7 +148,6 @@ def add_interaction_features(X_raw):
 class MultiTaskTruePINN(nn.Module):
     def __init__(self, input_dim=13, output_dim=5):
         super(MultiTaskTruePINN, self).__init__()
-        # Simpler architecture with ReLU for better gradient flow
         self.network = nn.Sequential(
             nn.Linear(input_dim, 128),
             nn.LayerNorm(128),
@@ -235,13 +234,10 @@ class MultiTaskTruePINN(nn.Module):
 
         # Monotonicity: density should increase with pressure
         if compute_grad:
-            # We need to compute gradient with respect to raw pressure
-            # Create a tensor with requires_grad for the scaled features
             X_grad = X_scaled.clone().detach().requires_grad_(True)
             y_grad = self.forward(X_grad)
             density_grad = y_grad[:, 0]
             
-            # Compute gradient of density w.r.t. scaled inputs
             grad_density = torch.autograd.grad(
                 outputs=density_grad,
                 inputs=X_grad,
@@ -251,8 +247,6 @@ class MultiTaskTruePINN(nn.Module):
             )[0]
             
             # The pressure feature is at index 5 in the scaled input
-            # We want ∂D/∂P > 0 (monotonic increasing)
-            # Penalize negative gradients
             grad_pressure = grad_density[:, 5]
             monotonic_loss = torch.mean(torch.relu(-grad_pressure) ** 2)
         else:
@@ -360,7 +354,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# 6. PDF GENERATION (updated with unified constraints)
+# 6. PDF GENERATION
 # ================================================================
 
 def sanitize_text(text):
@@ -618,7 +612,6 @@ class NSGAII:
                 X_tensor = torch.FloatTensor(inputs_scaled)
                 
                 with torch.no_grad():
-                    # Model.predict now returns naturally bounded density
                     pred_scaled = self.model.predict(X_tensor)
                     pred_actual = self.y_scaler.inverse_transform(pred_scaled)[0]
                 
@@ -633,7 +626,7 @@ class NSGAII:
                     efrf = er / tensile
                     efrf = max(0.0001, min(efrf, 5.0))
                 
-                # --- UNIFIED CONSTRAINTS (same as feasibility check) ---
+                # --- UNIFIED CONSTRAINTS ---
                 constraints[i] = (
                     tensile >= TENSILE_MIN and
                     efrf < EFRF_MAX and
@@ -660,11 +653,191 @@ class NSGAII:
 
         return objectives, constraints, tensile_strengths, population
 
-    # --- All NSGA-II methods (fast_non_dominated_sort, crowding_distance, etc.) ---
-    # remain identical to the original v28.7 code (to keep the answer focused, they are omitted here but included in the full code)
+    def _fast_non_dominated_sort(self, objectives, constraints):
+        n = objectives.shape[0]
+        S = [[] for _ in range(n)]
+        n_dom = np.zeros(n)
+        rank = np.zeros(n, dtype=int)
+        fronts = []
+        constraint_violation = ~constraints
+
+        for i in range(n):
+            for j in range(n):
+                if i == j:
+                    continue
+                if (constraint_violation[i] < constraint_violation[j]) or \
+                   (constraint_violation[i] == constraint_violation[j] and
+                    objectives[i, 0] <= objectives[j, 0] and
+                    objectives[i, 1] <= objectives[j, 1] and
+                    (objectives[i, 0] < objectives[j, 0] or objectives[i, 1] < objectives[j, 1])):
+                    S[i].append(j)
+                elif (constraint_violation[j] < constraint_violation[i]) or \
+                     (constraint_violation[i] == constraint_violation[j] and
+                      objectives[j, 0] <= objectives[i, 0] and
+                      objectives[j, 1] <= objectives[i, 1] and
+                      (objectives[j, 0] < objectives[i, 0] or objectives[j, 1] < objectives[i, 1])):
+                    n_dom[i] += 1
+            if n_dom[i] == 0:
+                rank[i] = 0
+                if not fronts:
+                    fronts.append([])
+                fronts[0].append(i)
+
+        i = 0
+        while fronts[i]:
+            next_front = []
+            for p in fronts[i]:
+                for q in S[p]:
+                    n_dom[q] -= 1
+                    if n_dom[q] == 0:
+                        rank[q] = i + 1
+                        next_front.append(q)
+            i += 1
+            fronts.append(next_front)
+        if not fronts[-1]:
+            fronts.pop()
+        return fronts, rank
+
+    def _crowding_distance(self, objectives, front):
+        n = len(front)
+        if n <= 2:
+            return np.ones(n) * np.inf
+        distance = np.zeros(n)
+        obj_min = objectives.min(axis=0)
+        obj_max = objectives.max(axis=0)
+        obj_range = obj_max - obj_min
+        obj_range[obj_range == 0] = 1
+        for m in range(2):
+            sorted_idx = sorted(range(n), key=lambda i: objectives[front[i], m])
+            distance[sorted_idx[0]] = np.inf
+            distance[sorted_idx[-1]] = np.inf
+            for i in range(1, n - 1):
+                if distance[sorted_idx[i]] != np.inf:
+                    diff = objectives[front[sorted_idx[i+1]], m] - objectives[front[sorted_idx[i-1]], m]
+                    distance[sorted_idx[i]] += diff / obj_range[m]
+        return distance
+
+    def _tournament_selection(self, pop_indices, objectives, ranks, crowding):
+        n = len(pop_indices)
+        selected = []
+        for _ in range(n):
+            i1, i2 = np.random.choice(pop_indices, 2, replace=False)
+            if ranks[i1] < ranks[i2]:
+                selected.append(i1)
+            elif ranks[i1] > ranks[i2]:
+                selected.append(i2)
+            else:
+                if crowding[i1] > crowding[i2]:
+                    selected.append(i1)
+                else:
+                    selected.append(i2)
+        return selected
+
+    def _simulated_binary_crossover(self, parent1, parent2):
+        if np.random.random() > 0.9:
+            return parent1.copy(), parent2.copy()
+        eta_c = 20
+        child1 = np.zeros(8)
+        child2 = np.zeros(8)
+        for i in range(8):
+            if np.random.random() < 0.5:
+                u = np.random.random()
+                if u <= 0.5:
+                    beta = (2 * u) ** (1 / (eta_c + 1))
+                else:
+                    beta = (1 / (2 * (1 - u))) ** (1 / (eta_c + 1))
+                child1[i] = 0.5 * ((1 + beta) * parent1[i] + (1 - beta) * parent2[i])
+                child2[i] = 0.5 * ((1 - beta) * parent1[i] + (1 + beta) * parent2[i])
+            else:
+                child1[i] = parent1[i]
+                child2[i] = parent2[i]
+        for i in range(8):
+            child1[i] = np.clip(child1[i], self.bounds[i, 0], self.bounds[i, 1])
+            child2[i] = np.clip(child2[i], self.bounds[i, 0], self.bounds[i, 1])
+        return child1, child2
+
+    def _polynomial_mutation(self, individual):
+        eta_m = 20
+        mutated = individual.copy()
+        for i in range(8):
+            if np.random.random() < 0.01:
+                u = np.random.random()
+                delta = min(u, 1 - u) ** (1 / (eta_m + 1))
+                if u < 0.5:
+                    mutated[i] = individual[i] + delta * (self.bounds[i, 1] - self.bounds[i, 0])
+                else:
+                    mutated[i] = individual[i] - delta * (self.bounds[i, 1] - self.bounds[i, 0])
+                mutated[i] = np.clip(mutated[i], self.bounds[i, 0], self.bounds[i, 1])
+        return mutated
+
+    def run(self):
+        self.population = self._initialize_population()
+        for gen in range(self.n_generations):
+            objectives, constraints, tensile, pop = self._evaluate(self.population)
+            self.population = pop
+            self.objectives = objectives
+            self.constraints = constraints
+            self.tensile = tensile
+            fronts, ranks = self._fast_non_dominated_sort(objectives, constraints)
+            self.fronts = fronts
+            if gen == self.n_generations - 1:
+                break
+            crowding = np.zeros(self.pop_size)
+            for front in fronts:
+                dist = self._crowding_distance(objectives, front)
+                crowding[front] = dist
+            selected = self._tournament_selection(range(self.pop_size), objectives, ranks, crowding)
+            offspring = []
+            for i in range(0, len(selected), 2):
+                if i + 1 < len(selected):
+                    child1, child2 = self._simulated_binary_crossover(self.population[selected[i]], self.population[selected[i+1]])
+                    child1 = self._polynomial_mutation(child1)
+                    child2 = self._polynomial_mutation(child2)
+                    offspring.append(child1)
+                    offspring.append(child2)
+                else:
+                    child = self._polynomial_mutation(self.population[selected[i]])
+                    offspring.append(child)
+            offspring = np.array(offspring[:self.pop_size])
+            objectives_off, constraints_off, tensile_off, _ = self._evaluate(offspring)
+            combined_pop = np.vstack([self.population, offspring])
+            combined_obj = np.vstack([self.objectives, objectives_off])
+            combined_const = np.concatenate([self.constraints, constraints_off])
+            combined_fronts, combined_ranks = self._fast_non_dominated_sort(combined_obj, combined_const)
+            combined_crowding = np.zeros(len(combined_pop))
+            for front in combined_fronts:
+                dist = self._crowding_distance(combined_obj, front)
+                combined_crowding[front] = dist
+            new_pop = []
+            new_obj = []
+            new_const = []
+            for front in combined_fronts:
+                if len(new_pop) + len(front) <= self.pop_size:
+                    for idx in front:
+                        new_pop.append(combined_pop[idx])
+                        new_obj.append(combined_obj[idx])
+                        new_const.append(combined_const[idx])
+                else:
+                    front_sorted = sorted(front, key=lambda i: combined_crowding[i], reverse=True)
+                    remaining = self.pop_size - len(new_pop)
+                    for idx in front_sorted[:remaining]:
+                        new_pop.append(combined_pop[idx])
+                        new_obj.append(combined_obj[idx])
+                        new_const.append(combined_const[idx])
+                    break
+            self.population = np.array(new_pop)
+            self.objectives = np.array(new_obj)
+            self.constraints = np.array(new_const)
+        objectives, constraints, tensile, pop = self._evaluate(self.population)
+        self.population = pop
+        self.objectives = objectives
+        self.constraints = constraints
+        self.tensile = tensile
+        self.fronts, _ = self._fast_non_dominated_sort(objectives, constraints)
+        return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 8. TRAIN MODEL (with increased data and balanced loss)
+# 8. TRAIN MODEL (FIXED: uses local loss_history)
 # ================================================================
 
 @st.cache_resource
@@ -712,6 +885,9 @@ def load_pinn_model():
     adam_epochs = 2000
     max_epochs = 2500
 
+    # --- Local loss history dictionary ---
+    loss_history = {'train': [], 'val': [], 'data': [], 'physics': []}
+
     for epoch in range(adam_epochs):
         model.train()
         optimizer_adam.zero_grad()
@@ -728,6 +904,11 @@ def load_pinn_model():
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer_adam.step()
 
+        # Record training losses
+        loss_history['train'].append(total_loss.item())
+        loss_history['data'].append(loss_dict['data_loss'])
+        loss_history['physics'].append(loss_dict.get('physics_loss', 0.0))
+
         model.eval()
         with torch.set_grad_enabled(False):
             val_loss, _ = model.compute_loss(
@@ -740,7 +921,8 @@ def load_pinn_model():
                 compute_grad=False
             )
         val_loss_value = val_loss.item()
-        model.loss_history['val'].append(val_loss_value)
+        loss_history['val'].append(val_loss_value)
+
         scheduler.step(val_loss_value)
 
         if val_loss_value < best_val_loss:
@@ -793,6 +975,7 @@ def load_pinn_model():
                 compute_grad=False
             )
             val_loss_value = val_loss.item()
+            loss_history['val'].append(val_loss_value)
             if val_loss_value < best_val_loss:
                 best_val_loss = val_loss_value
                 best_state = model.state_dict().copy()
@@ -806,14 +989,13 @@ def load_pinn_model():
     model.feature_names = feature_names
     model.scaler = scaler
     model.y_scaler = y_scaler
-    model.loss_history = {'train': [], 'val': []}  # Keep for UI
 
     torch.save(model.state_dict(), 'true_pinn_checkpoint.pt')
 
-    return model, scaler, y_scaler, feature_names, df, model.loss_history
+    return model, scaler, y_scaler, feature_names, df, loss_history
 
 # ================================================================
-# 9. PREDICTION & PLOTS (UPDATED: no clipping needed)
+# 9. PREDICTION & PLOTS
 # ================================================================
 
 def predict_pinn(model, scaler, y_scaler, inputs):
@@ -839,14 +1021,200 @@ def predict_pinn(model, scaler, y_scaler, inputs):
         st.error(f"Prediction error: {e}")
         return 0.5, 0.0, 1.0, 1.0
 
+def plot_training_curves(loss_history):
+    if not loss_history or len(loss_history['train']) == 0:
+        return None
+    
+    epochs = list(range(1, len(loss_history['train']) + 1))
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Scatter(
+        x=epochs, y=loss_history['train'],
+        mode='lines', name='Training Loss',
+        line=dict(color='blue', width=2)
+    ))
+    
+    if len(loss_history['val']) > 0:
+        fig.add_trace(go.Scatter(
+            x=epochs[:len(loss_history['val'])], y=loss_history['val'],
+            mode='lines', name='Validation Loss',
+            line=dict(color='orange', width=2, dash='dash')
+        ))
+    
+    if len(loss_history['data']) > 0:
+        fig.add_trace(go.Scatter(
+            x=epochs, y=loss_history['data'],
+            mode='lines', name='Data Loss',
+            line=dict(color='green', width=1.5)
+        ))
+    
+    if len(loss_history['physics']) > 0:
+        fig.add_trace(go.Scatter(
+            x=epochs, y=loss_history['physics'],
+            mode='lines', name='Physics Loss',
+            line=dict(color='red', width=1.5)
+        ))
+    
+    fig.update_layout(
+        title='Training Curves',
+        xaxis=dict(title='Epoch'),
+        yaxis=dict(title='Loss', type='log'),
+        height=400,
+        hovermode='x unified',
+        legend=dict(x=0.02, y=0.98, bgcolor='rgba(255,255,255,0.8)')
+    )
+    
+    return fig
+
+def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
+    try:
+        if len(fronts) > 0 and len(fronts[0]) > 0:
+            front0 = fronts[0]
+            pareto_api = -objectives[front0, 0]
+            pareto_efrf = objectives[front0, 1]
+            feasible = constraints[front0]
+
+            valid_mask = (pareto_api >= 85) & (pareto_api <= 95) & (pareto_efrf >= 0.0001) & (pareto_efrf <= 2)
+            pareto_api = pareto_api[valid_mask]
+            pareto_efrf = pareto_efrf[valid_mask]
+            feasible = feasible[valid_mask]
+
+            if len(pareto_api) == 0:
+                return None
+
+            plot_df = pd.DataFrame({'API': pareto_api, 'EFRF': pareto_efrf}).dropna().sort_values('API')
+            fig = go.Figure()
+
+            fig.add_trace(go.Scatter(
+                x=-objectives[:, 0], y=objectives[:, 1],
+                mode='markers', marker=dict(size=3, color='gray', opacity=0.3),
+                name='All Solutions'
+            ))
+
+            fig.add_trace(go.Scatter(
+                x=plot_df['API'], y=plot_df['EFRF'],
+                mode='lines+markers',
+                marker=dict(size=8, color='red'),
+                line=dict(color='red', width=2),
+                name='Pareto Front (Optimal Trade-offs)'
+            ))
+
+            feasible_indices = [i for i, f in enumerate(feasible) if f]
+            if feasible_indices:
+                feasible_api = [pareto_api[i] for i in feasible_indices]
+                feasible_efrf = [pareto_efrf[i] for i in feasible_indices]
+                fig.add_trace(go.Scatter(
+                    x=feasible_api, y=feasible_efrf,
+                    mode='markers', marker=dict(size=12, color='green', symbol='star'),
+                    name=f'Feasible Formulations ({len(feasible_indices)})',
+                    hovertemplate='API: %{x:.2f}%<br>EFRF: %{y:.4f}<extra></extra>'
+                ))
+
+            if api and efrf and 85 <= api <= 95 and 0.0001 <= efrf <= 2:
+                fig.add_trace(go.Scatter(
+                    x=[api], y=[efrf],
+                    mode='markers+text',
+                    marker=dict(size=16, color='blue', symbol='diamond'),
+                    text=[f"Your Formulation<br>API: {api:.1f}%<br>EFRF: {efrf:.4f}"],
+                    name='Selected Formulation'
+                ))
+
+            fig.add_hrect(y0=0, y1=EFRF_MAX, line_width=0, fillcolor="green", opacity=0.1, 
+                          annotation_text=f"Safe Zone (EFRF < {EFRF_MAX:.2f})", annotation_position="top left")
+            fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='red', annotation_text=f'EFRF Threshold: {EFRF_MAX:.2f}')
+            
+            fig.update_layout(
+                title='Pareto Front (NSGA-II)',
+                xaxis=dict(title='API Loading (%)', range=[85, 95]),
+                yaxis=dict(title='EFRF', range=[0, 1.0]),
+                height=500,
+                hovermode='closest',
+                legend=dict(x=0.02, y=0.98, bgcolor='rgba(255,255,255,0.8)')
+            )
+            
+            if feasible_indices:
+                best_idx = np.argmax([pareto_api[i] for i in feasible_indices])
+                best_idx = feasible_indices[best_idx]
+                fig.add_annotation(
+                    x=pareto_api[best_idx],
+                    y=pareto_efrf[best_idx],
+                    text=f"Best<br>API: {pareto_api[best_idx]:.2f}%<br>EFRF: {pareto_efrf[best_idx]:.4f}",
+                    showarrow=True,
+                    arrowhead=2,
+                    ax=20,
+                    ay=-40
+                )
+            
+            return fig
+    except Exception:
+        return None
+    return None
+
+def plot_sensitivity_plotly(inputs, model, scaler, y_scaler):
+    try:
+        features = ['API%', 'MCC%', 'PVPP%', 'Mg-St%', 'Binder%', 'Pressure', 'Speed', 'Granule']
+        _, _, _, base_efrf = predict_pinn(model, scaler, y_scaler, inputs)
+        sensitivities = []
+        for i in range(8):
+            test = inputs.copy()
+            test[i] += 0.05 * (inputs[i] + 0.1)
+            _, _, _, efrf_pos = predict_pinn(model, scaler, y_scaler, test)
+            test[i] = inputs[i] - 0.05 * (inputs[i] + 0.1)
+            _, _, _, efrf_neg = predict_pinn(model, scaler, y_scaler, test)
+            sensitivities.append(max(abs(efrf_pos - base_efrf), abs(efrf_neg - base_efrf)))
+
+        sorted_idx = np.argsort(sensitivities)[::-1]
+        sorted_names = [features[i] for i in sorted_idx]
+        sorted_values = [sensitivities[i] for i in sorted_idx]
+
+        fig = go.Figure()
+        colors = ['#e74c3c' if v > np.mean(sensitivities) else '#2ecc71' for v in sorted_values]
+        fig.add_trace(go.Bar(
+            y=sorted_names, x=sorted_values, orientation='h',
+            marker=dict(color=colors),
+            text=[f"{v:.4f}" for v in sorted_values],
+            textposition='outside'
+        ))
+        fig.add_vline(x=np.mean(sensitivities), line_dash='dash', line_color='red', 
+                      annotation_text=f'Avg: {np.mean(sensitivities):.4f}')
+        fig.update_layout(
+            title='Sensitivity Analysis (EFRF)',
+            xaxis_title='Sensitivity (ΔEFRF)',
+            yaxis_title='Parameters',
+            height=450
+        )
+        return fig
+    except Exception:
+        return None
+
+def train_and_compare(X_train, X_test, y_train, y_test):
+    models = {}
+    models['MLP'] = MLPRegressor(hidden_layer_sizes=(128, 128, 64, 32), max_iter=1000, random_state=42)
+    models['Random Forest'] = RandomForestRegressor(n_estimators=100, random_state=42)
+    if XGB_AVAILABLE:
+        models['XGBoost'] = XGBRegressor(n_estimators=100, learning_rate=0.1, random_state=42)
+    
+    results = []
+    for name, model in models.items():
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+        results.append({
+            'Model': name,
+            'R²': r2_score(y_test, y_pred),
+            'RMSE': np.sqrt(mean_squared_error(y_test, y_pred)),
+            'MAE': mean_absolute_error(y_test, y_pred),
+            'Physics': 'Not enforced'
+        })
+    return pd.DataFrame(results)
+
 # ================================================================
-# 10. STREAMLIT UI (UPDATED: unified constraints display)
+# 10. STREAMLIT UI
 # ================================================================
 
 st.set_page_config(page_title="PINN Framework v29.0", page_icon="🧬", layout="wide")
 clamp_session_state()
 
-# --- HERO SECTION ---
 st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); 
             padding: 2rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
@@ -864,7 +1232,6 @@ st.markdown("""
 
 st.markdown("---")
 
-# --- SIDEBAR ---
 with st.sidebar:
     st.markdown("### 📚 Physics Constraints (Unified)")
     st.markdown(f"""
@@ -885,12 +1252,10 @@ with st.sidebar:
     """)
     st.info("🔬 **v29.0** — Bounded Density, Unified Constraints, Balanced Loss")
 
-# --- LOAD MODEL ---
 with st.spinner("🔄 Training Multi-Task PINN..."):
     model, scaler, y_scaler, feature_names, df, loss_history = load_pinn_model()
 st.success("✅ Multi-Task True PINN trained successfully")
 
-# --- QUICK EXPERIMENTS ---
 st.markdown("### 🧪 Quick Experiments")
 exp_cols = st.columns(4)
 experiments = {
@@ -955,7 +1320,7 @@ with col_right:
             
             st.markdown("---")
             
-            # --- Status (using unified constraints) ---
+            # --- Unified constraints check ---
             density_ok = (density >= DENSITY_MIN and density <= DENSITY_MAX)
             tensile_ok = (tensile >= TENSILE_MIN)
             efrf_ok = (efrf < EFRF_MAX)
@@ -966,7 +1331,7 @@ with col_right:
             else:
                 st.error("❌ Formulation violates one or more constraints")
             
-            # --- Feasibility (unified) ---
+            # --- Feasibility ---
             st.markdown("### ✅ Feasibility")
             pass_cols = st.columns(4)
             pass_cols[0].metric(f"Density [{DENSITY_MIN:.2f}, {DENSITY_MAX:.2f}]", "✅ PASS" if density_ok else "❌ FAIL")
@@ -1014,7 +1379,9 @@ with col_right:
                         st.warning("No feasible solutions found")
             
             # --- TABS ---
-            tab1, tab2, tab3, tab4 = st.tabs(["📉 Pareto Front", "🔍 Sensitivity", "📊 Model Comparison", "📄 Report"])
+            tab1, tab2, tab3, tab4, tab5 = st.tabs(
+                ["📉 Pareto Front", "🔍 Sensitivity", "📊 Model Comparison", "📈 Training Curves", "📄 Report"]
+            )
             
             with tab1:
                 st.markdown("### 📉 Pareto Front")
@@ -1102,6 +1469,21 @@ with col_right:
                 comp_df_for_pdf = comp_df.copy()
             
             with tab4:
+                st.markdown("### 📈 Training Curves")
+                fig_loss = plot_training_curves(loss_history)
+                if fig_loss:
+                    st.plotly_chart(fig_loss, use_container_width=True)
+                    
+                    if len(loss_history['train']) > 0:
+                        col1, col2 = st.columns(2)
+                        col1.metric("Final Training Loss", f"{loss_history['train'][-1]:.6f}")
+                        col1.metric("Final Data Loss", f"{loss_history['data'][-1]:.6f}")
+                        col2.metric("Final Validation Loss", f"{loss_history['val'][-1]:.6f}")
+                        col2.metric("Final Physics Loss", f"{loss_history['physics'][-1]:.6f}")
+                else:
+                    st.info("Loss history not available")
+            
+            with tab5:
                 st.markdown("### 📄 Comprehensive Report (PDF)")
                 st.caption("Download a complete report with formulation details, predictions, and model comparison.")
                 
