@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 29.6 (Improved NSGA-II with Safety Penalty)
+Version: 29.6 (Improved NSGA-II with Dynamic Density & Safety Penalty)
 """
 
 import streamlit as st
@@ -120,8 +120,68 @@ safe_initialize()
 clamp_session_state()
 
 # ================================================================
-# 3. FEATURE ENGINEERING
+# 3. FEATURE ENGINEERING & COMPOSITION ADJUSTMENT
 # ================================================================
+
+def adjust_composition(api, binder, pvpp, mgst, mcc):
+    """ضبط المكونات لضمان أن المجموع الكلي = 100% مع احترام الحدود"""
+    # التقريب الأولي إلى الحدود
+    api = np.clip(api, 85, 95)
+    binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
+    pvpp = np.clip(pvpp, 0.5, 6.0)
+    mgst = np.clip(mgst, 0.01, 1.2)
+    mcc = np.clip(mcc, 0, MCC_MAX)
+    
+    total = api + binder + pvpp + mgst + mcc
+    
+    if total > 100:
+        # إذا زاد المجموع عن 100، نقوم بتقليص جميع المكونات بنفس النسبة
+        scale = 100 / total
+        api *= scale
+        binder *= scale
+        pvpp *= scale
+        mgst *= scale
+        mcc *= scale
+    else:
+        # إذا قل المجموع عن 100، نضيف الباقي إلى MCC أولاً، ثم إلى API
+        remainder = 100 - total
+        
+        # إضافة إلى MCC بحد أقصى 8.0%
+        add_mcc = min(remainder, MCC_MAX - mcc)
+        mcc += add_mcc
+        remainder -= add_mcc
+        
+        # إضافة إلى API بحد أقصى 95%
+        if remainder > 0:
+            add_api = min(remainder, 95 - api)
+            api += add_api
+            remainder -= add_api
+        
+        # إضافة إلى Binder إذا بقي شيء (كحل أخير)
+        if remainder > 0:
+            add_binder = min(remainder, BINDER_MAX - binder)
+            binder += add_binder
+            remainder -= add_binder
+            
+        # إذا بقي شيء رغم ذلك (نادر)، نعيد توزيعه بنسبة
+        if remainder > 0:
+            total_new = api + binder + pvpp + mgst + mcc
+            if total_new > 0:
+                scale = 100 / total_new
+                api *= scale
+                binder *= scale
+                pvpp *= scale
+                mgst *= scale
+                mcc *= scale
+    
+    # التقريب النهائي إلى الحدود
+    api = np.clip(api, 85, 95)
+    binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
+    pvpp = np.clip(pvpp, 0.5, 6.0)
+    mgst = np.clip(mgst, 0.01, 1.2)
+    mcc = np.clip(mcc, 0, MCC_MAX)
+    
+    return api, binder, pvpp, mgst, mcc
 
 def add_interaction_features(X_raw):
     pressure = X_raw[:, 5:6]
@@ -173,7 +233,7 @@ class MultiTaskTruePINN(nn.Module):
         self.eval()
         with torch.no_grad():
             if not isinstance(X_scaled, torch.Tensor):
-                X_scaled = torch.FloatTensor(X_scaled)
+                X_scaled = torch.tensor(X_scaled, dtype=torch.float32)
             output = self.forward(X_scaled)
             return output[:, :3].cpu().numpy()
 
@@ -260,7 +320,7 @@ class MultiTaskTruePINN(nn.Module):
         return total_loss, loss_dict
 
 # ================================================================
-# 5. DATA GENERATION
+# 5. DATA GENERATION (FIXED: DYNAMIC DENSITY)
 # ================================================================
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
@@ -288,44 +348,37 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
             speed = np.clip(np.random.normal(10, 3), 1, 50)
             granule = np.clip(np.random.normal(125, 20), 30, 250)
 
-        total = api + binder + mgst + pvpp + mcc
-        if total > 100:
-            scale = 100 / total
-            api *= scale; binder *= scale; mgst *= scale; pvpp *= scale; mcc *= scale
-        else:
-            remainder = 100 - total
-            if mcc + remainder <= MCC_MAX:
-                mcc += remainder
-            else:
-                excess = (mcc + remainder) - MCC_MAX
-                mcc = MCC_MAX
-                api -= excess
-
-        api = np.clip(api, 85, 95)
-        binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
-        mgst = np.clip(mgst, 0.01, 1.2)
-        pvpp = np.clip(pvpp, 0.5, 6.0)
-        mcc = np.clip(mcc, 0, MCC_MAX)
+        # ضبط المكونات لتساوي 100%
+        api, binder, pvpp, mgst, mcc = adjust_composition(api, binder, pvpp, mgst, mcc)
 
         X[i] = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
 
-        k_true = 0.035 * (1 - 0.4 * (api - 85)/10) * (1 - 0.2 * (speed - 10)/30)
-        k_true = max(k_true, 0.008)
-        A_true = 1.2 + 0.1 * (binder - 1.5) - 0.2 * (mgst - 0.5)
+        # =====================================================
+        # التعديل الجوهري: جعل الكثافة متغيرة على كامل المجال
+        # =====================================================
+        # بدلاً من k~0.035 و A~1.2 ثابتين، نأخذ مدى واسع
+        k_true = np.random.uniform(0.008, 0.055)  # يمنح تبايناً كبيراً
+        A_true = np.random.uniform(0.6, 2.2)      # يمنح تبايناً في التقاطع
         
-        noise_d = np.random.normal(0, 0.005)
-        noise_t = np.random.normal(0, 0.04)
-        noise_er = np.random.normal(0, 0.03)
+        # حساب الكثافة الخام (بدون قص)
+        raw_density = 1 - np.exp(-(k_true * pressure + A_true))
+        
+        # إضافة ضوضاء ثم قصها إلى المجال الفيزيائي
+        noise_d = np.random.normal(0, 0.015)
+        D = np.clip(raw_density + noise_d, D_MIN, D_MAX)
+        # =====================================================
 
-        D = np.clip(1 - np.exp(-(k_true * pressure + A_true)) + noise_d, D_MIN, D_MAX)
+        # حساب المقاومة (Tensile) مع تباين معقول
         strength = np.clip(
             3.5 - 0.15 * (api - 85) + 0.3 * binder + 0.008 * (pressure - 100)
-            - 1.5 * mgst - 0.02 * (speed - 10) + noise_t,
+            - 1.5 * mgst - 0.02 * (speed - 10) + np.random.normal(0, 0.04),
             0.5, 6.0
         )
+        
+        # حساب الاستعادة المرنة (ER)
         er = np.clip(
             1.8 + 0.3 * (api - 85)/10 + 0.08 * (speed - 10)/30
-            - 0.1 * (pressure - 100)/150 + noise_er,
+            - 0.1 * (pressure - 100)/150 + np.random.normal(0, 0.03),
             0.5, 4.0
         )
 
@@ -340,7 +393,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# 6. PDF GENERATION
+# 6. PDF GENERATION (UNCHANGED)
 # ================================================================
 
 def sanitize_text(text):
@@ -534,7 +587,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
         return str(pdf_bytes).encode('latin1')
 
 # ================================================================
-# 7. NSGA-II (IMPROVED: Seeded, Safety Penalty, Higher Penalty Weights)
+# 7. NSGA-II (IMPROVED: Dynamic Density, Stronger Safety Penalty)
 # ================================================================
 
 class NSGAII:
@@ -557,40 +610,14 @@ class NSGAII:
 
     def _repair(self, individual):
         api, mcc, pvpp, mgst, binder, pressure, speed, granule = individual
-
-        api = np.clip(api, 85, 95)
-        binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
-        mgst = np.clip(mgst, 0.01, 1.2)
-        pvpp = np.clip(pvpp, 0.5, 6.0)
-        mcc = np.clip(mcc, 0, MCC_MAX)
+        # استخدام دالة الضبط الذكية
+        api, binder, pvpp, mgst, mcc = adjust_composition(api, binder, pvpp, mgst, mcc)
+        
+        # قص المتغيرات الأخرى إلى حدودها
         pressure = np.clip(pressure, 80, PRESSURE_MAX)
         speed = np.clip(speed, 1.0, 50.0)
         granule = np.clip(granule, 30.0, 250.0)
-
-        total = api + binder + mgst + pvpp + mcc
-        if total > 100.0:
-            scale = 100.0 / total
-            api *= scale
-            binder *= scale
-            mgst *= scale
-            pvpp *= scale
-            mcc *= scale
-
-        total = api + binder + mgst + pvpp + mcc
-        if total < 100.0:
-            remainder = 100.0 - total
-            mcc_add = min(remainder, MCC_MAX - mcc)
-            mcc += mcc_add
-            remainder -= mcc_add
-            if remainder > 0:
-                api = max(85.0, api - remainder)
-
-        api = np.clip(api, 85, 95)
-        binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
-        mgst = np.clip(mgst, 0.01, 1.2)
-        pvpp = np.clip(pvpp, 0.5, 6.0)
-        mcc = np.clip(mcc, 0, MCC_MAX)
-
+        
         return np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule], dtype=float)
 
     def _initialize_population(self):
@@ -640,7 +667,7 @@ class NSGAII:
                 inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
                 inputs_with_features = add_interaction_features(np.array([inputs]))[0]
                 inputs_scaled = self.scaler.transform([inputs_with_features])
-                X_tensor = torch.FloatTensor(inputs_scaled)
+                X_tensor = torch.tensor(inputs_scaled, dtype=torch.float32)
 
                 with torch.no_grad():
                     pred_scaled = self.model.predict(X_tensor)
@@ -663,12 +690,12 @@ class NSGAII:
                 feasible = density_ok and tensile_ok and efrf_ok and mcc_ok
                 constraints[i] = feasible
 
-                # --- Safety penalty to avoid boundary solutions ---
+                # --- عقوبة الأمان المُحسّنة (وزن أعلى وحدود أكثر صرامة) ---
                 safety_penalty = 0.0
-                if density > 0.965:
-                    safety_penalty += (density - 0.965) ** 2
-                if efrf > 0.38:
-                    safety_penalty += (efrf - 0.38) ** 2
+                if density > 0.96:  # تم خفض الحد من 0.965 إلى 0.96
+                    safety_penalty += (density - 0.96) ** 2
+                if efrf > 0.36:     # تم خفض الحد من 0.38 إلى 0.36
+                    safety_penalty += (efrf - 0.36) ** 2
 
                 penalty = 0.0
                 if tensile < TENSILE_MIN:
@@ -680,8 +707,9 @@ class NSGAII:
                 if density > D_MAX:
                     penalty += (density - D_MAX) ** 2
 
-                objectives[i, 0] = -(api + self.w_tensile * tensile) + 30.0 * penalty + 5.0 * safety_penalty
-                objectives[i, 1] = efrf + 30.0 * penalty + 5.0 * safety_penalty
+                # زيادة وزن عقوبة الأمان من 5.0 إلى 15.0
+                objectives[i, 0] = -(api + self.w_tensile * tensile) + 30.0 * penalty + 15.0 * safety_penalty
+                objectives[i, 1] = efrf + 30.0 * penalty + 15.0 * safety_penalty
                 tensile_strengths[i] = tensile
 
                 population[i] = repaired
@@ -897,7 +925,7 @@ class NSGAII:
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 8. TRAIN MODEL
+# 8. TRAIN MODEL (FIXED: Loss History is now stored)
 # ================================================================
 
 @st.cache_resource
@@ -921,13 +949,13 @@ def load_pinn_model():
         X_scaled_temp, X_raw_temp, y_temp, test_size=0.5, random_state=42
     )
 
-    X_scaled_train_t = torch.FloatTensor(X_scaled_train)
-    X_raw_train_t = torch.FloatTensor(X_raw_train)
-    y_train_t = torch.FloatTensor(y_train)
+    X_scaled_train_t = torch.tensor(X_scaled_train, dtype=torch.float32)
+    X_raw_train_t = torch.tensor(X_raw_train, dtype=torch.float32)
+    y_train_t = torch.tensor(y_train, dtype=torch.float32)
 
-    X_scaled_val_t = torch.FloatTensor(X_scaled_val)
-    X_raw_val_t = torch.FloatTensor(X_raw_val)
-    y_val_t = torch.FloatTensor(y_val)
+    X_scaled_val_t = torch.tensor(X_scaled_val, dtype=torch.float32)
+    X_raw_val_t = torch.tensor(X_raw_val, dtype=torch.float32)
+    y_val_t = torch.tensor(y_val, dtype=torch.float32)
 
     model = MultiTaskTruePINN(input_dim=X_augmented.shape[1])
 
@@ -942,6 +970,10 @@ def load_pinn_model():
     progress_bar = st.progress(0)
     adam_epochs = 1200
     max_epochs = 2000
+
+    # --- تخزين سجل الخسارة ---
+    train_losses = []
+    val_losses = []
 
     for epoch in range(adam_epochs):
         model.train()
@@ -974,6 +1006,11 @@ def load_pinn_model():
             )
 
         val_loss_value = val_loss.item()
+        
+        # إلحاق قيم الخسارة للسجلات
+        train_losses.append(total_loss.item())
+        val_losses.append(val_loss_value)
+        
         scheduler.step(val_loss_value)
 
         if val_loss_value < best_val_loss:
@@ -1025,7 +1062,8 @@ def load_pinn_model():
 
     torch.save(model.state_dict(), 'true_pinn_checkpoint.pt')
 
-    return model, scaler, y_scaler, feature_names, df, {'train': [], 'val': []}
+    loss_history = {'train': train_losses, 'val': val_losses}
+    return model, scaler, y_scaler, feature_names, df, loss_history
 
 # ================================================================
 # 9. PREDICTION & PLOTS
@@ -1035,7 +1073,7 @@ def predict_pinn(model, scaler, y_scaler, inputs):
     try:
         inputs_with_features = add_interaction_features(np.array([inputs]))[0]
         inputs_scaled = scaler.transform([inputs_with_features])
-        X_tensor = torch.FloatTensor(inputs_scaled)
+        X_tensor = torch.tensor(inputs_scaled, dtype=torch.float32)
         with torch.no_grad():
             pred_scaled = model.predict(X_tensor)[0]
         pred_original = y_scaler.inverse_transform([pred_scaled])[0]
@@ -1229,7 +1267,7 @@ def train_and_compare(X_train, X_test, y_train, y_test):
     return pd.DataFrame(results)
 
 # ================================================================
-# 10. STREAMLIT UI
+# 10. STREAMLIT UI (UNCHANGED)
 # ================================================================
 
 st.set_page_config(page_title="PINN Framework v29.6", page_icon="🧬", layout="wide")
@@ -1267,11 +1305,12 @@ with st.sidebar:
     - Adam → LBFGS hybrid (balanced)
     - **NSGA-II:** pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS}
     - **Seeded Initialization:** ✅ 30% from improved seed
-    - **Safety Penalty:** ✅ (density ≤ 0.965, EFRF ≤ 0.38)
-    - **Penalty weight:** 30.0 (constraints), 5.0 (safety)
+    - **Safety Penalty:** ✅ (density ≤ 0.96, EFRF ≤ 0.36)
+    - **Penalty weight:** 30.0 (constraints), 15.0 (safety)
     - **Density penalty:** 100.0
+    - **Dynamic Density:** ✅ Variable (bounded by sigmoid)
     """)
-    st.info("🔬 **v29.6** — Improved NSGA-II with Safety Penalty")
+    st.info("🔬 **v29.6** — Dynamic Density + Stronger Safety Penalty")
 
 with st.spinner("🔄 Training Multi-Task PINN..."):
     model, scaler, y_scaler, feature_names, df, loss_history = load_pinn_model()
@@ -1361,7 +1400,7 @@ with col_right:
                 try:
                     inputs_with_features = add_interaction_features(np.array([inputs]))[0]
                     inputs_scaled = scaler.transform([inputs_with_features])
-                    X_tensor = torch.FloatTensor(inputs_scaled)
+                    X_tensor = torch.tensor(inputs_scaled, dtype=torch.float32)
                     with torch.no_grad():
                         full_output = model.forward(X_tensor).numpy()[0]
                     st.metric("k (Plasticity)", f"{full_output[3]:.4f}")
@@ -1429,7 +1468,7 @@ with col_right:
                 X_train_scaled = scaler.transform(X_train_aug)
                 X_test_scaled = scaler.transform(X_test_aug)
                 
-                pinn_pred_scaled = model.predict(torch.FloatTensor(X_test_scaled))
+                pinn_pred_scaled = model.predict(torch.tensor(X_test_scaled, dtype=torch.float32))
                 pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
                 pinn_r2 = r2_score(y_test, pinn_pred)
                 pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
@@ -1516,5 +1555,5 @@ with col_right:
                 st.success("✅ One-click download — includes formulation, predictions, and model comparison.")
 
 st.markdown("---")
-st.caption(f"🔬 **Multi-Task True PINN — v29.6 (Improved NSGA-II with Safety Penalty)**")
+st.caption(f"🔬 **Multi-Task True PINN — v29.6 (Dynamic Density + Improved Safety Penalty)**")
 st.caption(f"📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Postgraduate College, Sudan")
