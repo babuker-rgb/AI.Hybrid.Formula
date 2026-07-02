@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 29.9 (Fixed variable scope for tabs)
+Version: 29.9 (Fully Optimized - Pareto Front Fixed)
 """
 
 import streamlit as st
@@ -27,7 +27,7 @@ import time
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. USER-CONFIGURABLE PARAMETERS (SAME AS v29.8)
+# 0. USER-CONFIGURABLE PARAMETERS
 # ================================================================
 
 TENSILE_MIN = 1.90          # MPa
@@ -56,7 +56,7 @@ else:
     NSGA_POP_SIZE = 80      
     NSGA_GENERATIONS = 60   
 
-# --- Loss Weights (Same as v29.8) ---
+# --- Loss Weights ---
 W_DENSITY = 12.0            
 TENSILE_DATA_WEIGHT = 2.0   
 TENSILE_PHYSICS_WEIGHT = 0.5
@@ -88,7 +88,7 @@ except ImportError:
     XGB_AVAILABLE = False
 
 # ================================================================
-# 2. SESSION STATE (SAME RANGES AS v29.8)
+# 2. SESSION STATE
 # ================================================================
 
 DEFAULTS = {
@@ -103,7 +103,7 @@ DEFAULTS = {
 }
 
 RANGES = {
-    'api': (85.0, 95.0),       # Same as v29.8 - user sees this
+    'api': (85.0, 95.0),
     'binder': (BINDER_MIN, BINDER_MAX),
     'pvpp': (0.5, 6.0),
     'mgst': (0.01, 1.2),
@@ -148,14 +148,13 @@ safe_initialize()
 clamp_session_state()
 
 # ================================================================
-# 3. DYNAMIC NORMALIZATION (BACKEND ONLY - HIDDEN FROM UI)
+# 3. DYNAMIC NORMALIZATION (BACKEND)
 # ================================================================
 
 def normalize_components(api, binder, pvpp, mgst, mcc):
     """
-    Dynamic Normalization (Strategy #2) - converts raw weights to percentages summing to 100%.
-    This function is used only in the backend (NSGA-II and data generation).
-    The UI sliders remain unchanged.
+    Dynamic Normalization - converts raw weights to percentages summing to 100%.
+    Used only in the backend (NSGA-II and data generation).
     """
     # 1. Protect against zeros/negatives
     api = max(api, 0.1)
@@ -193,7 +192,7 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
             pvpp_norm += excess * (pvpp_norm / other_sum)
             mgst_norm += excess * (mgst_norm / other_sum)
     
-    # 5. Enforce API ≥ 85% (therapeutic dose)
+    # 5. Enforce API ≥ 85%
     if api_norm < 85.0:
         deficit = 85.0 - api_norm
         api_norm = 85.0
@@ -260,7 +259,7 @@ def add_interaction_features(X_raw):
     ], axis=1)
 
 # ================================================================
-# 4. MULTI-TASK TRUE PINN MODEL (PHYSICS ENFORCED - SAME AS v29.8)
+# 4. MULTI-TASK TRUE PINN MODEL (PHYSICS ENFORCED)
 # ================================================================
 
 def bounded_density(raw):
@@ -384,7 +383,7 @@ class MultiTaskTruePINN(nn.Module):
         return total_loss, loss_dict
 
 # ================================================================
-# 5. DATA GENERATION (WITH BACKEND NORMALIZATION)
+# 5. DATA GENERATION
 # ================================================================
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
@@ -396,7 +395,6 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     x_max = -np.log(1 - D_MAX)
 
     for i in range(n_samples):
-        # Generate raw weights from wide distributions (backend flexibility)
         api_raw = np.random.uniform(60, 100)
         binder_raw = np.random.uniform(0.1, 10)
         mgst_raw = np.random.uniform(0.01, 3.0)
@@ -407,12 +405,10 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         speed = np.random.uniform(1, 50)
         granule = np.random.uniform(30, 250)
 
-        # Normalize to percentages (sum = 100%)
         api, binder, pvpp, mgst, mcc = normalize_components(api_raw, binder_raw, pvpp_raw, mgst_raw, mcc_raw)
         
         X[i] = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
 
-        # Heckel physics for density
         x = np.random.uniform(x_min, x_max)
         max_trials = 30
         for _ in range(max_trials):
@@ -432,7 +428,6 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         noise_d = np.random.normal(0, 0.01)
         D = np.clip(D_target + noise_d, D_MIN, D_MAX)
 
-        # Tensile strength (with natural variation)
         strength = np.clip(
             3.5 - 0.15 * (api - 85) + 0.3 * binder + 0.008 * (pressure - 100)
             - 1.5 * mgst - 0.02 * (speed - 10) + np.random.normal(0, 0.04),
@@ -455,7 +450,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# 6. PDF GENERATION (UNCHANGED)
+# 6. PDF GENERATION
 # ================================================================
 
 def sanitize_text(text):
@@ -578,7 +573,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.set_text_color(0, 0, 0)
     pdf.ln(4)
     
-    # 5. Model Comparison (with Physical Validity)
+    # 5. Model Comparison
     if model_comparison_df is not None and not model_comparison_df.empty:
         pdf.set_font("Arial", "B", 13)
         pdf.set_fill_color(230, 230, 230)
@@ -649,7 +644,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
         return str(pdf_bytes).encode('latin1')
 
 # ================================================================
-# 7. NSGA-II (UPDATED WITH BACKEND NORMALIZATION - SAME UI)
+# 7. NSGA-II
 # ================================================================
 
 class NSGAII:
@@ -671,17 +666,11 @@ class NSGAII:
         self.fronts = None
 
     def _repair(self, individual):
-        # Individual comes from NSGA-II (raw weights within wider bounds internally)
         api, mcc, pvpp, mgst, binder, pressure, speed, granule = individual
-        
-        # Apply dynamic normalization (backend only)
         api, binder, pvpp, mgst, mcc = normalize_components(api, binder, pvpp, mgst, mcc)
-        
-        # Clip physical parameters
         pressure = np.clip(pressure, 80, PRESSURE_MAX)
         speed = np.clip(speed, 1.0, 50.0)
         granule = np.clip(granule, 30.0, 250.0)
-        
         return np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule], dtype=float)
 
     def _initialize_population(self):
@@ -691,24 +680,24 @@ class NSGAII:
 
         for i in range(n_seed):
             noise = np.array([
-                np.random.normal(0, 5.0),    # API
-                np.random.normal(0, 3.0),    # MCC
-                np.random.normal(0, 2.0),    # PVPP
-                np.random.normal(0, 0.3),    # MgSt
-                np.random.normal(0, 2.0),    # Binder
-                np.random.normal(0, 8.0),    # Pressure
-                np.random.normal(0, 1.5),    # Speed
-                np.random.normal(0, 12.0)    # Granule
+                np.random.normal(0, 5.0),
+                np.random.normal(0, 3.0),
+                np.random.normal(0, 2.0),
+                np.random.normal(0, 0.3),
+                np.random.normal(0, 2.0),
+                np.random.normal(0, 8.0),
+                np.random.normal(0, 1.5),
+                np.random.normal(0, 12.0)
             ])
             pop[i] = self._repair(seed + noise)
 
         for i in range(n_seed, self.pop_size):
             individual = np.array([
-                np.random.uniform(60, 100),    # API wider range
-                np.random.uniform(0.1, 20),    # MCC wider
-                np.random.uniform(0.1, 12),    # PVPP wider
-                np.random.uniform(0.01, 3.0),  # MgSt wider
-                np.random.uniform(0.1, 10),    # Binder wider
+                np.random.uniform(60, 100),
+                np.random.uniform(0.1, 20),
+                np.random.uniform(0.1, 12),
+                np.random.uniform(0.01, 3.0),
+                np.random.uniform(0.1, 10),
                 np.random.uniform(80, PRESSURE_MAX),
                 np.random.uniform(1, 50),
                 np.random.uniform(30, 250)
@@ -725,17 +714,14 @@ class NSGAII:
 
         for i in range(n):
             try:
-                # Repair (normalize components to sum=100%)
                 repaired = self._repair(population[i])
                 api, mcc, pvpp, mgst, binder, pressure, speed, granule = repaired
 
-                # Prepare inputs for model
                 inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
                 inputs_with_features = add_interaction_features(np.array([inputs]))[0]
                 inputs_scaled = self.scaler.transform([inputs_with_features])
                 X_tensor = torch.tensor(inputs_scaled, dtype=torch.float32)
 
-                # Predict
                 with torch.no_grad():
                     pred_scaled = self.model.predict(X_tensor)
                     pred_actual = self.y_scaler.inverse_transform(pred_scaled)[0]
@@ -749,7 +735,6 @@ class NSGAII:
                 efrf = float(er / tensile)
                 efrf = max(1e-4, min(efrf, 5.0))
 
-                # Check constraints
                 density_ok = (density >= D_MIN - DENSITY_TOL) and (density <= D_MAX + DENSITY_TOL)
                 tensile_ok = (tensile >= TENSILE_MIN)
                 efrf_ok = (efrf < EFRF_MAX + DENSITY_TOL)
@@ -758,7 +743,6 @@ class NSGAII:
                 feasible = density_ok and tensile_ok and efrf_ok and mcc_ok
                 constraints[i] = feasible
 
-                # Penalties (same as v29.8)
                 safety_penalty = 0.0
                 if density > SAFETY_DENSITY_LIMIT:
                     safety_penalty += (density - SAFETY_DENSITY_LIMIT) ** 2
@@ -998,7 +982,7 @@ class NSGAII:
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 8. TRAIN MODEL (SAME AS v29.8)
+# 8. TRAIN MODEL
 # ================================================================
 
 @st.cache_resource
@@ -1141,7 +1125,7 @@ def load_pinn_model():
     return model, scaler, y_scaler, feature_names, df, loss_history
 
 # ================================================================
-# 9. PREDICTION & PLOTS (UNCHANGED)
+# 9. PREDICTION & PLOTS
 # ================================================================
 
 def predict_pinn(model, scaler, y_scaler, inputs):
@@ -1361,7 +1345,7 @@ def train_and_compare(X_train, X_test, y_train, y_test):
     return pd.DataFrame(results)
 
 # ================================================================
-# 10. STREAMLIT UI - IDENTICAL TO v29.8 (BUT WITH FIXED TABS)
+# 10. STREAMLIT UI
 # ================================================================
 
 st.cache_resource.clear()
@@ -1457,12 +1441,12 @@ with col_left:
     predict_btn = st.button("🔬 Predict & Optimize", use_container_width=True)
 
 # ================================================================
-# RESULTS AND TABS (FIXED: TABS OUTSIDE predict_btn, variables defined)
+# RESULTS & TABS (FIXED - NSGA-II RUNS BEFORE TABS)
 # ================================================================
 with col_right:
     st.markdown("### 📈 Results")
     
-    # --- Define placeholder variables to avoid NameError ---
+    # --- Initialize variables ---
     objectives = None
     constraints = None
     fronts = None
@@ -1473,13 +1457,145 @@ with col_right:
     density = 0.0
     tensile = 0.0
     er = 0.0
-    efrf = 0.0
     density_ok = False
     tensile_ok = False
     efrf_ok = False
     mcc_ok = False
+    api_use = 0.0
+    mcc_use = 0.0
+    pvpp_use = 0.0
+    mgst_use = 0.0
+    binder_use = 0.0
     
-    # Define tabs first (always visible)
+    # --- RUN PREDICTION & NSGA-II (BEFORE TABS) ---
+    if predict_btn:
+        if abs(total - 100) > 0.1:
+            st.warning("⚠️ Formulation must sum to 100%")
+        else:
+            # Apply backend normalization
+            api_norm, binder_norm, pvpp_norm, mgst_norm, mcc_norm = normalize_components(api, binder, pvpp, mgst, mcc)
+            inputs_norm = [api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm, pressure, speed, granule]
+            api_use, mcc_use, pvpp_use, mgst_use, binder_use = api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm
+            
+            # Run prediction
+            with st.spinner("🧠 Running prediction..."):
+                density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs_norm)
+            
+            # Display KPIs
+            kpi_cols = st.columns(3)
+            kpi_cols[0].metric("Density", f"{density:.3f}", delta=f"[{D_MIN:.2f}, {D_MAX:.2f}]")
+            kpi_cols[1].metric("Tensile", f"{tensile:.3f} MPa", delta=f">= {TENSILE_MIN:.2f} PASS" if tensile >= TENSILE_MIN else f"< {TENSILE_MIN:.2f} FAIL")
+            kpi_cols[2].metric("EFRF", f"{efrf:.4f}", delta=f"< {EFRF_MAX:.2f} PASS" if efrf < EFRF_MAX else f">= {EFRF_MAX:.2f} FAIL")
+            
+            st.markdown("---")
+            
+            # Feasibility checks
+            density_ok = (density >= D_MIN and density <= D_MAX)
+            tensile_ok = (tensile >= TENSILE_MIN)
+            efrf_ok = (efrf < EFRF_MAX)
+            mcc_ok = (mcc_norm <= MCC_MAX)
+            
+            if density_ok and tensile_ok and efrf_ok and mcc_ok:
+                st.success(f"✅ Formulation satisfies all constraints (Density: {density:.3f}, σt ≥ {TENSILE_MIN:.2f}, EFRF < {EFRF_MAX:.2f})")
+            else:
+                st.error("❌ Formulation violates one or more constraints")
+            
+            st.markdown("### ✅ Feasibility")
+            pass_cols = st.columns(4)
+            pass_cols[0].metric(f"Density [{D_MIN:.2f}, {D_MAX:.2f}]", "✅ PASS" if density_ok else "❌ FAIL")
+            pass_cols[1].metric(f"σt ≥ {TENSILE_MIN:.2f}", "✅ PASS" if tensile_ok else "❌ FAIL")
+            pass_cols[2].metric(f"EFRF < {EFRF_MAX:.2f}", "✅ PASS" if efrf_ok else "❌ FAIL")
+            pass_cols[3].metric(f"MCC ≤ {MCC_MAX:.1f}%", "✅ PASS" if mcc_ok else "❌ FAIL")
+            
+            # Physics Verification
+            with st.expander("🔬 Physics Verification"):
+                try:
+                    inputs_with_features = add_interaction_features(np.array([inputs_norm]))[0]
+                    inputs_scaled = scaler.transform([inputs_with_features])
+                    X_tensor = torch.tensor(inputs_scaled, dtype=torch.float32)
+                    with torch.no_grad():
+                        full_output = model.forward(X_tensor).numpy()[0]
+                    st.metric("k (Plasticity)", f"{full_output[3]:.4f}")
+                    st.metric("A (Rearrangement)", f"{full_output[4]:.4f}")
+                    st.caption("Density is naturally bounded by the model architecture.")
+                except:
+                    pass
+            
+            # --- RUN NSGA-II ---
+            st.markdown("### ⚙️ NSGA-II")
+            bounds = np.array([
+                [60, 100], [0.1, 20], [0.1, 12], [0.01, 3.0], 
+                [0.1, 10], [80, PRESSURE_MAX], [1, 50], [30, 250]
+            ])
+            with st.spinner(f"🔄 Running NSGA-II (pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS})..."):
+                start_time = time.time()
+                nsga = NSGAII(model, scaler, y_scaler, bounds, pop_size=NSGA_POP_SIZE, n_generations=NSGA_GENERATIONS, w_tensile=0.0)
+                pop, objectives, constraints, fronts = nsga.run()
+                elapsed = time.time() - start_time
+                st.caption(f"⏱️ NSGA-II completed in {elapsed:.1f} seconds")
+                
+                if len(fronts) > 0 and len(fronts[0]) > 0:
+                    front0 = fronts[0]
+                    pareto_api = -objectives[front0, 0]
+                    feasible = constraints[front0]
+                    feasible_indices = [i for i, f in enumerate(feasible) if f]
+                    if feasible_indices:
+                        best_idx = np.argmax([pareto_api[i] for i in feasible_indices])
+                        best_idx = feasible_indices[best_idx]
+                        st.success(f"Optimal: API = {pareto_api[best_idx]:.2f}% | EFRF = {objectives[front0, 1][best_idx]:.4f}")
+                    else:
+                        st.warning("No feasible solutions found")
+                else:
+                    st.warning("No Pareto front found. Try adjusting NSGA-II parameters.")
+            
+            # --- Prepare Model Comparison Data ---
+            X_train, X_test, y_train, y_test = train_test_split(
+                df[feature_names].values, df['Tensile_Strength_MPa'].values,
+                test_size=0.2, random_state=42
+            )
+            X_train_aug = add_interaction_features(X_train)
+            X_test_aug = add_interaction_features(X_test)
+            X_train_scaled = scaler.transform(X_train_aug)
+            X_test_scaled = scaler.transform(X_test_aug)
+            
+            pinn_pred_scaled = model.predict(torch.tensor(X_test_scaled, dtype=torch.float32))
+            pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
+            pinn_r2 = r2_score(y_test, pinn_pred)
+            pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
+            pinn_mae = mean_absolute_error(y_test, pinn_pred)
+            
+            pinn_valid = "✅ Fully Valid"
+            try:
+                mono_pass = 0
+                efrf_pass = 0
+                density_pass = 0
+                for _ in range(50):
+                    idx = np.random.randint(0, len(X_test))
+                    sample = X_test[idx].copy()
+                    d1, _, _, e1 = predict_pinn(model, scaler, y_scaler, sample)
+                    sample[5] = min(sample[5] * 1.2, PRESSURE_MAX)
+                    d2, _, _, e2 = predict_pinn(model, scaler, y_scaler, sample)
+                    if d2 > d1: mono_pass += 1
+                    if e1 < EFRF_MAX: efrf_pass += 1
+                    if D_MIN <= d1 <= D_MAX: density_pass += 1
+                if mono_pass > 40 and efrf_pass > 45 and density_pass > 45:
+                    pinn_valid = "✅ Fully Valid"
+                else:
+                    pinn_valid = "⚠️ Partially Valid"
+            except:
+                pinn_valid = "⚠️ Partially Valid"
+            
+            comp_df = train_and_compare(X_train_scaled, X_test_scaled, y_train, y_test)
+            pinn_row = pd.DataFrame([{
+                'Model': 'PINN (Proposed)',
+                'R²': pinn_r2,
+                'RMSE': pinn_rmse,
+                'MAE': pinn_mae,
+                'Physical_Validity': pinn_valid
+            }])
+            comp_df = pd.concat([pinn_row, comp_df], ignore_index=True)
+    
+    # --- TABS (DEFINED AFTER NSGA-II) ---
     tab1, tab2, tab3, tab4, tab5 = st.tabs(
         ["📉 Pareto Front", "🔍 Sensitivity", "📊 Model Comparison", "📈 Training Curves", "📄 Report"]
     )
@@ -1492,11 +1608,13 @@ with col_right:
             if fig_p:
                 st.plotly_chart(fig_p, use_container_width=True)
             else:
-                st.info("Pareto front not available.")
+                st.info("Pareto front could not be generated.")
+        elif predict_btn and objectives is not None:
+            st.info("Pareto front not available (no feasible solutions found).")
         else:
             st.info("👆 Please click 'Predict & Optimize' with a valid formulation (total = 100%) to generate the Pareto Front.")
     
-    # === TAB 2: Sensitivity Analysis ===
+    # === TAB 2: Sensitivity ===
     with tab2:
         st.markdown("### 🔍 Sensitivity Analysis")
         if predict_btn and api_norm is not None:
@@ -1508,19 +1626,18 @@ with col_right:
         else:
             st.info("👆 Please click 'Predict & Optimize' with a valid formulation to run Sensitivity Analysis.")
     
-    # === TAB 3: Model Comparison (FIXED) ===
+    # === TAB 3: Model Comparison ===
     with tab3:
         st.markdown("### 📊 Model Performance Comparison")
         st.caption("Hold-out test set (20% of data) — R², RMSE, MAE, and Physical Validity")
         
         if predict_btn and not comp_df.empty:
-            # Show trade-off warning if R² < 0.8 but physical validity is high
-            pinn_r2 = comp_df[comp_df['Model'] == 'PINN (Proposed)']['R²'].values[0] if not comp_df.empty else 0
-            pinn_valid = comp_df[comp_df['Model'] == 'PINN (Proposed)']['Physical_Validity'].values[0] if not comp_df.empty else ""
-            if pinn_r2 < 0.8 and pinn_valid == "✅ Fully Valid":
+            pinn_r2_val = comp_df[comp_df['Model'] == 'PINN (Proposed)']['R²'].values[0] if not comp_df.empty else 0
+            pinn_valid_val = comp_df[comp_df['Model'] == 'PINN (Proposed)']['Physical_Validity'].values[0] if not comp_df.empty else ""
+            
+            if pinn_r2_val < 0.8 and pinn_valid_val == "✅ Fully Valid":
                 st.warning("⚠️ **Trade-off Detected:** R² is moderate (<0.8) but physical validity is fully satisfied. The model prioritises physics constraints over pure data fit to avoid physically impossible solutions. This is expected in True PINN frameworks.")
             
-            # Charts
             col1, col2 = st.columns(2)
             with col1:
                 colors_r2 = ['#2ecc71' if m == 'PINN (Proposed)' else '#3498db' for m in comp_df['Model']]
@@ -1559,14 +1676,12 @@ with col_right:
                 )
                 st.plotly_chart(fig_rmse, use_container_width=True)
             
-            # Table
             st.dataframe(
                 comp_df.style.highlight_max(subset=['R²'], color='lightgreen')
                           .highlight_min(subset=['RMSE', 'MAE'], color='lightcoral'),
                 use_container_width=True,
                 hide_index=True
             )
-            comp_df_for_pdf = comp_df.copy()
         else:
             if predict_btn:
                 st.info("Formulation must sum to 100% to generate comparison data.")
@@ -1592,7 +1707,7 @@ with col_right:
             timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             
             pdf_data = generate_full_pdf_report(
-                api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm, pressure, speed, granule,
+                api_use, mcc_use, pvpp_use, mgst_use, binder_use, pressure, speed, granule,
                 density, tensile, er, efrf, status, timestamp,
                 model_comparison_df=comp_df
             )
@@ -1610,135 +1725,6 @@ with col_right:
                 st.info("Formulation must sum to 100% to generate the report.")
             else:
                 st.info("👆 Please click 'Predict & Optimize' with a valid formulation to generate the report.")
-    
-    # === PREDICTION LOGIC (runs when button is clicked) ===
-    if predict_btn:
-        if abs(total - 100) > 0.1:
-            st.warning("⚠️ Formulation must sum to 100%")
-            # Don't run prediction or NSGA-II
-        else:
-            # Apply backend normalization
-            api_norm, binder_norm, pvpp_norm, mgst_norm, mcc_norm = normalize_components(api, binder, pvpp, mgst, mcc)
-            inputs_norm = [api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm, pressure, speed, granule]
-            
-            with st.spinner("🧠 Running prediction..."):
-                density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs_norm)
-            
-            # Display results
-            kpi_cols = st.columns(3)
-            kpi_cols[0].metric("Density", f"{density:.3f}", delta=f"[{D_MIN:.2f}, {D_MAX:.2f}]")
-            kpi_cols[1].metric("Tensile", f"{tensile:.3f} MPa", delta=f">= {TENSILE_MIN:.2f} PASS" if tensile >= TENSILE_MIN else f"< {TENSILE_MIN:.2f} FAIL")
-            kpi_cols[2].metric("EFRF", f"{efrf:.4f}", delta=f"< {EFRF_MAX:.2f} PASS" if efrf < EFRF_MAX else f">= {EFRF_MAX:.2f} FAIL")
-            
-            st.markdown("---")
-            
-            density_ok = (density >= D_MIN and density <= D_MAX)
-            tensile_ok = (tensile >= TENSILE_MIN)
-            efrf_ok = (efrf < EFRF_MAX)
-            mcc_ok = (mcc_norm <= MCC_MAX)
-            
-            if density_ok and tensile_ok and efrf_ok and mcc_ok:
-                st.success(f"✅ Formulation satisfies all constraints (Density: {density:.3f}, σt ≥ {TENSILE_MIN:.2f}, EFRF < {EFRF_MAX:.2f})")
-            else:
-                st.error("❌ Formulation violates one or more constraints")
-            
-            st.markdown("### ✅ Feasibility")
-            pass_cols = st.columns(4)
-            pass_cols[0].metric(f"Density [{D_MIN:.2f}, {D_MAX:.2f}]", "✅ PASS" if density_ok else "❌ FAIL")
-            pass_cols[1].metric(f"σt ≥ {TENSILE_MIN:.2f}", "✅ PASS" if tensile_ok else "❌ FAIL")
-            pass_cols[2].metric(f"EFRF < {EFRF_MAX:.2f}", "✅ PASS" if efrf_ok else "❌ FAIL")
-            pass_cols[3].metric(f"MCC ≤ {MCC_MAX:.1f}%", "✅ PASS" if mcc_ok else "❌ FAIL")
-            
-            with st.expander("🔬 Physics Verification"):
-                try:
-                    inputs_with_features = add_interaction_features(np.array([inputs_norm]))[0]
-                    inputs_scaled = scaler.transform([inputs_with_features])
-                    X_tensor = torch.tensor(inputs_scaled, dtype=torch.float32)
-                    with torch.no_grad():
-                        full_output = model.forward(X_tensor).numpy()[0]
-                    st.metric("k (Plasticity)", f"{full_output[3]:.4f}")
-                    st.metric("A (Rearrangement)", f"{full_output[4]:.4f}")
-                    st.caption("Density is naturally bounded by the model architecture.")
-                except:
-                    pass
-            
-            # NSGA-II
-            st.markdown("### ⚙️ NSGA-II")
-            bounds = np.array([
-                [60, 100], [0.1, 20], [0.1, 12], [0.01, 3.0], 
-                [0.1, 10], [80, PRESSURE_MAX], [1, 50], [30, 250]
-            ])
-            with st.spinner(f"🔄 Running NSGA-II (pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS})..."):
-                start_time = time.time()
-                nsga = NSGAII(model, scaler, y_scaler, bounds, pop_size=NSGA_POP_SIZE, n_generations=NSGA_GENERATIONS, w_tensile=0.0)
-                pop, objectives, constraints, fronts = nsga.run()
-                elapsed = time.time() - start_time
-                st.caption(f"⏱️ NSGA-II completed in {elapsed:.1f} seconds")
-                
-                if len(fronts) > 0 and len(fronts[0]) > 0:
-                    front0 = fronts[0]
-                    pareto_api = -objectives[front0, 0]
-                    feasible = constraints[front0]
-                    feasible_indices = [i for i, f in enumerate(feasible) if f]
-                    if feasible_indices:
-                        best_idx = np.argmax([pareto_api[i] for i in feasible_indices])
-                        best_idx = feasible_indices[best_idx]
-                        st.success(f"Optimal: API = {pareto_api[best_idx]:.2f}% | EFRF = {objectives[front0, 1][best_idx]:.4f}")
-                    else:
-                        st.warning("No feasible solutions found")
-                else:
-                    st.warning("No Pareto front found. Try adjusting NSGA-II parameters.")
-            
-            # After NSGA-II, we need to update comp_df for model comparison tab
-            # Prepare data for model comparison
-            X_train, X_test, y_train, y_test = train_test_split(
-                df[feature_names].values, df['Tensile_Strength_MPa'].values,
-                test_size=0.2, random_state=42
-            )
-            X_train_aug = add_interaction_features(X_train)
-            X_test_aug = add_interaction_features(X_test)
-            X_train_scaled = scaler.transform(X_train_aug)
-            X_test_scaled = scaler.transform(X_test_aug)
-            
-            # PINN predictions
-            pinn_pred_scaled = model.predict(torch.tensor(X_test_scaled, dtype=torch.float32))
-            pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
-            pinn_r2 = r2_score(y_test, pinn_pred)
-            pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
-            pinn_mae = mean_absolute_error(y_test, pinn_pred)
-            
-            # Physical validity check for PINN
-            pinn_valid = "✅ Fully Valid"
-            try:
-                mono_pass = 0
-                efrf_pass = 0
-                density_pass = 0
-                for _ in range(50):
-                    idx = np.random.randint(0, len(X_test))
-                    sample = X_test[idx].copy()
-                    d1, _, _, e1 = predict_pinn(model, scaler, y_scaler, sample)
-                    sample[5] = min(sample[5] * 1.2, PRESSURE_MAX)
-                    d2, _, _, e2 = predict_pinn(model, scaler, y_scaler, sample)
-                    if d2 > d1: mono_pass += 1
-                    if e1 < EFRF_MAX: efrf_pass += 1
-                    if D_MIN <= d1 <= D_MAX: density_pass += 1
-                if mono_pass > 40 and efrf_pass > 45 and density_pass > 45:
-                    pinn_valid = "✅ Fully Valid"
-                else:
-                    pinn_valid = "⚠️ Partially Valid"
-            except:
-                pinn_valid = "⚠️ Partially Valid"
-            
-            # Train other models
-            comp_df = train_and_compare(X_train_scaled, X_test_scaled, y_train, y_test)
-            pinn_row = pd.DataFrame([{
-                'Model': 'PINN (Proposed)',
-                'R²': pinn_r2,
-                'RMSE': pinn_rmse,
-                'MAE': pinn_mae,
-                'Physical_Validity': pinn_valid
-            }])
-            comp_df = pd.concat([pinn_row, comp_df], ignore_index=True)
 
 st.markdown("---")
 st.caption(f"🔬 **Multi-Task True PINN — v29.9 (Backend Normalization + Physical Validity)**")
