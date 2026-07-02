@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 29.9 (Dynamic Normalization - Backend Only, Same UI as v29.8)
+Version: 29.9 (Fixed variable scope for tabs)
 """
 
 import streamlit as st
@@ -1203,6 +1203,8 @@ def plot_training_curves(loss_history):
 
 def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
     try:
+        if objectives is None or constraints is None or fronts is None:
+            return None
         if len(fronts) == 0 or len(fronts[0]) == 0:
             return None
 
@@ -1455,10 +1457,27 @@ with col_left:
     predict_btn = st.button("🔬 Predict & Optimize", use_container_width=True)
 
 # ================================================================
-# RESULTS AND TABS (FIXED: TABS OUTSIDE predict_btn)
+# RESULTS AND TABS (FIXED: TABS OUTSIDE predict_btn, variables defined)
 # ================================================================
 with col_right:
     st.markdown("### 📈 Results")
+    
+    # --- Define placeholder variables to avoid NameError ---
+    objectives = None
+    constraints = None
+    fronts = None
+    nsga = None
+    api_norm = None
+    efrf = None
+    comp_df = pd.DataFrame()
+    density = 0.0
+    tensile = 0.0
+    er = 0.0
+    efrf = 0.0
+    density_ok = False
+    tensile_ok = False
+    efrf_ok = False
+    mcc_ok = False
     
     # Define tabs first (always visible)
     tab1, tab2, tab3, tab4, tab5 = st.tabs(
@@ -1468,84 +1487,36 @@ with col_right:
     # === TAB 1: Pareto Front ===
     with tab1:
         st.markdown("### 📉 Pareto Front")
-        if predict_btn:
+        if predict_btn and objectives is not None and fronts is not None and len(fronts) > 0:
             fig_p = plot_pareto_plotly(objectives, constraints, fronts, nsga, api_norm, efrf)
             if fig_p:
                 st.plotly_chart(fig_p, use_container_width=True)
             else:
                 st.info("Pareto front not available.")
         else:
-            st.info("👆 Please click 'Predict & Optimize' to generate the Pareto Front.")
+            st.info("👆 Please click 'Predict & Optimize' with a valid formulation (total = 100%) to generate the Pareto Front.")
     
     # === TAB 2: Sensitivity Analysis ===
     with tab2:
         st.markdown("### 🔍 Sensitivity Analysis")
-        if predict_btn:
+        if predict_btn and api_norm is not None:
             fig_s = plot_sensitivity_plotly(inputs_norm, model, scaler, y_scaler)
             if fig_s:
                 st.plotly_chart(fig_s, use_container_width=True)
             else:
                 st.info("Sensitivity analysis not available.")
         else:
-            st.info("👆 Please click 'Predict & Optimize' to run Sensitivity Analysis.")
+            st.info("👆 Please click 'Predict & Optimize' with a valid formulation to run Sensitivity Analysis.")
     
     # === TAB 3: Model Comparison (FIXED) ===
     with tab3:
         st.markdown("### 📊 Model Performance Comparison")
         st.caption("Hold-out test set (20% of data) — R², RMSE, MAE, and Physical Validity")
         
-        if predict_btn:
-            # Prepare data
-            X_train, X_test, y_train, y_test = train_test_split(
-                df[feature_names].values, df['Tensile_Strength_MPa'].values,
-                test_size=0.2, random_state=42
-            )
-            X_train_aug = add_interaction_features(X_train)
-            X_test_aug = add_interaction_features(X_test)
-            X_train_scaled = scaler.transform(X_train_aug)
-            X_test_scaled = scaler.transform(X_test_aug)
-            
-            # PINN predictions
-            pinn_pred_scaled = model.predict(torch.tensor(X_test_scaled, dtype=torch.float32))
-            pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
-            pinn_r2 = r2_score(y_test, pinn_pred)
-            pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
-            pinn_mae = mean_absolute_error(y_test, pinn_pred)
-            
-            # Physical validity check for PINN
-            pinn_valid = "✅ Fully Valid"
-            try:
-                mono_pass = 0
-                efrf_pass = 0
-                density_pass = 0
-                for _ in range(50):
-                    idx = np.random.randint(0, len(X_test))
-                    sample = X_test[idx].copy()
-                    d1, _, _, e1 = predict_pinn(model, scaler, y_scaler, sample)
-                    sample[5] = min(sample[5] * 1.2, PRESSURE_MAX)
-                    d2, _, _, e2 = predict_pinn(model, scaler, y_scaler, sample)
-                    if d2 > d1: mono_pass += 1
-                    if e1 < EFRF_MAX: efrf_pass += 1
-                    if D_MIN <= d1 <= D_MAX: density_pass += 1
-                if mono_pass > 40 and efrf_pass > 45 and density_pass > 45:
-                    pinn_valid = "✅ Fully Valid"
-                else:
-                    pinn_valid = "⚠️ Partially Valid"
-            except:
-                pinn_valid = "⚠️ Partially Valid"
-            
-            # Train other models
-            comp_df = train_and_compare(X_train_scaled, X_test_scaled, y_train, y_test)
-            pinn_row = pd.DataFrame([{
-                'Model': 'PINN (Proposed)',
-                'R²': pinn_r2,
-                'RMSE': pinn_rmse,
-                'MAE': pinn_mae,
-                'Physical_Validity': pinn_valid
-            }])
-            comp_df = pd.concat([pinn_row, comp_df], ignore_index=True)
-            
+        if predict_btn and not comp_df.empty:
             # Show trade-off warning if R² < 0.8 but physical validity is high
+            pinn_r2 = comp_df[comp_df['Model'] == 'PINN (Proposed)']['R²'].values[0] if not comp_df.empty else 0
+            pinn_valid = comp_df[comp_df['Model'] == 'PINN (Proposed)']['Physical_Validity'].values[0] if not comp_df.empty else ""
             if pinn_r2 < 0.8 and pinn_valid == "✅ Fully Valid":
                 st.warning("⚠️ **Trade-off Detected:** R² is moderate (<0.8) but physical validity is fully satisfied. The model prioritises physics constraints over pure data fit to avoid physically impossible solutions. This is expected in True PINN frameworks.")
             
@@ -1597,7 +1568,10 @@ with col_right:
             )
             comp_df_for_pdf = comp_df.copy()
         else:
-            st.info("👆 Please click 'Predict & Optimize' to see the model performance comparison.")
+            if predict_btn:
+                st.info("Formulation must sum to 100% to generate comparison data.")
+            else:
+                st.info("👆 Please click 'Predict & Optimize' with a valid formulation to see model performance comparison.")
     
     # === TAB 4: Training Curves ===
     with tab4:
@@ -1613,7 +1587,7 @@ with col_right:
         st.markdown("### 📄 Comprehensive Report (PDF)")
         st.caption("Download a complete report with formulation details, predictions, and model comparison.")
         
-        if predict_btn:
+        if predict_btn and not comp_df.empty:
             status = "PASS" if (density_ok and tensile_ok and efrf_ok and mcc_ok) else "FAIL"
             timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             
@@ -1632,12 +1606,16 @@ with col_right:
             )
             st.success("✅ One-click download — includes formulation, predictions, and model comparison.")
         else:
-            st.info("👆 Please click 'Predict & Optimize' to generate the report.")
+            if predict_btn:
+                st.info("Formulation must sum to 100% to generate the report.")
+            else:
+                st.info("👆 Please click 'Predict & Optimize' with a valid formulation to generate the report.")
     
     # === PREDICTION LOGIC (runs when button is clicked) ===
     if predict_btn:
         if abs(total - 100) > 0.1:
             st.warning("⚠️ Formulation must sum to 100%")
+            # Don't run prediction or NSGA-II
         else:
             # Apply backend normalization
             api_norm, binder_norm, pvpp_norm, mgst_norm, mcc_norm = normalize_components(api, binder, pvpp, mgst, mcc)
@@ -1710,6 +1688,57 @@ with col_right:
                         st.warning("No feasible solutions found")
                 else:
                     st.warning("No Pareto front found. Try adjusting NSGA-II parameters.")
+            
+            # After NSGA-II, we need to update comp_df for model comparison tab
+            # Prepare data for model comparison
+            X_train, X_test, y_train, y_test = train_test_split(
+                df[feature_names].values, df['Tensile_Strength_MPa'].values,
+                test_size=0.2, random_state=42
+            )
+            X_train_aug = add_interaction_features(X_train)
+            X_test_aug = add_interaction_features(X_test)
+            X_train_scaled = scaler.transform(X_train_aug)
+            X_test_scaled = scaler.transform(X_test_aug)
+            
+            # PINN predictions
+            pinn_pred_scaled = model.predict(torch.tensor(X_test_scaled, dtype=torch.float32))
+            pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
+            pinn_r2 = r2_score(y_test, pinn_pred)
+            pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
+            pinn_mae = mean_absolute_error(y_test, pinn_pred)
+            
+            # Physical validity check for PINN
+            pinn_valid = "✅ Fully Valid"
+            try:
+                mono_pass = 0
+                efrf_pass = 0
+                density_pass = 0
+                for _ in range(50):
+                    idx = np.random.randint(0, len(X_test))
+                    sample = X_test[idx].copy()
+                    d1, _, _, e1 = predict_pinn(model, scaler, y_scaler, sample)
+                    sample[5] = min(sample[5] * 1.2, PRESSURE_MAX)
+                    d2, _, _, e2 = predict_pinn(model, scaler, y_scaler, sample)
+                    if d2 > d1: mono_pass += 1
+                    if e1 < EFRF_MAX: efrf_pass += 1
+                    if D_MIN <= d1 <= D_MAX: density_pass += 1
+                if mono_pass > 40 and efrf_pass > 45 and density_pass > 45:
+                    pinn_valid = "✅ Fully Valid"
+                else:
+                    pinn_valid = "⚠️ Partially Valid"
+            except:
+                pinn_valid = "⚠️ Partially Valid"
+            
+            # Train other models
+            comp_df = train_and_compare(X_train_scaled, X_test_scaled, y_train, y_test)
+            pinn_row = pd.DataFrame([{
+                'Model': 'PINN (Proposed)',
+                'R²': pinn_r2,
+                'RMSE': pinn_rmse,
+                'MAE': pinn_mae,
+                'Physical_Validity': pinn_valid
+            }])
+            comp_df = pd.concat([pinn_row, comp_df], ignore_index=True)
 
 st.markdown("---")
 st.caption(f"🔬 **Multi-Task True PINN — v29.9 (Backend Normalization + Physical Validity)**")
