@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 29.6 (Improved NSGA-II with Dynamic Density & Safety Penalty)
+Version: 29.6 (Truly Dynamic Density via Uniform Heckel x-Sampling)
 """
 
 import streamlit as st
@@ -27,7 +27,7 @@ import time
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. USER-CONFIGURABLE PARAMETERS (UPDATED)
+# 0. USER-CONFIGURABLE PARAMETERS
 # ================================================================
 
 TENSILE_MIN = 1.90          # MPa
@@ -44,7 +44,6 @@ NSGA_GENERATIONS = 120
 BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
-# --- Balanced loss weights (more strict) ---
 PHYSICS_WEIGHT_INIT = 0.5
 W_DENSITY = 100.0
 N_SAMPLES = 6000
@@ -124,8 +123,7 @@ clamp_session_state()
 # ================================================================
 
 def adjust_composition(api, binder, pvpp, mgst, mcc):
-    """ضبط المكونات لضمان أن المجموع الكلي = 100% مع احترام الحدود"""
-    # التقريب الأولي إلى الحدود
+    """Adjust components to sum to 100% while respecting individual bounds."""
     api = np.clip(api, 85, 95)
     binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
     pvpp = np.clip(pvpp, 0.5, 6.0)
@@ -135,7 +133,6 @@ def adjust_composition(api, binder, pvpp, mgst, mcc):
     total = api + binder + pvpp + mgst + mcc
     
     if total > 100:
-        # إذا زاد المجموع عن 100، نقوم بتقليص جميع المكونات بنفس النسبة
         scale = 100 / total
         api *= scale
         binder *= scale
@@ -143,27 +140,18 @@ def adjust_composition(api, binder, pvpp, mgst, mcc):
         mgst *= scale
         mcc *= scale
     else:
-        # إذا قل المجموع عن 100، نضيف الباقي إلى MCC أولاً، ثم إلى API
         remainder = 100 - total
-        
-        # إضافة إلى MCC بحد أقصى 8.0%
         add_mcc = min(remainder, MCC_MAX - mcc)
         mcc += add_mcc
         remainder -= add_mcc
-        
-        # إضافة إلى API بحد أقصى 95%
         if remainder > 0:
             add_api = min(remainder, 95 - api)
             api += add_api
             remainder -= add_api
-        
-        # إضافة إلى Binder إذا بقي شيء (كحل أخير)
         if remainder > 0:
             add_binder = min(remainder, BINDER_MAX - binder)
             binder += add_binder
             remainder -= add_binder
-            
-        # إذا بقي شيء رغم ذلك (نادر)، نعيد توزيعه بنسبة
         if remainder > 0:
             total_new = api + binder + pvpp + mgst + mcc
             if total_new > 0:
@@ -174,7 +162,6 @@ def adjust_composition(api, binder, pvpp, mgst, mcc):
                 mgst *= scale
                 mcc *= scale
     
-    # التقريب النهائي إلى الحدود
     api = np.clip(api, 85, 95)
     binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
     pvpp = np.clip(pvpp, 0.5, 6.0)
@@ -320,7 +307,7 @@ class MultiTaskTruePINN(nn.Module):
         return total_loss, loss_dict
 
 # ================================================================
-# 5. DATA GENERATION (FIXED: DYNAMIC DENSITY)
+# 5. DATA GENERATION (TRULY DYNAMIC DENSITY)
 # ================================================================
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
@@ -328,7 +315,12 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     X = np.zeros((n_samples, 8))
     y = np.zeros((n_samples, 3))
 
+    # Pre‑compute the range of x = -ln(1-D) for D in [D_MIN, D_MAX]
+    x_min = -np.log(1 - D_MIN)   # ~0.51
+    x_max = -np.log(1 - D_MAX)   # ~3.51
+
     for i in range(n_samples):
+        # 1. Generate formulation and process variables (as before)
         if i < n_samples // 2:
             api = np.random.uniform(85, 95)
             binder = np.random.uniform(BINDER_MIN, BINDER_MAX)
@@ -348,34 +340,44 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
             speed = np.clip(np.random.normal(10, 3), 1, 50)
             granule = np.clip(np.random.normal(125, 20), 30, 250)
 
-        # ضبط المكونات لتساوي 100%
         api, binder, pvpp, mgst, mcc = adjust_composition(api, binder, pvpp, mgst, mcc)
-
         X[i] = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
 
-        # =====================================================
-        # التعديل الجوهري: جعل الكثافة متغيرة على كامل المجال
-        # =====================================================
-        # بدلاً من k~0.035 و A~1.2 ثابتين، نأخذ مدى واسع
-        k_true = np.random.uniform(0.008, 0.055)  # يمنح تبايناً كبيراً
-        A_true = np.random.uniform(0.6, 2.2)      # يمنح تبايناً في التقاطع
-        
-        # حساب الكثافة الخام (بدون قص)
-        raw_density = 1 - np.exp(-(k_true * pressure + A_true))
-        
-        # إضافة ضوضاء ثم قصها إلى المجال الفيزيائي
-        noise_d = np.random.normal(0, 0.015)
-        D = np.clip(raw_density + noise_d, D_MIN, D_MAX)
-        # =====================================================
+        # 2. Sample x = -ln(1-D) uniformly across its feasible range
+        x = np.random.uniform(x_min, x_max)
 
-        # حساب المقاومة (Tensile) مع تباين معقول
+        # 3. Determine k and A such that k*P + A = x, with k in [0.005, 0.055] and A in [0.5, 2.5]
+        # We randomly choose k then compute A = x - k*P; if A is outside bounds, adjust P slightly.
+        max_trials = 50
+        for _ in range(max_trials):
+            k = np.random.uniform(0.005, 0.055)
+            A = x - k * pressure
+            if 0.5 <= A <= 2.5:
+                break
+        else:
+            # Fallback: adjust pressure to force A into range
+            # Find a k that works with the current pressure, or adjust pressure
+            # Simple approach: clamp A, recalc x, then D
+            A = np.clip(x - 0.03 * pressure, 0.5, 2.5)  # rough
+            x = 0.03 * pressure + A  # k ~0.03 as default
+            k = 0.03
+
+        # Clip A to be safe and recompute x
+        A = np.clip(A, 0.5, 2.5)
+        x_new = k * pressure + A
+        D_target = 1 - np.exp(-x_new)
+        D_target = np.clip(D_target, D_MIN, D_MAX)
+
+        # Add noise
+        noise_d = np.random.normal(0, 0.01)
+        D = np.clip(D_target + noise_d, D_MIN, D_MAX)
+
+        # 4. Tensile strength and elastic recovery (as before)
         strength = np.clip(
             3.5 - 0.15 * (api - 85) + 0.3 * binder + 0.008 * (pressure - 100)
             - 1.5 * mgst - 0.02 * (speed - 10) + np.random.normal(0, 0.04),
             0.5, 6.0
         )
-        
-        # حساب الاستعادة المرنة (ER)
         er = np.clip(
             1.8 + 0.3 * (api - 85)/10 + 0.08 * (speed - 10)/30
             - 0.1 * (pressure - 100)/150 + np.random.normal(0, 0.03),
@@ -587,7 +589,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
         return str(pdf_bytes).encode('latin1')
 
 # ================================================================
-# 7. NSGA-II (IMPROVED: Dynamic Density, Stronger Safety Penalty)
+# 7. NSGA-II (IMPROVED WITH STRONGER SAFETY PENALTY)
 # ================================================================
 
 class NSGAII:
@@ -610,14 +612,10 @@ class NSGAII:
 
     def _repair(self, individual):
         api, mcc, pvpp, mgst, binder, pressure, speed, granule = individual
-        # استخدام دالة الضبط الذكية
         api, binder, pvpp, mgst, mcc = adjust_composition(api, binder, pvpp, mgst, mcc)
-        
-        # قص المتغيرات الأخرى إلى حدودها
         pressure = np.clip(pressure, 80, PRESSURE_MAX)
         speed = np.clip(speed, 1.0, 50.0)
         granule = np.clip(granule, 30.0, 250.0)
-        
         return np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule], dtype=float)
 
     def _initialize_population(self):
@@ -690,11 +688,11 @@ class NSGAII:
                 feasible = density_ok and tensile_ok and efrf_ok and mcc_ok
                 constraints[i] = feasible
 
-                # --- عقوبة الأمان المُحسّنة (وزن أعلى وحدود أكثر صرامة) ---
+                # Improved safety penalty (stricter bounds and higher weight)
                 safety_penalty = 0.0
-                if density > 0.96:  # تم خفض الحد من 0.965 إلى 0.96
+                if density > 0.96:
                     safety_penalty += (density - 0.96) ** 2
-                if efrf > 0.36:     # تم خفض الحد من 0.38 إلى 0.36
+                if efrf > 0.36:
                     safety_penalty += (efrf - 0.36) ** 2
 
                 penalty = 0.0
@@ -707,7 +705,6 @@ class NSGAII:
                 if density > D_MAX:
                     penalty += (density - D_MAX) ** 2
 
-                # زيادة وزن عقوبة الأمان من 5.0 إلى 15.0
                 objectives[i, 0] = -(api + self.w_tensile * tensile) + 30.0 * penalty + 15.0 * safety_penalty
                 objectives[i, 1] = efrf + 30.0 * penalty + 15.0 * safety_penalty
                 tensile_strengths[i] = tensile
@@ -925,7 +922,7 @@ class NSGAII:
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 8. TRAIN MODEL (FIXED: Loss History is now stored)
+# 8. TRAIN MODEL (WITH LOSS HISTORY)
 # ================================================================
 
 @st.cache_resource
@@ -971,7 +968,6 @@ def load_pinn_model():
     adam_epochs = 1200
     max_epochs = 2000
 
-    # --- تخزين سجل الخسارة ---
     train_losses = []
     val_losses = []
 
@@ -1006,11 +1002,8 @@ def load_pinn_model():
             )
 
         val_loss_value = val_loss.item()
-        
-        # إلحاق قيم الخسارة للسجلات
         train_losses.append(total_loss.item())
         val_losses.append(val_loss_value)
-        
         scheduler.step(val_loss_value)
 
         if val_loss_value < best_val_loss:
@@ -1170,7 +1163,6 @@ def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
                 name='Feasible Solutions'
             ))
 
-        # Add your formulation if provided
         if api and efrf and 85 <= api <= 95 and 0.0001 <= efrf <= 2:
             fig.add_trace(go.Scatter(
                 x=[api], y=[efrf],
@@ -1267,8 +1259,11 @@ def train_and_compare(X_train, X_test, y_train, y_test):
     return pd.DataFrame(results)
 
 # ================================================================
-# 10. STREAMLIT UI (UNCHANGED)
+# 10. STREAMLIT UI (UNCHANGED EXCEPT FOR CACHE CLEAR)
 # ================================================================
+
+# Clear any cached model to force retraining with new data generation
+st.cache_resource.clear()
 
 st.set_page_config(page_title="PINN Framework v29.6", page_icon="🧬", layout="wide")
 clamp_session_state()
@@ -1308,9 +1303,9 @@ with st.sidebar:
     - **Safety Penalty:** ✅ (density ≤ 0.96, EFRF ≤ 0.36)
     - **Penalty weight:** 30.0 (constraints), 15.0 (safety)
     - **Density penalty:** 100.0
-    - **Dynamic Density:** ✅ Variable (bounded by sigmoid)
+    - **Dynamic Density:** ✅ Variable (bounded by sigmoid + uniform x-sampling)
     """)
-    st.info("🔬 **v29.6** — Dynamic Density + Stronger Safety Penalty")
+    st.info("🔬 **v29.6** — Truly Dynamic Density via uniform Heckel x-sampling")
 
 with st.spinner("🔄 Training Multi-Task PINN..."):
     model, scaler, y_scaler, feature_names, df, loss_history = load_pinn_model()
@@ -1555,5 +1550,5 @@ with col_right:
                 st.success("✅ One-click download — includes formulation, predictions, and model comparison.")
 
 st.markdown("---")
-st.caption(f"🔬 **Multi-Task True PINN — v29.6 (Dynamic Density + Improved Safety Penalty)**")
+st.caption(f"🔬 **Multi-Task True PINN — v29.6 (Dynamic Density via Uniform x-Sampling)**")
 st.caption(f"📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Postgraduate College, Sudan")
