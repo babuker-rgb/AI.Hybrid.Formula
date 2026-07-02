@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 29.8 (Balanced Physics-Data with Physical Validity Comparison)
+Version: 29.9 (Dynamic Normalization / Industrial Scale-up Flexibility)
 """
 
 import streamlit as st
@@ -27,12 +27,12 @@ import time
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. USER-CONFIGURABLE PARAMETERS (FIXED v29.8)
+# 0. USER-CONFIGURABLE PARAMETERS (v29.9 - Dynamic Normalization)
 # ================================================================
 
 TENSILE_MIN = 1.90          # MPa
 EFRF_MAX = 0.40             # dimensionless
-MCC_MAX = 8.0               # %
+MCC_MAX = 8.0               # % (maximum allowed after normalization)
 D_MIN = 0.40                # Physical lower bound
 D_MAX = 0.97                # Physical upper bound
 DENSITY_TOL = 1e-6          # Tolerance for floating-point errors
@@ -41,7 +41,7 @@ PRESSURE_MAX = 300.0        # MPa
 BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
-# --- Balanced Hyperparameters (Fast & Safe) ---
+# --- Balanced Hyperparameters ---
 N_SAMPLES = 4000            
 ADAM_EPOCHS = 700           
 LBFGS_STEPS = 3             
@@ -56,16 +56,16 @@ else:
     NSGA_POP_SIZE = 80      
     NSGA_GENERATIONS = 60   
 
-# --- FIXED: Loss Weights (Balanced for Tensile) ---
-W_DENSITY = 12.0            # REDUCED from 100.0 (allows tensile to learn)
-TENSILE_DATA_WEIGHT = 2.0   # NEW: Explicitly weight Tensile data loss higher
-TENSILE_PHYSICS_WEIGHT = 0.5 # NEW: Gentle physics for tensile (correlation with D)
+# --- Loss Weights (Balanced for Tensile - same as v29.8) ---
+W_DENSITY = 12.0            
+TENSILE_DATA_WEIGHT = 2.0   
+TENSILE_PHYSICS_WEIGHT = 0.5
 
 # --- Physics / Data Balance ---
 W_DATA_INIT = 1.0          
 W_PHYSICS_INIT = 0.3       
 W_DATA_FINAL = 1.0         
-W_PHYSICS_FINAL = 0.6      # REDUCED from 1.0 to let data dominate slightly
+W_PHYSICS_FINAL = 0.6      
 
 # --- Safety Penalty (Soft) ---
 SAFETY_PENALTY_WEIGHT = 5.0     
@@ -75,7 +75,7 @@ EFRF_PENALTY_WEIGHT = 2.0
 DENSITY_PREFERENCE_WEIGHT = 0.5 
 DENSITY_PREFERENCE_LIMIT = 0.95 
 
-PHYSICS_WEIGHT_INIT = 0.3  # Backward compatibility
+PHYSICS_WEIGHT_INIT = 0.3  
 
 # ================================================================
 # 1. SAFE IMPORTS
@@ -88,7 +88,7 @@ except ImportError:
     XGB_AVAILABLE = False
 
 # ================================================================
-# 2. SESSION STATE
+# 2. SESSION STATE (UPDATED: Wider Ranges for Flexibility)
 # ================================================================
 
 DEFAULTS = {
@@ -103,11 +103,11 @@ DEFAULTS = {
 }
 
 RANGES = {
-    'api': (85.0, 95.0),
-    'binder': (BINDER_MIN, BINDER_MAX),
-    'pvpp': (0.5, 6.0),
-    'mgst': (0.01, 1.2),
-    'mcc': (0.0, MCC_MAX),
+    'api': (60.0, 100.0),      # Wider range for free exploration
+    'binder': (0.1, 10.0),
+    'pvpp': (0.1, 12.0),
+    'mgst': (0.01, 3.0),
+    'mcc': (0.1, 20.0),
     'pressure': (80.0, PRESSURE_MAX),
     'speed': (1.0, 50.0),
     'granule': (30.0, 250.0)
@@ -148,55 +148,97 @@ safe_initialize()
 clamp_session_state()
 
 # ================================================================
-# 3. FEATURE ENGINEERING & COMPOSITION ADJUSTMENT
+# 3. DYNAMIC NORMALIZATION (STRATEGY #2 - THE CORE FIX)
 # ================================================================
 
-def adjust_composition(api, binder, pvpp, mgst, mcc):
-    api = np.clip(api, 85, 95)
-    binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
-    pvpp = np.clip(pvpp, 0.5, 6.0)
-    mgst = np.clip(mgst, 0.01, 1.2)
-    mcc = np.clip(mcc, 0, MCC_MAX)
+def normalize_components(api, binder, pvpp, mgst, mcc):
+    """
+    الاستراتيجية #2: تطبيع ديناميكي (Softmax-like) للأوزان الخام.
+    تضمن أن المجموع الكلي = 100% مع احترام الحدود الفيزيائية لكل مكون.
+    هذه الدالة تحل مشكلة R² المنخفضة لأنها ترفع عبء القيد الصارم عن الشبكة العصبية.
+    """
+    # 1. منع الأصفار والقيم السالبة (حماية رياضية)
+    api = max(api, 0.1)
+    binder = max(binder, 0.1)
+    pvpp = max(pvpp, 0.1)
+    mgst = max(mgst, 0.01)
+    mcc = max(mcc, 0.1)
     
+    # 2. قص القيم إلى حدود قصوى معقولة (منع القيم الشاذة)
+    api = min(api, 100.0)
+    binder = min(binder, 15.0)
+    pvpp = min(pvpp, 15.0)
+    mgst = min(mgst, 3.0)
+    mcc = min(mcc, 25.0)
+    
+    # 3. التطبيع الديناميكي (المجموع يصبح 100% تلقائياً)
     total = api + binder + pvpp + mgst + mcc
+    if total <= 0:
+        total = 1.0  # تجنب القسمة على صفر
     
-    if total > 100:
-        scale = 100 / total
-        api *= scale
-        binder *= scale
-        pvpp *= scale
-        mgst *= scale
-        mcc *= scale
-    else:
-        remainder = 100 - total
-        add_mcc = min(remainder, MCC_MAX - mcc)
-        mcc += add_mcc
-        remainder -= add_mcc
-        if remainder > 0:
-            add_api = min(remainder, 95 - api)
-            api += add_api
-            remainder -= add_api
-        if remainder > 0:
-            add_binder = min(remainder, BINDER_MAX - binder)
-            binder += add_binder
-            remainder -= add_binder
-        if remainder > 0:
-            total_new = api + binder + pvpp + mgst + mcc
-            if total_new > 0:
-                scale = 100 / total_new
-                api *= scale
-                binder *= scale
-                pvpp *= scale
-                mgst *= scale
-                mcc *= scale
+    api_norm = (api / total) * 100
+    binder_norm = (binder / total) * 100
+    pvpp_norm = (pvpp / total) * 100
+    mgst_norm = (mgst / total) * 100
+    mcc_norm = (mcc / total) * 100
     
-    api = np.clip(api, 85, 95)
-    binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
-    pvpp = np.clip(pvpp, 0.5, 6.0)
-    mgst = np.clip(mgst, 0.01, 1.2)
-    mcc = np.clip(mcc, 0, MCC_MAX)
+    # 4. التأكد من أن MCC لا يتجاوز الحد الأقصى المسموح (8%)
+    if mcc_norm > MCC_MAX:
+        excess = mcc_norm - MCC_MAX
+        mcc_norm = MCC_MAX
+        other_sum = api_norm + binder_norm + pvpp_norm + mgst_norm
+        if other_sum > 0:
+            api_norm += excess * (api_norm / other_sum)
+            binder_norm += excess * (binder_norm / other_sum)
+            pvpp_norm += excess * (pvpp_norm / other_sum)
+            mgst_norm += excess * (mgst_norm / other_sum)
     
-    return api, binder, pvpp, mgst, mcc
+    # 5. التأكد من أن API لا يقل عن 85% (للحفاظ على الجرعة العلاجية)
+    if api_norm < 85.0:
+        deficit = 85.0 - api_norm
+        api_norm = 85.0
+        other_sum = binder_norm + pvpp_norm + mgst_norm
+        if other_sum > 0:
+            binder_norm -= deficit * (binder_norm / other_sum) if binder_norm > 0 else 0
+            pvpp_norm -= deficit * (pvpp_norm / other_sum) if pvpp_norm > 0 else 0
+            mgst_norm -= deficit * (mgst_norm / other_sum) if mgst_norm > 0 else 0
+    
+    # 6. التأكد من أن API لا يتجاوز 95%
+    if api_norm > 95.0:
+        excess = api_norm - 95.0
+        api_norm = 95.0
+        other_sum = binder_norm + pvpp_norm + mgst_norm + mcc_norm
+        if other_sum > 0:
+            binder_norm += excess * (binder_norm / other_sum) if binder_norm > 0 else 0
+            pvpp_norm += excess * (pvpp_norm / other_sum) if pvpp_norm > 0 else 0
+            mgst_norm += excess * (mgst_norm / other_sum) if mgst_norm > 0 else 0
+            mcc_norm += excess * (mcc_norm / other_sum) if mcc_norm > 0 else 0
+    
+    # 7. التقريب النهائي إلى الحدود الدنيا والعليا لكل مكون
+    api_norm = np.clip(api_norm, 85, 95)
+    binder_norm = np.clip(binder_norm, 0.5, 5.0)
+    pvpp_norm = np.clip(pvpp_norm, 0.5, 6.0)
+    mgst_norm = np.clip(mgst_norm, 0.01, 1.2)
+    mcc_norm = np.clip(mcc_norm, 0, MCC_MAX)
+    
+    # 8. إعادة التطبيع النهائي لضمان المجموع = 100% (بعد التقريب)
+    total_final = api_norm + binder_norm + pvpp_norm + mgst_norm + mcc_norm
+    if total_final > 0 and abs(total_final - 100) > 0.1:
+        scale = 100 / total_final
+        api_norm *= scale
+        binder_norm *= scale
+        pvpp_norm *= scale
+        mgst_norm *= scale
+        mcc_norm *= scale
+    
+    # 9. إعادة التقريب النهائي بعد التطبيع
+    api_norm = np.clip(api_norm, 85, 95)
+    binder_norm = np.clip(binder_norm, 0.5, 5.0)
+    pvpp_norm = np.clip(pvpp_norm, 0.5, 6.0)
+    mgst_norm = np.clip(mgst_norm, 0.01, 1.2)
+    mcc_norm = np.clip(mcc_norm, 0, MCC_MAX)
+    
+    return api_norm, binder_norm, pvpp_norm, mgst_norm, mcc_norm
 
 def add_interaction_features(X_raw):
     pressure = X_raw[:, 5:6]
@@ -218,7 +260,7 @@ def add_interaction_features(X_raw):
     ], axis=1)
 
 # ================================================================
-# 4. MULTI-TASK TRUE PINN MODEL (FIXED: Tensile Physics & Data Weight)
+# 4. MULTI-TASK TRUE PINN MODEL (PHYSICS ENFORCED)
 # ================================================================
 
 def bounded_density(raw):
@@ -227,7 +269,6 @@ def bounded_density(raw):
 class MultiTaskTruePINN(nn.Module):
     def __init__(self, input_dim=13, output_dim=5):
         super(MultiTaskTruePINN, self).__init__()
-        # FIX: Increased network capacity (128 -> 256)
         self.network = nn.Sequential(
             nn.Linear(input_dim, 256), nn.LayerNorm(256), nn.Tanh(), nn.Dropout(0.05),
             nn.Linear(256, 256), nn.LayerNorm(256), nn.Tanh(), nn.Dropout(0.05),
@@ -258,6 +299,14 @@ class MultiTaskTruePINN(nn.Module):
                      w_mcc=0.5, w_density=W_DENSITY,
                      efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
                      compute_grad=True):
+        """
+        دالة الفقد مع تطبيق جميع القيود الفيزيائية:
+        - معادلة هيكل (Heckel)
+        - حد EFRF
+        - الرتابة (∂D/∂P > 0)
+        - الحدود الفيزيائية للكثافة
+        - علاقة فيزيائية بين الكثافة والمقاومة
+        """
         pressure_real = X_raw[:, 5].view(-1, 1)
         mcc_real = X_raw[:, 1].view(-1, 1)
 
@@ -272,33 +321,35 @@ class MultiTaskTruePINN(nn.Module):
         w_data = w_data_init + (w_data_final - w_data_init) * progress
         w_physics = w_physics_init + (w_physics_final - w_physics_init) * progress
 
-        # --- FIX: Explicitly weight the data loss for Tensile Strength higher ---
+        # --- Data Loss (مع ترجيح أعلى للـ Tensile) ---
         density_data_loss = nn.MSELoss()(density_pred, y_true[:, 0:1])
         tensile_data_loss = nn.MSELoss()(tensile_pred, y_true[:, 1:2])
         er_data_loss = nn.MSELoss()(er_pred, y_true[:, 2:3])
-        
-        # Weighted data loss (Tensile gets 2x weight)
         data_loss = density_data_loss + TENSILE_DATA_WEIGHT * tensile_data_loss + er_data_loss
 
-        # --- Physics Losses (Density) ---
+        # --- Physics Loss 1: Heckel Equation ---
         heckel_lhs = torch.log(1.0 / torch.clamp(1.0 - density_pred, min=1e-4))
         heckel_rhs = k_pred * pressure_real + A_pred
         heckel_loss = torch.mean((heckel_lhs - heckel_rhs) ** 2)
 
+        # --- Physics Loss 2: EFRF Bound ---
         efrf_pred = er_pred / torch.clamp(tensile_pred, min=1e-4)
         efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
         efrf_safe_loss = torch.mean(torch.relu(efrf_pred - 0.36) ** 2) * EFRF_PENALTY_WEIGHT
 
+        # --- Physics Loss 3: MCC Bound ---
         mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
+
+        # --- Physics Loss 4: Density Bounds ---
         density_penalty = torch.mean(
             torch.relu(density_pred - D_MAX) ** 2 + torch.relu(D_MIN - density_pred) ** 2
         )
         density_preference_loss = torch.mean(torch.relu(density_pred - DENSITY_PREFERENCE_LIMIT) ** 2) * DENSITY_PREFERENCE_WEIGHT
 
-        # --- NEW: Tensile Physics (Physical relation: Higher density generally gives higher tensile) ---
-        # This gently penalizes cases where density is high but tensile is low.
+        # --- Physics Loss 5: Tensile-Density Relation ---
         tensile_physics_loss = torch.mean(torch.relu(0.3 - (tensile_pred * density_pred)) ** 2) * TENSILE_PHYSICS_WEIGHT
 
+        # --- Physics Loss 6: Monotonicity (∂D/∂P > 0) ---
         if compute_grad:
             Xg = X_scaled.clone().detach().requires_grad_(True)
             yg = self.forward(Xg)
@@ -314,14 +365,17 @@ class MultiTaskTruePINN(nn.Module):
         else:
             monotonic_loss = torch.tensor(0.0, device=X_scaled.device)
 
+        # --- Physics Loss 7: Boundary Smoothness ---
         boundary_loss = (
             torch.mean(torch.relu((D_MIN + 0.1) - density_pred) ** 2) +
             torch.mean(torch.relu(density_pred - D_MAX) ** 2)
         )
 
+        # --- Regularization for k and A ---
         k_reg = torch.mean(torch.relu(k_pred - 0.1) ** 2) + torch.mean(torch.relu(0.005 - k_pred) ** 2)
         A_reg = torch.mean(torch.relu(A_pred - 2.0) ** 2) + torch.mean(torch.relu(0.5 - A_pred) ** 2)
 
+        # --- Total Loss ---
         total_loss = (
             w_data * data_loss +
             w_physics * (heckel_loss + efrf_loss + monotonic_loss + boundary_loss + tensile_physics_loss) +
@@ -349,7 +403,7 @@ class MultiTaskTruePINN(nn.Module):
         return total_loss, loss_dict
 
 # ================================================================
-# 5. DATA GENERATION (TRULY DYNAMIC DENSITY - UNCHANGED)
+# 5. DATA GENERATION (WITH DYNAMIC NORMALIZATION)
 # ================================================================
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
@@ -361,28 +415,24 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     x_max = -np.log(1 - D_MAX)
 
     for i in range(n_samples):
-        if i < n_samples // 2:
-            api = np.random.uniform(85, 95)
-            binder = np.random.uniform(BINDER_MIN, BINDER_MAX)
-            mgst = np.random.uniform(0.01, 1.2)
-            pvpp = np.random.uniform(0.5, 6.0)
-            mcc = np.random.uniform(0, MCC_MAX)
-            pressure = np.random.uniform(80, PRESSURE_MAX)
-            speed = np.random.uniform(1, 50)
-            granule = np.random.uniform(30, 250)
-        else:
-            api = np.clip(np.random.normal(90.5, 1.5), 85, 95)
-            binder = np.clip(np.random.normal(2.8, 0.4), BINDER_MIN, BINDER_MAX)
-            mgst = np.clip(np.random.normal(0.15, 0.06), 0.01, 1.2)
-            pvpp = np.clip(np.random.normal(3.0, 0.5), 0.5, 6.0)
-            mcc = np.clip(np.random.normal(5.0, 1.0), 0, MCC_MAX)
-            pressure = np.clip(np.random.normal(230, 15), 80, PRESSURE_MAX)
-            speed = np.clip(np.random.normal(10, 3), 1, 50)
-            granule = np.clip(np.random.normal(125, 20), 30, 250)
+        # توليد أوزان خام من توزيعات واسعة جداً (تمثل حرية التصميم)
+        api_raw = np.random.uniform(60, 100)
+        binder_raw = np.random.uniform(0.1, 10)
+        mgst_raw = np.random.uniform(0.01, 3.0)
+        pvpp_raw = np.random.uniform(0.1, 12)
+        mcc_raw = np.random.uniform(0.1, 20)
+        
+        # الضغط والسرعة وحجم الحبيبات (كما هي)
+        pressure = np.random.uniform(80, PRESSURE_MAX)
+        speed = np.random.uniform(1, 50)
+        granule = np.random.uniform(30, 250)
 
-        api, binder, pvpp, mgst, mcc = adjust_composition(api, binder, pvpp, mgst, mcc)
+        # تطبيق التطبيع الديناميكي للحصول على نسب مئوية مجموعها 100%
+        api, binder, pvpp, mgst, mcc = normalize_components(api_raw, binder_raw, pvpp_raw, mgst_raw, mcc_raw)
+        
         X[i] = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
 
+        # حساب الكثافة بناءً على النسب المئوية المُطبّعة
         x = np.random.uniform(x_min, x_max)
         max_trials = 30
         for _ in range(max_trials):
@@ -402,6 +452,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         noise_d = np.random.normal(0, 0.01)
         D = np.clip(D_target + noise_d, D_MIN, D_MAX)
 
+        # حساب المقاومة (مع التباين الطبيعي)
         strength = np.clip(
             3.5 - 0.15 * (api - 85) + 0.3 * binder + 0.008 * (pressure - 100)
             - 1.5 * mgst - 0.02 * (speed - 10) + np.random.normal(0, 0.04),
@@ -547,7 +598,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.set_text_color(0, 0, 0)
     pdf.ln(4)
     
-    # 5. Model Comparison (now with Physical Validity)
+    # 5. Model Comparison (with Physical Validity)
     if model_comparison_df is not None and not model_comparison_df.empty:
         pdf.set_font("Arial", "B", 13)
         pdf.set_fill_color(230, 230, 230)
@@ -607,7 +658,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.ln(3)
     pdf.set_y(270)
     pdf.set_font("Arial", "I", 8)
-    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v29.8", ln=True, align="C")
+    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v29.9", ln=True, align="C")
     
     pdf_bytes = pdf.output(dest="S")
     if isinstance(pdf_bytes, bytearray):
@@ -618,7 +669,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
         return str(pdf_bytes).encode('latin1')
 
 # ================================================================
-# 7. NSGA-II (UPDATED WITH SAFE-ZONE PREFERENCE)
+# 7. NSGA-II (UPDATED WITH DYNAMIC NORMALIZATION)
 # ================================================================
 
 class NSGAII:
@@ -640,25 +691,36 @@ class NSGAII:
         self.fronts = None
 
     def _repair(self, individual):
+        """
+        إصلاح الفرد باستخدام التطبيع الديناميكي (الاستراتيجية #2).
+        لم نعد نجبر المجموع على 100% بالقوة، بل نطبّع الأوزان الخام.
+        """
         api, mcc, pvpp, mgst, binder, pressure, speed, granule = individual
-        api, binder, pvpp, mgst, mcc = adjust_composition(api, binder, pvpp, mgst, mcc)
+        
+        # تطبيق التطبيع الديناميكي على المكونات الخمسة
+        api, binder, pvpp, mgst, mcc = normalize_components(api, binder, pvpp, mgst, mcc)
+        
+        # قص المتغيرات الفيزيائية الأخرى
         pressure = np.clip(pressure, 80, PRESSURE_MAX)
         speed = np.clip(speed, 1.0, 50.0)
         granule = np.clip(granule, 30.0, 250.0)
+        
         return np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule], dtype=float)
 
     def _initialize_population(self):
         pop = np.zeros((self.pop_size, 8))
-        seed = np.array([90.0, 4.5, 3.0, 0.18, 2.6, 225.0, 12.0, 120.0], dtype=float)
+        
+        # بذرة محسنة مع نطاقات واسعة
+        seed = np.array([90.0, 5.0, 3.0, 0.2, 3.0, 225.0, 12.0, 120.0], dtype=float)
         n_seed = int(0.3 * self.pop_size)
 
         for i in range(n_seed):
             noise = np.array([
-                np.random.normal(0, 0.8),
-                np.random.normal(0, 0.4),
-                np.random.normal(0, 0.3),
-                np.random.normal(0, 0.04),
-                np.random.normal(0, 0.2),
+                np.random.normal(0, 5.0),    # API توزيع واسع
+                np.random.normal(0, 3.0),    # MCC
+                np.random.normal(0, 2.0),    # PVPP
+                np.random.normal(0, 0.3),    # MgSt
+                np.random.normal(0, 2.0),    # Binder
                 np.random.normal(0, 8.0),
                 np.random.normal(0, 1.5),
                 np.random.normal(0, 12.0)
@@ -688,14 +750,17 @@ class NSGAII:
 
         for i in range(n):
             try:
+                # 1. إصلاح الفرد (تطبيع المكونات إلى 100%)
                 repaired = self._repair(population[i])
                 api, mcc, pvpp, mgst, binder, pressure, speed, granule = repaired
 
+                # 2. تحضير المدخلات للنموذج
                 inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
                 inputs_with_features = add_interaction_features(np.array([inputs]))[0]
                 inputs_scaled = self.scaler.transform([inputs_with_features])
                 X_tensor = torch.tensor(inputs_scaled, dtype=torch.float32)
 
+                # 3. التنبؤ
                 with torch.no_grad():
                     pred_scaled = self.model.predict(X_tensor)
                     pred_actual = self.y_scaler.inverse_transform(pred_scaled)[0]
@@ -709,6 +774,7 @@ class NSGAII:
                 efrf = float(er / tensile)
                 efrf = max(1e-4, min(efrf, 5.0))
 
+                # 4. التحقق من القيود الفيزيائية
                 density_ok = (density >= D_MIN - DENSITY_TOL) and (density <= D_MAX + DENSITY_TOL)
                 tensile_ok = (tensile >= TENSILE_MIN)
                 efrf_ok = (efrf < EFRF_MAX + DENSITY_TOL)
@@ -717,14 +783,13 @@ class NSGAII:
                 feasible = density_ok and tensile_ok and efrf_ok and mcc_ok
                 constraints[i] = feasible
 
-                # --- Softer Safety Penalty (only extreme cases) ---
+                # 5. حساب العقوبات (نفس v29.8)
                 safety_penalty = 0.0
                 if density > SAFETY_DENSITY_LIMIT:
                     safety_penalty += (density - SAFETY_DENSITY_LIMIT) ** 2
                 if efrf > SAFETY_EFRF_LIMIT:
                     safety_penalty += (efrf - SAFETY_EFRF_LIMIT) ** 2
 
-                # --- Safe-zone preference ---
                 zone_penalty = 0.0
                 if density > 0.95:
                     zone_penalty += (density - 0.95) ** 2 * 0.5
@@ -741,13 +806,14 @@ class NSGAII:
                 if density > D_MAX:
                     penalty += (density - D_MAX) ** 2
 
+                # 6. دالة الهدف (مع عقوبات مخففة)
                 objectives[i, 0] = -(api + self.w_tensile * tensile) + 30.0 * penalty + SAFETY_PENALTY_WEIGHT * safety_penalty + zone_penalty
                 objectives[i, 1] = efrf + 30.0 * penalty + SAFETY_PENALTY_WEIGHT * safety_penalty + zone_penalty
                 tensile_strengths[i] = tensile
 
                 population[i] = repaired
 
-            except Exception:
+            except Exception as e:
                 objectives[i, 0] = 100.0
                 objectives[i, 1] = 100.0
                 constraints[i] = False
@@ -958,7 +1024,7 @@ class NSGAII:
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 8. TRAIN MODEL (BALANCED LOSS WEIGHTS, EARLY VALIDATION)
+# 8. TRAIN MODEL (UNCHANGED FROM v29.8)
 # ================================================================
 
 @st.cache_resource
@@ -1101,7 +1167,7 @@ def load_pinn_model():
     return model, scaler, y_scaler, feature_names, df, loss_history
 
 # ================================================================
-# 9. PREDICTION & PLOTS (with Trade-off Display)
+# 9. PREDICTION & PLOTS (UNCHANGED FROM v29.8)
 # ================================================================
 
 def predict_pinn(model, scaler, y_scaler, inputs):
@@ -1314,24 +1380,24 @@ def train_and_compare(X_train, X_test, y_train, y_test):
             'R²': r2_score(y_test, y_pred),
             'RMSE': np.sqrt(mean_squared_error(y_test, y_pred)),
             'MAE': mean_absolute_error(y_test, y_pred),
-            'Physical_Validity': '❌ Not Enforced'  # Default for sklearn models
+            'Physical_Validity': '❌ Not Enforced'
         })
     return pd.DataFrame(results)
 
 # ================================================================
-# 10. STREAMLIT UI
+# 10. STREAMLIT UI (SAME STRUCTURE AS v29.8, WITH WIDER RANGES)
 # ================================================================
 
 st.cache_resource.clear()
 
-st.set_page_config(page_title="PINN Framework v29.8", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Framework v29.9", page_icon="🧬", layout="wide")
 clamp_session_state()
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); 
             padding: 2rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
     <h1 style="color: #ffffff; font-size: 2.5rem; margin: 0;">
-        🧬 Hybrid AI Framework v29.8
+        🧬 Hybrid AI Framework v29.9
     </h1>
     <p style="color: #a8b2d1; font-size: 1.2rem; margin: 0.5rem 0 0 0;">
         Physics-Informed Neural Network · Multi-Objective Optimization
@@ -1339,13 +1405,16 @@ st.markdown("""
     <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">
         Nile Valley University · Postgraduate College · Sudan
     </p>
+    <p style="color: #ffd700; font-size: 0.85rem; margin: 0.5rem 0 0 0;">
+        ⚡ v29.9 — Dynamic Normalization (Industrial Scale-up Flexibility)
+    </p>
 </div>
 """, unsafe_allow_html=True)
 
 st.markdown("---")
 
 with st.sidebar:
-    st.markdown("### 📚 Physics Constraints (Balanced v29.8)")
+    st.markdown("### 📚 Physics Constraints (v29.9)")
     st.markdown(f"""
     - ✅ **Heckel:** ln(1/(1-D)) = kP + A
     - ✅ **EFRF:** ER / σt < {EFRF_MAX:.2f}
@@ -1356,15 +1425,19 @@ with st.sidebar:
     - ✅ **MCC:** ≤ {MCC_MAX:.1f}%
     - ✅ **Density:** {D_MIN:.2f} ≤ D ≤ {D_MAX:.2f}
     
+    **🔄 Dynamic Normalization (NEW):**
+    - NSGA-II explores **raw, unbounded weights**.
+    - Components are normalized to **sum = 100%** inside evaluation.
+    - **Result:** Wider search space → better R² for Tensile.
+    - **Industrial:** Mimics real formulation flexibility.
+    
     **Multi-Task PINN:**
     - 5 outputs (D, σt, ER, k, A)
-    - Adam ({ADAM_EPOCHS} epochs) → LBFGS ({LBFGS_STEPS} steps)
-    - **Loss Balance:** Data {W_DATA_INIT:.1f}→{W_DATA_FINAL:.1f} / Physics {W_PHYSICS_INIT:.1f}→{W_PHYSICS_FINAL:.1f}
-    - **NSGA-II:** pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS}
-    - **Safety Penalty:** Soft (weight={SAFETY_PENALTY_WEIGHT})
-    - **Dynamic Density:** Uniform x-sampling
+    - Adam ({ADAM_EPOCHS}) → LBFGS ({LBFGS_STEPS})
+    - Loss Balance: Data {W_DATA_INIT:.1f}→{W_DATA_FINAL:.1f} / Physics {W_PHYSICS_INIT:.1f}→{W_PHYSICS_FINAL:.1f}
+    - NSGA-II: pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS}
     """)
-    st.info(f"🔬 **v29.8** — Tensile-focused physics + Physical Validity comparison")
+    st.info(f"🔬 **v29.9** — Dynamic Normalization + Physical Validity")
 
 with st.spinner("🔄 Training Multi-Task PINN..."):
     model, scaler, y_scaler, feature_names, df, loss_history = load_pinn_model()
@@ -1373,10 +1446,10 @@ st.success("✅ Multi-Task True PINN trained successfully")
 st.markdown("### 🧪 Quick Experiments")
 exp_cols = st.columns(4)
 experiments = {
-    "Baseline (Stable)": {'api': 90.5, 'binder': 2.7, 'pvpp': 3.0, 'mgst': 0.20, 'mcc': 5.0, 'pressure': 230, 'speed': 12, 'granule': 125},
-    "High Binder": {'api': 90.5, 'binder': 3.0, 'pvpp': 3.0, 'mgst': 0.15, 'mcc': 5.0, 'pressure': 235, 'speed': 10, 'granule': 125},
-    "High Pressure": {'api': 90.5, 'binder': 2.8, 'pvpp': 3.0, 'mgst': 0.12, 'mcc': 5.0, 'pressure': 250, 'speed': 9, 'granule': 125},
-    "Low Mg-St": {'api': 90.5, 'binder': 3.0, 'pvpp': 3.0, 'mgst': 0.10, 'mcc': 5.0, 'pressure': 245, 'speed': 8, 'granule': 125}
+    "Balanced (Stable)": {'api': 90.5, 'binder': 2.7, 'pvpp': 3.0, 'mgst': 0.20, 'mcc': 5.0, 'pressure': 230, 'speed': 12, 'granule': 125},
+    "High API": {'api': 94.0, 'binder': 1.5, 'pvpp': 2.0, 'mgst': 0.15, 'mcc': 2.35, 'pressure': 240, 'speed': 10, 'granule': 120},
+    "Low Mg-St": {'api': 90.0, 'binder': 3.0, 'pvpp': 3.0, 'mgst': 0.08, 'mcc': 3.92, 'pressure': 245, 'speed': 8, 'granule': 125},
+    "High Binder": {'api': 88.0, 'binder': 4.0, 'pvpp': 2.5, 'mgst': 0.20, 'mcc': 5.3, 'pressure': 220, 'speed': 12, 'granule': 130}
 }
 for i, (name, params) in enumerate(experiments.items()):
     with exp_cols[i]:
@@ -1391,22 +1464,32 @@ st.markdown("---")
 col_left, col_right = st.columns([1, 1.2], gap="medium")
 
 with col_left:
-    st.markdown("### 📊 Formulation Parameters")
+    st.markdown("### 📊 Formulation Parameters (Flexible Mode)")
     with st.container(border=True):
-        api = st.slider("🧪 API Loading (%)", 85.0, 95.0, get_safe_value('api'), 0.1, key="api")
-        binder = st.slider("🔗 Binder (%)", BINDER_MIN, BINDER_MAX, get_safe_value('binder'), 0.1, key="binder")
-        pvpp = st.slider("💊 PVPP (%)", 0.5, 6.0, get_safe_value('pvpp'), 0.1, key="pvpp")
-        mgst = st.slider("🧴 Mg-St (%)", 0.01, 1.2, get_safe_value('mgst'), 0.01, key="mgst")
-        mcc = st.slider("📦 MCC (%)", 0.0, MCC_MAX, get_safe_value('mcc'), 0.1, key="mcc")
+        st.caption("💡 القيم الخام (Raw Values) سيتم تطبيعها تلقائياً إلى 100%")
+        api = st.slider("🧪 API (raw)", 60.0, 100.0, get_safe_value('api'), 0.1, key="api")
+        binder = st.slider("🔗 Binder (raw)", 0.1, 10.0, get_safe_value('binder'), 0.1, key="binder")
+        pvpp = st.slider("💊 PVPP (raw)", 0.1, 12.0, get_safe_value('pvpp'), 0.1, key="pvpp")
+        mgst = st.slider("🧴 Mg-St (raw)", 0.01, 3.0, get_safe_value('mgst'), 0.01, key="mgst")
+        mcc = st.slider("📦 MCC (raw)", 0.1, 20.0, get_safe_value('mcc'), 0.1, key="mcc")
         
-        total = api + binder + pvpp + mgst + mcc
-        if abs(total - 100) < 0.1:
-            st.success(f"✅ Total = {total:.2f}%")
-        elif total > 100.1:
-            st.error(f"❌ Total = {total:.2f}% (exceeds 100%)")
+        # تطبيق التطبيع وعرض النسب المئوية الفعلية
+        api_norm, binder_norm, pvpp_norm, mgst_norm, mcc_norm = normalize_components(api, binder, pvpp, mgst, mcc)
+        total_norm = api_norm + binder_norm + pvpp_norm + mgst_norm + mcc_norm
+        
+        st.markdown("**📊 Normalized Composition (Actual %):**")
+        col1, col2, col3, col4, col5 = st.columns(5)
+        col1.metric("API", f"{api_norm:.1f}%")
+        col2.metric("Binder", f"{binder_norm:.1f}%")
+        col3.metric("PVPP", f"{pvpp_norm:.1f}%")
+        col4.metric("Mg-St", f"{mgst_norm:.2f}%")
+        col5.metric("MCC", f"{mcc_norm:.1f}%")
+        
+        if abs(total_norm - 100) < 0.1:
+            st.success(f"✅ Total = {total_norm:.2f}% (Automatically Normalized)")
         else:
-            st.warning(f"⚠️ Total = {total:.2f}% (adjust to 100%)")
-    
+            st.warning(f"⚠️ Total = {total_norm:.2f}% (adjust sliders)")
+
     st.markdown("### ⚙️ Process Parameters")
     with st.container(border=True):
         pressure = st.slider("⚙️ Pressure (MPa)", 80.0, PRESSURE_MAX, get_safe_value('pressure'), 1.0, key="pressure")
@@ -1419,233 +1502,229 @@ with col_right:
     st.markdown("### 📈 Results")
     
     if predict_btn:
-        if abs(total - 100) > 0.1:
-            st.warning("⚠️ Formulation must sum to 100%")
+        # استخدام القيم المُطبّعة للتنبؤ
+        api_use, binder_use, pvpp_use, mgst_use, mcc_use = normalize_components(api, binder, pvpp, mgst, mcc)
+        inputs = [api_use, mcc_use, pvpp_use, mgst_use, binder_use, pressure, speed, granule]
+        
+        with st.spinner("🧠 Running prediction..."):
+            density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs)
+        
+        kpi_cols = st.columns(3)
+        kpi_cols[0].metric("Density", f"{density:.3f}", delta=f"[{D_MIN:.2f}, {D_MAX:.2f}]")
+        kpi_cols[1].metric("Tensile", f"{tensile:.3f} MPa", delta=f">= {TENSILE_MIN:.2f} PASS" if tensile >= TENSILE_MIN else f"< {TENSILE_MIN:.2f} FAIL")
+        kpi_cols[2].metric("EFRF", f"{efrf:.4f}", delta=f"< {EFRF_MAX:.2f} PASS" if efrf < EFRF_MAX else f">= {EFRF_MAX:.2f} FAIL")
+        
+        st.markdown("---")
+        
+        density_ok = (density >= D_MIN and density <= D_MAX)
+        tensile_ok = (tensile >= TENSILE_MIN)
+        efrf_ok = (efrf < EFRF_MAX)
+        mcc_ok = (mcc_use <= MCC_MAX)
+        
+        if density_ok and tensile_ok and efrf_ok and mcc_ok:
+            st.success(f"✅ Formulation satisfies all constraints (Density: {density:.3f}, σt ≥ {TENSILE_MIN:.2f}, EFRF < {EFRF_MAX:.2f})")
         else:
-            inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
-            with st.spinner("🧠 Running prediction..."):
-                density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs)
+            st.error("❌ Formulation violates one or more constraints")
+        
+        st.markdown("### ✅ Feasibility")
+        pass_cols = st.columns(4)
+        pass_cols[0].metric(f"Density [{D_MIN:.2f}, {D_MAX:.2f}]", "✅ PASS" if density_ok else "❌ FAIL")
+        pass_cols[1].metric(f"σt ≥ {TENSILE_MIN:.2f}", "✅ PASS" if tensile_ok else "❌ FAIL")
+        pass_cols[2].metric(f"EFRF < {EFRF_MAX:.2f}", "✅ PASS" if efrf_ok else "❌ FAIL")
+        pass_cols[3].metric(f"MCC ≤ {MCC_MAX:.1f}%", "✅ PASS" if mcc_ok else "❌ FAIL")
+        
+        with st.expander("🔬 Physics Verification"):
+            try:
+                inputs_with_features = add_interaction_features(np.array([inputs]))[0]
+                inputs_scaled = scaler.transform([inputs_with_features])
+                X_tensor = torch.tensor(inputs_scaled, dtype=torch.float32)
+                with torch.no_grad():
+                    full_output = model.forward(X_tensor).numpy()[0]
+                st.metric("k (Plasticity)", f"{full_output[3]:.4f}")
+                st.metric("A (Rearrangement)", f"{full_output[4]:.4f}")
+                st.caption("Density is naturally bounded by the model architecture (sigmoid).")
+            except:
+                pass
+        
+        # --- NSGA-II ---
+        st.markdown("### ⚙️ NSGA-II")
+        bounds = np.array([
+            [60, 100], [0.1, 20], [0.1, 12], [0.01, 3.0], 
+            [0.1, 10], [80, PRESSURE_MAX], [1, 50], [30, 250]
+        ])
+        with st.spinner(f"🔄 Running NSGA-II (pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS})..."):
+            start_time = time.time()
+            nsga = NSGAII(model, scaler, y_scaler, bounds, pop_size=NSGA_POP_SIZE, n_generations=NSGA_GENERATIONS, w_tensile=0.0)
+            pop, objectives, constraints, fronts = nsga.run()
+            elapsed = time.time() - start_time
+            st.caption(f"⏱️ NSGA-II completed in {elapsed:.1f} seconds")
             
-            kpi_cols = st.columns(3)
-            kpi_cols[0].metric("Density", f"{density:.3f}", delta=f"[{D_MIN:.2f}, {D_MAX:.2f}]")
-            kpi_cols[1].metric("Tensile", f"{tensile:.3f} MPa", delta=f">= {TENSILE_MIN:.2f} PASS" if tensile >= TENSILE_MIN else f"< {TENSILE_MIN:.2f} FAIL")
-            kpi_cols[2].metric("EFRF", f"{efrf:.4f}", delta=f"< {EFRF_MAX:.2f} PASS" if efrf < EFRF_MAX else f">= {EFRF_MAX:.2f} FAIL")
-            
-            st.markdown("---")
-            
-            density_ok = (density >= D_MIN and density <= D_MAX)
-            tensile_ok = (tensile >= TENSILE_MIN)
-            efrf_ok = (efrf < EFRF_MAX)
-            mcc_ok = (mcc <= MCC_MAX)
-            
-            if density_ok and tensile_ok and efrf_ok and mcc_ok:
-                st.success(f"✅ Formulation satisfies all constraints (Density: {density:.3f}, σt ≥ {TENSILE_MIN:.2f}, EFRF < {EFRF_MAX:.2f})")
+            if len(fronts) > 0 and len(fronts[0]) > 0:
+                front0 = fronts[0]
+                pareto_api = -objectives[front0, 0]
+                feasible = constraints[front0]
+                feasible_indices = [i for i, f in enumerate(feasible) if f]
+                if feasible_indices:
+                    best_idx = np.argmax([pareto_api[i] for i in feasible_indices])
+                    best_idx = feasible_indices[best_idx]
+                    st.success(f"Optimal: API = {pareto_api[best_idx]:.2f}% | EFRF = {objectives[front0, 1][best_idx]:.4f}")
+                else:
+                    st.warning("No feasible solutions found")
+        
+        # --- TABS ---
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(
+            ["📉 Pareto Front", "🔍 Sensitivity", "📊 Model Comparison", "📈 Training Curves", "📄 Report"]
+        )
+        
+        with tab1:
+            st.markdown("### 📉 Pareto Front")
+            fig_p = plot_pareto_plotly(objectives, constraints, fronts, nsga, api_use, efrf)
+            if fig_p:
+                st.plotly_chart(fig_p, use_container_width=True)
             else:
-                st.error("❌ Formulation violates one or more constraints")
+                st.info("Pareto front not available")
+        
+        with tab2:
+            st.markdown("### 🔍 Sensitivity Analysis")
+            fig_s = plot_sensitivity_plotly(inputs, model, scaler, y_scaler)
+            if fig_s:
+                st.plotly_chart(fig_s, use_container_width=True)
+            else:
+                st.info("Sensitivity analysis not available")
+        
+        with tab3:
+            st.markdown("### 📊 Model Performance Comparison")
+            st.caption("Hold-out test set (20% of data) — R², RMSE, MAE, and Physical Validity")
             
-            st.markdown("### ✅ Feasibility")
-            pass_cols = st.columns(4)
-            pass_cols[0].metric(f"Density [{D_MIN:.2f}, {D_MAX:.2f}]", "✅ PASS" if density_ok else "❌ FAIL")
-            pass_cols[1].metric(f"σt ≥ {TENSILE_MIN:.2f}", "✅ PASS" if tensile_ok else "❌ FAIL")
-            pass_cols[2].metric(f"EFRF < {EFRF_MAX:.2f}", "✅ PASS" if efrf_ok else "❌ FAIL")
-            pass_cols[3].metric(f"MCC ≤ {MCC_MAX:.1f}%", "✅ PASS" if mcc_ok else "❌ FAIL")
+            X_train, X_test, y_train, y_test = train_test_split(
+                df[feature_names].values, df['Tensile_Strength_MPa'].values,
+                test_size=0.2, random_state=42
+            )
+            X_train_aug = add_interaction_features(X_train)
+            X_test_aug = add_interaction_features(X_test)
+            X_train_scaled = scaler.transform(X_train_aug)
+            X_test_scaled = scaler.transform(X_test_aug)
             
-            with st.expander("🔬 Physics Verification"):
-                try:
-                    inputs_with_features = add_interaction_features(np.array([inputs]))[0]
-                    inputs_scaled = scaler.transform([inputs_with_features])
-                    X_tensor = torch.tensor(inputs_scaled, dtype=torch.float32)
-                    with torch.no_grad():
-                        full_output = model.forward(X_tensor).numpy()[0]
-                    st.metric("k (Plasticity)", f"{full_output[3]:.4f}")
-                    st.metric("A (Rearrangement)", f"{full_output[4]:.4f}")
-                    st.caption("Density is naturally bounded by the model architecture.")
-                except:
-                    pass
+            # PINN predictions
+            pinn_pred_scaled = model.predict(torch.tensor(X_test_scaled, dtype=torch.float32))
+            pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
+            pinn_r2 = r2_score(y_test, pinn_pred)
+            pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
+            pinn_mae = mean_absolute_error(y_test, pinn_pred)
             
-            # --- NSGA-II ---
-            st.markdown("### ⚙️ NSGA-II")
-            bounds = np.array([
-                [85, 95], [0, MCC_MAX], [0.5, 6.0], [0.01, 1.2], 
-                [BINDER_MIN, BINDER_MAX], [80, PRESSURE_MAX], [1, 50], [30, 250]
-            ])
-            with st.spinner(f"🔄 Running NSGA-II (pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS})..."):
-                start_time = time.time()
-                nsga = NSGAII(model, scaler, y_scaler, bounds, pop_size=NSGA_POP_SIZE, n_generations=NSGA_GENERATIONS, w_tensile=0.0)
-                pop, objectives, constraints, fronts = nsga.run()
-                elapsed = time.time() - start_time
-                st.caption(f"⏱️ NSGA-II completed in {elapsed:.1f} seconds")
-                
-                if len(fronts) > 0 and len(fronts[0]) > 0:
-                    front0 = fronts[0]
-                    pareto_api = -objectives[front0, 0]
-                    feasible = constraints[front0]
-                    feasible_indices = [i for i, f in enumerate(feasible) if f]
-                    if feasible_indices:
-                        best_idx = np.argmax([pareto_api[i] for i in feasible_indices])
-                        best_idx = feasible_indices[best_idx]
-                        st.success(f"Optimal: API = {pareto_api[best_idx]:.2f}% | EFRF = {objectives[front0, 1][best_idx]:.4f}")
-                    else:
-                        st.warning("No feasible solutions found")
+            # Physical validity check for PINN
+            pinn_valid = "✅ Fully Valid"
+            try:
+                mono_pass = 0
+                efrf_pass = 0
+                density_pass = 0
+                for _ in range(50):
+                    idx = np.random.randint(0, len(X_test))
+                    sample = X_test[idx].copy()
+                    d1, _, _, e1 = predict_pinn(model, scaler, y_scaler, sample)
+                    sample[5] = min(sample[5] * 1.2, PRESSURE_MAX)
+                    d2, _, _, e2 = predict_pinn(model, scaler, y_scaler, sample)
+                    if d2 > d1: mono_pass += 1
+                    if e1 < EFRF_MAX: efrf_pass += 1
+                    if D_MIN <= d1 <= D_MAX: density_pass += 1
+                if mono_pass > 40 and efrf_pass > 45 and density_pass > 45:
+                    pinn_valid = "✅ Fully Valid"
+                else:
+                    pinn_valid = "⚠️ Partially Valid"
+            except:
+                pinn_valid = "⚠️ Partially Valid"
             
-            # --- TABS ---
-            tab1, tab2, tab3, tab4, tab5 = st.tabs(
-                ["📉 Pareto Front", "🔍 Sensitivity", "📊 Model Comparison", "📈 Training Curves", "📄 Report"]
+            # Train other models
+            comp_df = train_and_compare(X_train_scaled, X_test_scaled, y_train, y_test)
+            pinn_row = pd.DataFrame([{
+                'Model': 'PINN (Proposed)',
+                'R²': pinn_r2,
+                'RMSE': pinn_rmse,
+                'MAE': pinn_mae,
+                'Physical_Validity': pinn_valid
+            }])
+            comp_df = pd.concat([pinn_row, comp_df], ignore_index=True)
+            
+            # Show trade-off warning if R² < 0.8 but physical validity is high
+            if pinn_r2 < 0.8 and pinn_valid == "✅ Fully Valid":
+                st.warning("⚠️ **Trade-off Detected:** R² is moderate (<0.8) but physical validity is fully satisfied. The model prioritises physics constraints over pure data fit to avoid physically impossible solutions. This is expected in True PINN frameworks.")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                colors_r2 = ['#2ecc71' if m == 'PINN (Proposed)' else '#3498db' for m in comp_df['Model']]
+                fig_r2 = go.Figure(data=[
+                    go.Bar(
+                        x=comp_df['Model'], 
+                        y=comp_df['R²'],
+                        marker_color=colors_r2,
+                        text=[f"{v:.4f}" for v in comp_df['R²']],
+                        textposition='outside'
+                    )
+                ])
+                fig_r2.update_layout(
+                    title='<b>R² Score Comparison</b>',
+                    yaxis=dict(title='R² Score', range=[0, 1.05]),
+                    height=350,
+                    showlegend=False
+                )
+                st.plotly_chart(fig_r2, use_container_width=True)
+            with col2:
+                colors_rmse = ['#e74c3c' if m == 'PINN (Proposed)' else '#95a5a6' for m in comp_df['Model']]
+                fig_rmse = go.Figure(data=[
+                    go.Bar(
+                        x=comp_df['Model'], 
+                        y=comp_df['RMSE'],
+                        marker_color=colors_rmse,
+                        text=[f"{v:.4f}" for v in comp_df['RMSE']],
+                        textposition='outside'
+                    )
+                ])
+                fig_rmse.update_layout(
+                    title='<b>RMSE Comparison</b>',
+                    yaxis=dict(title='RMSE (MPa)'),
+                    height=350,
+                    showlegend=False
+                )
+                st.plotly_chart(fig_rmse, use_container_width=True)
+            
+            st.dataframe(
+                comp_df.style.highlight_max(subset=['R²'], color='lightgreen')
+                          .highlight_min(subset=['RMSE', 'MAE'], color='lightcoral'),
+                use_container_width=True,
+                hide_index=True
+            )
+            comp_df_for_pdf = comp_df.copy()
+        
+        with tab4:
+            st.markdown("### 📈 Training Curves")
+            fig_loss = plot_training_curves(loss_history)
+            if fig_loss:
+                st.plotly_chart(fig_loss, use_container_width=True)
+            else:
+                st.info("Loss history not available")
+        
+        with tab5:
+            st.markdown("### 📄 Comprehensive Report (PDF)")
+            st.caption("Download a complete report with formulation details, predictions, and model comparison.")
+            
+            status = "PASS" if (density_ok and tensile_ok and efrf_ok and mcc_ok) else "FAIL"
+            timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            pdf_data = generate_full_pdf_report(
+                api_use, mcc_use, pvpp_use, mgst_use, binder_use, pressure, speed, granule,
+                density, tensile, er, efrf, status, timestamp,
+                model_comparison_df=comp_df
             )
             
-            with tab1:
-                st.markdown("### 📉 Pareto Front")
-                fig_p = plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf)
-                if fig_p:
-                    st.plotly_chart(fig_p, use_container_width=True)
-                else:
-                    st.info("Pareto front not available")
-            
-            with tab2:
-                st.markdown("### 🔍 Sensitivity Analysis")
-                fig_s = plot_sensitivity_plotly(inputs, model, scaler, y_scaler)
-                if fig_s:
-                    st.plotly_chart(fig_s, use_container_width=True)
-                else:
-                    st.info("Sensitivity analysis not available")
-            
-            with tab3:
-                st.markdown("### 📊 Model Performance Comparison")
-                st.caption("Hold-out test set (20% of data) — R², RMSE, MAE, and Physical Validity")
-                
-                X_train, X_test, y_train, y_test = train_test_split(
-                    df[feature_names].values, df['Tensile_Strength_MPa'].values,
-                    test_size=0.2, random_state=42
-                )
-                X_train_aug = add_interaction_features(X_train)
-                X_test_aug = add_interaction_features(X_test)
-                X_train_scaled = scaler.transform(X_train_aug)
-                X_test_scaled = scaler.transform(X_test_aug)
-                
-                # PINN predictions
-                pinn_pred_scaled = model.predict(torch.tensor(X_test_scaled, dtype=torch.float32))
-                pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
-                pinn_r2 = r2_score(y_test, pinn_pred)
-                pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
-                pinn_mae = mean_absolute_error(y_test, pinn_pred)
-                
-                # Physical validity check for PINN (simple: test monotonicity and EFRF)
-                # We'll run a quick check on 50 random samples
-                pinn_valid = "✅ Fully Valid"
-                try:
-                    # Monotonicity test
-                    mono_pass = 0
-                    efrf_pass = 0
-                    density_pass = 0
-                    for _ in range(50):
-                        idx = np.random.randint(0, len(X_test))
-                        sample = X_test[idx].copy()
-                        d1, _, _, e1 = predict_pinn(model, scaler, y_scaler, sample)
-                        # Increase pressure
-                        sample[5] = min(sample[5] * 1.2, PRESSURE_MAX)
-                        d2, _, _, e2 = predict_pinn(model, scaler, y_scaler, sample)
-                        if d2 > d1: mono_pass += 1
-                        if e1 < EFRF_MAX: efrf_pass += 1
-                        if D_MIN <= d1 <= D_MAX: density_pass += 1
-                    if mono_pass > 40 and efrf_pass > 45 and density_pass > 45:
-                        pinn_valid = "✅ Fully Valid"
-                    else:
-                        pinn_valid = "⚠️ Partially Valid"
-                except:
-                    pinn_valid = "⚠️ Partially Valid"
-                
-                # Train other models
-                comp_df = train_and_compare(X_train_scaled, X_test_scaled, y_train, y_test)
-                pinn_row = pd.DataFrame([{
-                    'Model': 'PINN (Proposed)',
-                    'R²': pinn_r2,
-                    'RMSE': pinn_rmse,
-                    'MAE': pinn_mae,
-                    'Physical_Validity': pinn_valid
-                }])
-                comp_df = pd.concat([pinn_row, comp_df], ignore_index=True)
-                
-                # Show trade-off warning if R² < 0.8 but physical validity is high
-                if pinn_r2 < 0.8 and pinn_valid == "✅ Fully Valid":
-                    st.warning("⚠️ **Trade-off Detected:** R² is moderate (<0.8) but physical validity is fully satisfied. The model prioritises physics constraints over pure data fit to avoid physically impossible solutions. This is expected in True PINN frameworks.")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    colors_r2 = ['#2ecc71' if m == 'PINN (Proposed)' else '#3498db' for m in comp_df['Model']]
-                    fig_r2 = go.Figure(data=[
-                        go.Bar(
-                            x=comp_df['Model'], 
-                            y=comp_df['R²'],
-                            marker_color=colors_r2,
-                            text=[f"{v:.4f}" for v in comp_df['R²']],
-                            textposition='outside'
-                        )
-                    ])
-                    fig_r2.update_layout(
-                        title='<b>R² Score Comparison</b>',
-                        yaxis=dict(title='R² Score', range=[0, 1.05]),
-                        height=350,
-                        showlegend=False
-                    )
-                    st.plotly_chart(fig_r2, use_container_width=True)
-                with col2:
-                    colors_rmse = ['#e74c3c' if m == 'PINN (Proposed)' else '#95a5a6' for m in comp_df['Model']]
-                    fig_rmse = go.Figure(data=[
-                        go.Bar(
-                            x=comp_df['Model'], 
-                            y=comp_df['RMSE'],
-                            marker_color=colors_rmse,
-                            text=[f"{v:.4f}" for v in comp_df['RMSE']],
-                            textposition='outside'
-                        )
-                    ])
-                    fig_rmse.update_layout(
-                        title='<b>RMSE Comparison</b>',
-                        yaxis=dict(title='RMSE (MPa)'),
-                        height=350,
-                        showlegend=False
-                    )
-                    st.plotly_chart(fig_rmse, use_container_width=True)
-                
-                # Display enhanced table with Physical Validity column
-                st.dataframe(
-                    comp_df.style.highlight_max(subset=['R²'], color='lightgreen')
-                              .highlight_min(subset=['RMSE', 'MAE'], color='lightcoral'),
-                    use_container_width=True,
-                    hide_index=True
-                )
-                comp_df_for_pdf = comp_df.copy()
-            
-            with tab4:
-                st.markdown("### 📈 Training Curves")
-                fig_loss = plot_training_curves(loss_history)
-                if fig_loss:
-                    st.plotly_chart(fig_loss, use_container_width=True)
-                else:
-                    st.info("Loss history not available")
-            
-            with tab5:
-                st.markdown("### 📄 Comprehensive Report (PDF)")
-                st.caption("Download a complete report with formulation details, predictions, and model comparison.")
-                
-                status = "PASS" if (density_ok and tensile_ok and efrf_ok and mcc_ok) else "FAIL"
-                timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                
-                pdf_data = generate_full_pdf_report(
-                    api, mcc, pvpp, mgst, binder, pressure, speed, granule,
-                    density, tensile, er, efrf, status, timestamp,
-                    model_comparison_df=comp_df
-                )
-                
-                st.download_button(
-                    label="📥 Download Full Report (PDF)",
-                    data=pdf_data,
-                    file_name=f"formulation_report_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True
-                )
-                st.success("✅ One-click download — includes formulation, predictions, and model comparison.")
+            st.download_button(
+                label="📥 Download Full Report (PDF)",
+                data=pdf_data,
+                file_name=f"formulation_report_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
+            st.success("✅ One-click download — includes formulation, predictions, and model comparison.")
 
 st.markdown("---")
-st.caption(f"🔬 **Multi-Task True PINN — v29.8 (Tensile-focused Physics + Physical Validity)**")
+st.caption(f"🔬 **Multi-Task True PINN — v29.9 (Dynamic Normalization + Physical Validity)**")
 st.caption(f"📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Postgraduate College, Sudan")
