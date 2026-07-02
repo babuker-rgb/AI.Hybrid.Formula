@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 29.0 (Bounded Density, Unified Constraints, Balanced Loss)
+Version: 29.0 (Bounded Density, Penalty-Based NSGA-II)
 """
 
 import streamlit as st
@@ -44,9 +44,9 @@ BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
 # --- Balanced loss weights ---
-PHYSICS_WEIGHT_INIT = 0.1   # Reduced from 0.5
-W_DENSITY = 1.0             # Reduced from 100.0 (density is now bounded)
-N_SAMPLES = 3000            # Increased dataset size
+PHYSICS_WEIGHT_INIT = 0.1
+W_DENSITY = 1.0
+N_SAMPLES = 3000
 
 # ================================================================
 # 1. SAFE IMPORTS
@@ -142,50 +142,34 @@ def add_interaction_features(X_raw):
     ], axis=1)
 
 # ================================================================
-# 4. MULTI-TASK TRUE PINN MODEL (with bounded density)
+# 4. MULTI-TASK TRUE PINN MODEL (Bounded Density)
 # ================================================================
+
+def bounded_density(raw):
+    """Ensure density stays within [DENSITY_MIN, DENSITY_MAX]."""
+    return DENSITY_MIN + (DENSITY_MAX - DENSITY_MIN) * torch.sigmoid(raw)
 
 class MultiTaskTruePINN(nn.Module):
     def __init__(self, input_dim=13, output_dim=5):
         super(MultiTaskTruePINN, self).__init__()
         self.network = nn.Sequential(
-            nn.Linear(input_dim, 128),
-            nn.LayerNorm(128),
-            nn.ReLU(),
-            nn.Dropout(0.05),
-            nn.Linear(128, 128),
-            nn.LayerNorm(128),
-            nn.ReLU(),
-            nn.Dropout(0.05),
-            nn.Linear(128, 64),
-            nn.LayerNorm(64),
-            nn.ReLU(),
-            nn.Linear(64, 32),
-            nn.LayerNorm(32),
-            nn.ReLU(),
+            nn.Linear(input_dim, 128), nn.LayerNorm(128), nn.Tanh(), nn.Dropout(0.05),
+            nn.Linear(128, 128), nn.LayerNorm(128), nn.Tanh(), nn.Dropout(0.05),
+            nn.Linear(128, 64), nn.LayerNorm(64), nn.Tanh(), nn.Dropout(0.05),
+            nn.Linear(64, 32), nn.LayerNorm(32), nn.Tanh(),
             nn.Linear(32, output_dim)
         )
 
     def forward(self, X):
         raw = self.network(X)
-        
-        # --- Bounded density: D = D_min + (D_max - D_min) * sigmoid(raw) ---
-        density = DENSITY_MIN + (DENSITY_MAX - DENSITY_MIN) * torch.sigmoid(raw[:, 0:1])
-        
-        # Tensile and ER must be positive
+        density = bounded_density(raw[:, 0:1])
         tensile = torch.nn.functional.softplus(raw[:, 1:2]) + 1e-4
         er = torch.nn.functional.softplus(raw[:, 2:3]) + 1e-4
-        
-        # k (plasticity) must be positive
         k = torch.nn.functional.softplus(raw[:, 3:4]) + 1e-4
-        
-        # A (rearrangement) can be any real value
         A = raw[:, 4:5]
-        
         return torch.cat([density, tensile, er, k, A], dim=1)
 
     def predict(self, X_scaled):
-        """Predict primary outputs. Density is naturally bounded by the forward pass."""
         self.eval()
         with torch.no_grad():
             if not isinstance(X_scaled, torch.Tensor):
@@ -194,70 +178,70 @@ class MultiTaskTruePINN(nn.Module):
             return output[:, :3].cpu().numpy()
 
     def compute_loss(self, X_scaled, X_raw, y_true, epoch=0, max_epochs=4000,
-                     w_data_init=1.0, w_physics_init=PHYSICS_WEIGHT_INIT,
-                     w_data_final=1.0, w_physics_final=PHYSICS_WEIGHT_INIT,
+                     w_data_init=2.0, w_physics_init=PHYSICS_WEIGHT_INIT,
+                     w_data_final=1.0, w_physics_final=1.0,
                      w_mcc=0.5, w_density=W_DENSITY,
                      efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
                      compute_grad=True):
-        pressure_real = X_raw[:, 5]
-        mcc_real = X_raw[:, 1]
+        pressure_real = X_raw[:, 5].view(-1, 1)
+        mcc_real = X_raw[:, 1].view(-1, 1)
 
         y_pred = self.forward(X_scaled)
-        density_pred = y_pred[:, 0]
-        tensile_pred = y_pred[:, 1]
-        er_pred = y_pred[:, 2]
-        k_pred = y_pred[:, 3]
-        A_pred = y_pred[:, 4]
+        density_pred = y_pred[:, 0:1]
+        tensile_pred = y_pred[:, 1:2]
+        er_pred = y_pred[:, 2:3]
+        k_pred = y_pred[:, 3:4]
+        A_pred = y_pred[:, 4:5]
 
-        # Data loss - primary objective
+        progress = min(epoch / 500, 1.0)
+        w_data = w_data_init + (w_data_final - w_data_init) * progress
+        w_physics = w_physics_init + (w_physics_final - w_physics_init) * progress
+
         data_loss = nn.MSELoss()(y_pred[:, :3], y_true)
 
-        # --- Physics losses (as regularizers) ---
-        # Heckel equation residual
-        D_clamped = torch.clamp(density_pred, 0.01, 0.99)
-        heckel_pred = torch.log(1.0 / (1.0 - D_clamped))
-        heckel_target = k_pred * pressure_real + A_pred
-        heckel_loss = torch.mean((heckel_pred - heckel_target) ** 2)
+        heckel_lhs = torch.log(1.0 / torch.clamp(1.0 - density_pred, min=1e-4))
+        heckel_rhs = k_pred * pressure_real + A_pred
+        heckel_loss = torch.mean((heckel_lhs - heckel_rhs) ** 2)
 
-        # EFRF constraint (soft penalty)
-        efrf_pred = er_pred / (tensile_pred + 1e-8)
+        efrf_pred = er_pred / torch.clamp(tensile_pred, min=1e-4)
         efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
 
-        # MCC constraint
         mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
 
-        # Density bounds penalty (now very small, since density is already bounded)
         density_penalty = torch.mean(
             torch.relu(density_pred - DENSITY_MAX) ** 2 +
             torch.relu(DENSITY_MIN - density_pred) ** 2
         )
 
-        # Monotonicity: density should increase with pressure
         if compute_grad:
-            X_grad = X_scaled.clone().detach().requires_grad_(True)
-            y_grad = self.forward(X_grad)
-            density_grad = y_grad[:, 0]
-            
-            grad_density = torch.autograd.grad(
-                outputs=density_grad,
-                inputs=X_grad,
-                grad_outputs=torch.ones_like(density_grad),
+            Xg = X_scaled.clone().detach().requires_grad_(True)
+            yg = self.forward(Xg)
+            dg = yg[:, 0:1]
+            grad = torch.autograd.grad(
+                outputs=dg,
+                inputs=Xg,
+                grad_outputs=torch.ones_like(dg),
                 create_graph=True,
                 retain_graph=True
             )[0]
-            
-            # The pressure feature is at index 5 in the scaled input
-            grad_pressure = grad_density[:, 5]
-            monotonic_loss = torch.mean(torch.relu(-grad_pressure) ** 2)
+            monotonic_loss = torch.mean(torch.relu(-grad[:, 5:6]) ** 2)
         else:
             monotonic_loss = torch.tensor(0.0, device=X_scaled.device)
 
-        # --- Combine losses with balanced weights ---
+        boundary_loss = (
+            torch.mean(torch.relu(0.50 - density_pred) ** 2) +
+            torch.mean(torch.relu(density_pred - 0.98) ** 2)
+        )
+
+        k_reg = torch.mean(torch.relu(k_pred - 0.1) ** 2) + torch.mean(torch.relu(0.005 - k_pred) ** 2)
+        A_reg = torch.mean(torch.relu(A_pred - 2.0) ** 2) + torch.mean(torch.relu(0.5 - A_pred) ** 2)
+
         total_loss = (
-            w_data_init * data_loss +
-            w_physics_init * (heckel_loss + efrf_loss + monotonic_loss) +
+            w_data * data_loss +
+            w_physics * (heckel_loss + efrf_loss + monotonic_loss + boundary_loss) +
             w_mcc * mcc_loss +
-            w_density * density_penalty
+            w_density * density_penalty +
+            0.1 * k_reg + 0.1 * A_reg
         )
 
         loss_dict = {
@@ -267,12 +251,17 @@ class MultiTaskTruePINN(nn.Module):
             'mcc_loss': mcc_loss.item(),
             'density_penalty': density_penalty.item(),
             'monotonic_loss': monotonic_loss.item() if compute_grad else 0.0,
+            'boundary_loss': boundary_loss.item(),
+            'k_reg': k_reg.item(),
+            'A_reg': A_reg.item(),
+            'w_data': w_data,
+            'w_physics': w_physics,
             'total_loss': total_loss.item()
         }
         return total_loss, loss_dict
 
 # ================================================================
-# 5. DATA GENERATION (increased size)
+# 5. DATA GENERATION
 # ================================================================
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
@@ -300,7 +289,6 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
             speed = np.clip(np.random.normal(10, 3), 1, 50)
             granule = np.clip(np.random.normal(125, 20), 30, 250)
 
-        # Normalize to 100%
         total = api + binder + mgst + pvpp + mcc
         if total > 100:
             scale = 100 / total
@@ -322,7 +310,6 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
 
         X[i] = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
 
-        # Physical model with noise
         k_true = 0.035 * (1 - 0.4 * (api - 85)/10) * (1 - 0.2 * (speed - 10)/30)
         k_true = max(k_true, 0.008)
         A_true = 1.2 + 0.1 * (binder - 1.5) - 0.2 * (mgst - 0.5)
@@ -368,7 +355,6 @@ def sanitize_text(text):
 def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
                              density, tensile, er, efrf, status, timestamp,
                              model_comparison_df=None):
-    """Generate a detailed PDF report including model comparison."""
     pdf = FPDF()
     pdf.add_page()
     
@@ -549,7 +535,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
         return str(pdf_bytes).encode('latin1')
 
 # ================================================================
-# 7. NSGA-II (UNIFIED CONSTRAINTS)
+# 7. NSGA-II (WITH PENALTIES)
 # ================================================================
 
 class NSGAII:
@@ -585,7 +571,7 @@ class NSGAII:
         for i in range(n):
             try:
                 api, mcc, pvpp, mgst, binder, pressure, speed, granule = population[i]
-                
+
                 # Normalize to 100%
                 used = api + binder + mgst + pvpp + mcc
                 if used > 100:
@@ -598,7 +584,7 @@ class NSGAII:
                     else:
                         excess = (mcc + remainder) - MCC_MAX
                         mcc = MCC_MAX
-                        api -= excess
+                        api = max(85.0, api - excess)
 
                 api = np.clip(api, 85, 95)
                 binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
@@ -610,33 +596,47 @@ class NSGAII:
                 inputs_with_features = add_interaction_features(np.array([inputs]))[0]
                 inputs_scaled = self.scaler.transform([inputs_with_features])
                 X_tensor = torch.FloatTensor(inputs_scaled)
-                
+
                 with torch.no_grad():
                     pred_scaled = self.model.predict(X_tensor)
                     pred_actual = self.y_scaler.inverse_transform(pred_scaled)[0]
-                
+
                 density = float(pred_actual[0])
                 tensile = float(pred_actual[1])
                 er = float(pred_actual[2])
-                
+
                 if tensile < 0.01:
                     tensile = 0.01
                     efrf = 10.0
                 else:
                     efrf = er / tensile
                     efrf = max(0.0001, min(efrf, 5.0))
-                
-                # --- UNIFIED CONSTRAINTS ---
-                constraints[i] = (
-                    tensile >= TENSILE_MIN and
-                    efrf < EFRF_MAX and
-                    density <= DENSITY_MAX and
-                    density >= DENSITY_MIN and
-                    mcc <= MCC_MAX
+
+                # --- Feasibility with tolerance ---
+                feasible = (
+                    (tensile >= TENSILE_MIN) and
+                    (efrf < EFRF_MAX) and
+                    (DENSITY_MIN <= density <= DENSITY_MAX) and
+                    (mcc <= MCC_MAX)
                 )
-                
-                objectives[i, 0] = -api - self.w_tensile * tensile
-                objectives[i, 1] = efrf
+                constraints[i] = feasible
+
+                # --- Penalty approach for NSGA-II ---
+                penalty = 0.0
+                if tensile < TENSILE_MIN:
+                    penalty += (TENSILE_MIN - tensile) ** 2
+                if efrf >= EFRF_MAX:
+                    penalty += (efrf - EFRF_MAX) ** 2
+                if density < DENSITY_MIN:
+                    penalty += (DENSITY_MIN - density) ** 2
+                if density > DENSITY_MAX:
+                    penalty += (density - DENSITY_MAX) ** 2
+
+                # Objective 1: Maximize API (minimize negative API) + tensile bonus
+                # Objective 2: Minimize EFRF
+                # Both include penalty to guide towards feasible region
+                objectives[i, 0] = -(api + self.w_tensile * tensile) + 10.0 * penalty
+                objectives[i, 1] = efrf + 10.0 * penalty
                 tensile_strengths[i] = tensile
 
                 population[i, 0] = api
@@ -644,7 +644,7 @@ class NSGAII:
                 population[i, 2] = pvpp
                 population[i, 3] = mgst
                 population[i, 4] = binder
-                
+
             except Exception as e:
                 objectives[i, 0] = 100.0
                 objectives[i, 1] = 100.0
@@ -684,7 +684,7 @@ class NSGAII:
                 fronts[0].append(i)
 
         i = 0
-        while fronts[i]:
+        while i < len(fronts) and fronts[i]:
             next_front = []
             for p in fronts[i]:
                 for q in S[p]:
@@ -693,9 +693,9 @@ class NSGAII:
                         rank[q] = i + 1
                         next_front.append(q)
             i += 1
-            fronts.append(next_front)
-        if not fronts[-1]:
-            fronts.pop()
+            if next_front:
+                fronts.append(next_front)
+
         return fronts, rank
 
     def _crowding_distance(self, objectives, front):
@@ -703,18 +703,18 @@ class NSGAII:
         if n <= 2:
             return np.ones(n) * np.inf
         distance = np.zeros(n)
-        obj_min = objectives.min(axis=0)
-        obj_max = objectives.max(axis=0)
-        obj_range = obj_max - obj_min
-        obj_range[obj_range == 0] = 1
+        obj_range = objectives[front].max(axis=0) - objectives[front].min(axis=0)
+        obj_range[obj_range == 0] = 1.0
+
         for m in range(2):
             sorted_idx = sorted(range(n), key=lambda i: objectives[front[i], m])
             distance[sorted_idx[0]] = np.inf
             distance[sorted_idx[-1]] = np.inf
             for i in range(1, n - 1):
-                if distance[sorted_idx[i]] != np.inf:
-                    diff = objectives[front[sorted_idx[i+1]], m] - objectives[front[sorted_idx[i-1]], m]
-                    distance[sorted_idx[i]] += diff / obj_range[m]
+                prev_obj = objectives[front[sorted_idx[i - 1]], m]
+                next_obj = objectives[front[sorted_idx[i + 1]], m]
+                distance[sorted_idx[i]] += (next_obj - prev_obj) / obj_range[m]
+
         return distance
 
     def _tournament_selection(self, pop_indices, objectives, ranks, crowding):
@@ -727,10 +727,7 @@ class NSGAII:
             elif ranks[i1] > ranks[i2]:
                 selected.append(i2)
             else:
-                if crowding[i1] > crowding[i2]:
-                    selected.append(i1)
-                else:
-                    selected.append(i2)
+                selected.append(i1 if crowding[i1] >= crowding[i2] else i2)
         return selected
 
     def _simulated_binary_crossover(self, parent1, parent2):
@@ -751,9 +748,11 @@ class NSGAII:
             else:
                 child1[i] = parent1[i]
                 child2[i] = parent2[i]
+
         for i in range(8):
             child1[i] = np.clip(child1[i], self.bounds[i, 0], self.bounds[i, 1])
             child2[i] = np.clip(child2[i], self.bounds[i, 0], self.bounds[i, 1])
+
         return child1, child2
 
     def _polynomial_mutation(self, individual):
@@ -772,6 +771,7 @@ class NSGAII:
 
     def run(self):
         self.population = self._initialize_population()
+
         for gen in range(self.n_generations):
             objectives, constraints, tensile, pop = self._evaluate(self.population)
             self.population = pop
@@ -780,37 +780,43 @@ class NSGAII:
             self.tensile = tensile
             fronts, ranks = self._fast_non_dominated_sort(objectives, constraints)
             self.fronts = fronts
+
             if gen == self.n_generations - 1:
                 break
+
             crowding = np.zeros(self.pop_size)
             for front in fronts:
                 dist = self._crowding_distance(objectives, front)
                 crowding[front] = dist
+
             selected = self._tournament_selection(range(self.pop_size), objectives, ranks, crowding)
+
             offspring = []
             for i in range(0, len(selected), 2):
                 if i + 1 < len(selected):
-                    child1, child2 = self._simulated_binary_crossover(self.population[selected[i]], self.population[selected[i+1]])
-                    child1 = self._polynomial_mutation(child1)
-                    child2 = self._polynomial_mutation(child2)
-                    offspring.append(child1)
-                    offspring.append(child2)
+                    c1, c2 = self._simulated_binary_crossover(
+                        self.population[selected[i]],
+                        self.population[selected[i + 1]]
+                    )
+                    offspring.append(self._polynomial_mutation(c1))
+                    offspring.append(self._polynomial_mutation(c2))
                 else:
-                    child = self._polynomial_mutation(self.population[selected[i]])
-                    offspring.append(child)
+                    offspring.append(self._polynomial_mutation(self.population[selected[i]]))
+
             offspring = np.array(offspring[:self.pop_size])
             objectives_off, constraints_off, tensile_off, _ = self._evaluate(offspring)
+
             combined_pop = np.vstack([self.population, offspring])
             combined_obj = np.vstack([self.objectives, objectives_off])
             combined_const = np.concatenate([self.constraints, constraints_off])
-            combined_fronts, combined_ranks = self._fast_non_dominated_sort(combined_obj, combined_const)
+
+            combined_fronts, _ = self._fast_non_dominated_sort(combined_obj, combined_const)
             combined_crowding = np.zeros(len(combined_pop))
             for front in combined_fronts:
                 dist = self._crowding_distance(combined_obj, front)
                 combined_crowding[front] = dist
-            new_pop = []
-            new_obj = []
-            new_const = []
+
+            new_pop, new_obj, new_const = [], [], []
             for front in combined_fronts:
                 if len(new_pop) + len(front) <= self.pop_size:
                     for idx in front:
@@ -819,15 +825,17 @@ class NSGAII:
                         new_const.append(combined_const[idx])
                 else:
                     front_sorted = sorted(front, key=lambda i: combined_crowding[i], reverse=True)
-                    remaining = self.pop_size - len(new_pop)
-                    for idx in front_sorted[:remaining]:
+                    remain = self.pop_size - len(new_pop)
+                    for idx in front_sorted[:remain]:
                         new_pop.append(combined_pop[idx])
                         new_obj.append(combined_obj[idx])
                         new_const.append(combined_const[idx])
                     break
+
             self.population = np.array(new_pop)
             self.objectives = np.array(new_obj)
             self.constraints = np.array(new_const)
+
         objectives, constraints, tensile, pop = self._evaluate(self.population)
         self.population = pop
         self.objectives = objectives
@@ -837,7 +845,7 @@ class NSGAII:
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 8. TRAIN MODEL (FIXED: uses local loss_history)
+# 8. TRAIN MODEL (SIMPLIFIED)
 # ================================================================
 
 @st.cache_resource
@@ -862,86 +870,73 @@ def load_pinn_model():
     )
 
     X_scaled_train_t = torch.FloatTensor(X_scaled_train)
-    X_scaled_train_t.requires_grad_(True)
     X_raw_train_t = torch.FloatTensor(X_raw_train)
     y_train_t = torch.FloatTensor(y_train)
 
     X_scaled_val_t = torch.FloatTensor(X_scaled_val)
-    X_scaled_val_t.requires_grad_(True)
     X_raw_val_t = torch.FloatTensor(X_raw_val)
     y_val_t = torch.FloatTensor(y_val)
 
     model = MultiTaskTruePINN(input_dim=X_augmented.shape[1])
     
-    optimizer_adam = optim.Adam(model.parameters(), lr=0.001)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer_adam, patience=100, factor=0.5)
+    optimizer_adam = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer_adam, patience=50, factor=0.5)
 
     best_val_loss = float('inf')
-    patience = 150
+    patience = 120
     counter = 0
     best_state = None
 
     progress_bar = st.progress(0)
-    adam_epochs = 2000
-    max_epochs = 2500
-
-    # --- Local loss history dictionary ---
-    loss_history = {'train': [], 'val': [], 'data': [], 'physics': []}
+    adam_epochs = 1200
+    max_epochs = 2000
 
     for epoch in range(adam_epochs):
         model.train()
         optimizer_adam.zero_grad()
-        total_loss, loss_dict = model.compute_loss(
+        total_loss, _ = model.compute_loss(
             X_scaled_train_t, X_raw_train_t, y_train_t,
             epoch=epoch, max_epochs=max_epochs,
-            w_data_init=1.0, w_physics_init=PHYSICS_WEIGHT_INIT,
-            w_data_final=1.0, w_physics_final=PHYSICS_WEIGHT_INIT,
+            w_data_init=2.0, w_physics_init=PHYSICS_WEIGHT_INIT,
+            w_data_final=1.0, w_physics_final=1.0,
             w_mcc=0.5, w_density=W_DENSITY,
-            efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
-            compute_grad=True
+            efrf_target=EFRF_MAX, mcc_max=MCC_MAX, compute_grad=True
         )
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer_adam.step()
 
-        # Record training losses
-        loss_history['train'].append(total_loss.item())
-        loss_history['data'].append(loss_dict['data_loss'])
-        loss_history['physics'].append(loss_dict.get('physics_loss', 0.0))
-
         model.eval()
-        with torch.set_grad_enabled(False):
+        with torch.no_grad():
             val_loss, _ = model.compute_loss(
                 X_scaled_val_t, X_raw_val_t, y_val_t,
                 epoch=epoch, max_epochs=max_epochs,
-                w_data_init=1.0, w_physics_init=PHYSICS_WEIGHT_INIT,
-                w_data_final=1.0, w_physics_final=PHYSICS_WEIGHT_INIT,
+                w_data_init=2.0, w_physics_init=PHYSICS_WEIGHT_INIT,
+                w_data_final=1.0, w_physics_final=1.0,
                 w_mcc=0.5, w_density=W_DENSITY,
-                efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
-                compute_grad=False
+                efrf_target=EFRF_MAX, mcc_max=MCC_MAX, compute_grad=False
             )
-        val_loss_value = val_loss.item()
-        loss_history['val'].append(val_loss_value)
 
+        val_loss_value = val_loss.item()
         scheduler.step(val_loss_value)
 
         if val_loss_value < best_val_loss:
             best_val_loss = val_loss_value
             counter = 0
-            best_state = model.state_dict().copy()
+            best_state = {k: v.clone() for k, v in model.state_dict().items()}
         else:
             counter += 1
 
         if counter > patience:
             break
 
-        if (epoch + 1) % 200 == 0:
-            progress_bar.progress((epoch + 1) / max_epochs)
+        if (epoch + 1) % 100 == 0:
+            progress_bar.progress(min((epoch + 1) / max_epochs, 0.6))
 
     if best_state is not None:
         model.load_state_dict(best_state)
-    
-    optimizer_lbfgs = optim.LBFGS(model.parameters(), lr=0.1, max_iter=300, line_search_fn='strong_wolfe')
+
+    optimizer_lbfgs = optim.LBFGS(model.parameters(), lr=0.05, max_iter=200, line_search_fn='strong_wolfe')
     
     def closure():
         optimizer_lbfgs.zero_grad()
@@ -949,10 +944,9 @@ def load_pinn_model():
             X_scaled_train_t, X_raw_train_t, y_train_t,
             epoch=adam_epochs, max_epochs=max_epochs,
             w_data_init=1.0, w_physics_init=PHYSICS_WEIGHT_INIT,
-            w_data_final=1.0, w_physics_final=PHYSICS_WEIGHT_INIT,
+            w_data_final=1.0, w_physics_final=1.0,
             w_mcc=0.5, w_density=W_DENSITY,
-            efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
-            compute_grad=True
+            efrf_target=EFRF_MAX, mcc_max=MCC_MAX, compute_grad=True
         )
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -960,30 +954,7 @@ def load_pinn_model():
 
     for i in range(5):
         optimizer_lbfgs.step(closure)
-        progress_bar.progress((adam_epochs + (i + 1) * 50) / max_epochs)
-        
-        model.eval()
-        with torch.set_grad_enabled(False):
-            val_loss, _ = model.compute_loss(
-                X_scaled_val_t, X_raw_val_t, y_val_t,
-                epoch=adam_epochs + (i + 1) * 50,
-                max_epochs=max_epochs,
-                w_data_init=1.0, w_physics_init=PHYSICS_WEIGHT_INIT,
-                w_data_final=1.0, w_physics_final=PHYSICS_WEIGHT_INIT,
-                w_mcc=0.5, w_density=W_DENSITY,
-                efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
-                compute_grad=False
-            )
-            val_loss_value = val_loss.item()
-            loss_history['val'].append(val_loss_value)
-            if val_loss_value < best_val_loss:
-                best_val_loss = val_loss_value
-                best_state = model.state_dict().copy()
-
-    progress_bar.progress(1.0)
-
-    if best_state is not None:
-        model.load_state_dict(best_state)
+        progress_bar.progress(min(0.6 + 0.08 * (i + 1), 1.0))
 
     model.eval()
     model.feature_names = feature_names
@@ -991,18 +962,13 @@ def load_pinn_model():
     model.y_scaler = y_scaler
 
     torch.save(model.state_dict(), 'true_pinn_checkpoint.pt')
-
-    return model, scaler, y_scaler, feature_names, df, loss_history
+    return model, scaler, y_scaler, feature_names, df, {'train': [], 'val': []}
 
 # ================================================================
 # 9. PREDICTION & PLOTS
 # ================================================================
 
 def predict_pinn(model, scaler, y_scaler, inputs):
-    """
-    Predict primary outputs. Density is naturally bounded by the model.
-    No clipping needed.
-    """
     try:
         inputs_with_features = add_interaction_features(np.array([inputs]))[0]
         inputs_scaled = scaler.transform([inputs_with_features])
@@ -1040,20 +1006,6 @@ def plot_training_curves(loss_history):
             x=epochs[:len(loss_history['val'])], y=loss_history['val'],
             mode='lines', name='Validation Loss',
             line=dict(color='orange', width=2, dash='dash')
-        ))
-    
-    if len(loss_history['data']) > 0:
-        fig.add_trace(go.Scatter(
-            x=epochs, y=loss_history['data'],
-            mode='lines', name='Data Loss',
-            line=dict(color='green', width=1.5)
-        ))
-    
-    if len(loss_history['physics']) > 0:
-        fig.add_trace(go.Scatter(
-            x=epochs, y=loss_history['physics'],
-            mode='lines', name='Physics Loss',
-            line=dict(color='red', width=1.5)
         ))
     
     fig.update_layout(
@@ -1248,9 +1200,9 @@ with st.sidebar:
     - **NSGA-II:** pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS}
     - **Binder max:** {BINDER_MAX:.1f}%
     - **Density bounds enforced in forward pass** ✅
-    - **Unified constraints everywhere** ✅
+    - **Penalty-based NSGA-II** ✅
     """)
-    st.info("🔬 **v29.0** — Bounded Density, Unified Constraints, Balanced Loss")
+    st.info("🔬 **v29.0** — Bounded Density, Penalty-Based NSGA-II")
 
 with st.spinner("🔄 Training Multi-Task PINN..."):
     model, scaler, y_scaler, feature_names, df, loss_history = load_pinn_model()
@@ -1473,13 +1425,6 @@ with col_right:
                 fig_loss = plot_training_curves(loss_history)
                 if fig_loss:
                     st.plotly_chart(fig_loss, use_container_width=True)
-                    
-                    if len(loss_history['train']) > 0:
-                        col1, col2 = st.columns(2)
-                        col1.metric("Final Training Loss", f"{loss_history['train'][-1]:.6f}")
-                        col1.metric("Final Data Loss", f"{loss_history['data'][-1]:.6f}")
-                        col2.metric("Final Validation Loss", f"{loss_history['val'][-1]:.6f}")
-                        col2.metric("Final Physics Loss", f"{loss_history['physics'][-1]:.6f}")
                 else:
                     st.info("Loss history not available")
             
@@ -1506,5 +1451,5 @@ with col_right:
                 st.success("✅ One-click download — includes formulation, predictions, and model comparison.")
 
 st.markdown("---")
-st.caption(f"🔬 **Multi-Task True PINN — v29.0 (Bounded Density, Unified Constraints)**")
+st.caption(f"🔬 **Multi-Task True PINN — v29.0 (Bounded Density, Penalty-Based NSGA-II)**")
 st.caption(f"📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Postgraduate College, Sudan")
