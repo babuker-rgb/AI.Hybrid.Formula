@@ -27,27 +27,27 @@ import time
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. USER-CONFIGURABLE PARAMETERS (UNIFIED CONSTRAINTS)
+# 0. USER-CONFIGURABLE PARAMETERS (UPDATED)
 # ================================================================
 
 TENSILE_MIN = 1.90          # MPa
 EFRF_MAX = 0.40             # dimensionless
 MCC_MAX = 8.0               # %
-DENSITY_MIN = 0.40          # Physical lower bound
-DENSITY_MAX = 0.97          # Physical upper bound
+D_MIN = 0.40                # Physical lower bound
+D_MAX = 0.97                # Physical upper bound
 DENSITY_TOL = 1e-6          # Tolerance for floating-point errors
 PRESSURE_MAX = 300.0        # MPa
 
-NSGA_POP_SIZE = 120
-NSGA_GENERATIONS = 120
+NSGA_POP_SIZE = 100
+NSGA_GENERATIONS = 100
 
 BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
-# --- Balanced loss weights ---
-PHYSICS_WEIGHT_INIT = 0.1
-W_DENSITY = 1.0
-N_SAMPLES = 3000
+# --- Balanced loss weights (more strict) ---
+PHYSICS_WEIGHT_INIT = 0.5
+W_DENSITY = 100.0
+N_SAMPLES = 6000
 
 # ================================================================
 # 1. SAFE IMPORTS
@@ -143,12 +143,11 @@ def add_interaction_features(X_raw):
     ], axis=1)
 
 # ================================================================
-# 4. MULTI-TASK TRUE PINN MODEL (Bounded Density)
+# 4. MULTI-TASK TRUE PINN MODEL (UPDATED)
 # ================================================================
 
 def bounded_density(raw):
-    """Ensure density stays within [DENSITY_MIN, DENSITY_MAX]."""
-    return DENSITY_MIN + (DENSITY_MAX - DENSITY_MIN) * torch.sigmoid(raw)
+    return D_MIN + (D_MAX - D_MIN) * torch.sigmoid(raw)
 
 class MultiTaskTruePINN(nn.Module):
     def __init__(self, input_dim=13, output_dim=5):
@@ -210,8 +209,7 @@ class MultiTaskTruePINN(nn.Module):
         mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
 
         density_penalty = torch.mean(
-            torch.relu(density_pred - DENSITY_MAX) ** 2 +
-            torch.relu(DENSITY_MIN - density_pred) ** 2
+            torch.relu(density_pred - D_MAX) ** 2 + torch.relu(D_MIN - density_pred) ** 2
         )
 
         if compute_grad:
@@ -230,18 +228,16 @@ class MultiTaskTruePINN(nn.Module):
             monotonic_loss = torch.tensor(0.0, device=X_scaled.device)
 
         boundary_loss = (
-            torch.mean(torch.relu(0.50 - density_pred) ** 2) +
-            torch.mean(torch.relu(density_pred - 0.98) ** 2)
+            torch.mean(torch.relu((D_MIN + 0.1) - density_pred) ** 2) +
+            torch.mean(torch.relu(density_pred - D_MAX) ** 2)
         )
 
         k_reg = torch.mean(torch.relu(k_pred - 0.1) ** 2) + torch.mean(torch.relu(0.005 - k_pred) ** 2)
         A_reg = torch.mean(torch.relu(A_pred - 2.0) ** 2) + torch.mean(torch.relu(0.5 - A_pred) ** 2)
 
-        physics_loss = heckel_loss + efrf_loss + monotonic_loss + boundary_loss
-
         total_loss = (
             w_data * data_loss +
-            w_physics * physics_loss +
+            w_physics * (heckel_loss + efrf_loss + monotonic_loss + boundary_loss) +
             w_mcc * mcc_loss +
             w_density * density_penalty +
             0.1 * k_reg + 0.1 * A_reg
@@ -255,7 +251,6 @@ class MultiTaskTruePINN(nn.Module):
             'density_penalty': density_penalty.item(),
             'monotonic_loss': monotonic_loss.item() if compute_grad else 0.0,
             'boundary_loss': boundary_loss.item(),
-            'physics_loss': physics_loss.item(),
             'k_reg': k_reg.item(),
             'A_reg': A_reg.item(),
             'w_data': w_data,
@@ -322,7 +317,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         noise_t = np.random.normal(0, 0.04)
         noise_er = np.random.normal(0, 0.03)
 
-        D = np.clip(1 - np.exp(-(k_true * pressure + A_true)) + noise_d, DENSITY_MIN, DENSITY_MAX)
+        D = np.clip(1 - np.exp(-(k_true * pressure + A_true)) + noise_d, D_MIN, D_MAX)
         strength = np.clip(
             3.5 - 0.15 * (api - 85) + 0.3 * binder + 0.008 * (pressure - 100)
             - 1.5 * mgst - 0.02 * (speed - 10) + noise_t,
@@ -345,7 +340,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# 6. PDF GENERATION
+# 6. PDF GENERATION (unchanged)
 # ================================================================
 
 def sanitize_text(text):
@@ -431,7 +426,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.cell(0, 8, sanitize_text("3. Prediction Results"), ln=True, fill=True)
     pdf.set_font("Arial", "", 10)
     
-    results = [("Density", f"{density:.3f}", f"[{DENSITY_MIN:.2f}, {DENSITY_MAX:.2f}]"),
+    results = [("Density", f"{density:.3f}", f"[{D_MIN:.2f}, {D_MAX:.2f}]"),
                ("Tensile Strength", f"{tensile:.3f} MPa", f">= {TENSILE_MIN:.2f} MPa"),
                ("Elastic Recovery", f"{er:.3f} %", "-"),
                ("EFRF", f"{efrf:.4f}", f"< {EFRF_MAX:.2f}")]
@@ -539,7 +534,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
         return str(pdf_bytes).encode('latin1')
 
 # ================================================================
-# 7. NSGA-II (SEEDED INITIALIZATION + FEASIBILITY-FIRST RANKING)
+# 7. NSGA-II (UPDATED: Seeded Initialization, Repair, Penalty)
 # ================================================================
 
 class NSGAII:
@@ -559,66 +554,88 @@ class NSGAII:
         self.constraints = None
         self.tensile = None
         self.fronts = None
-        self.violations = None
+
+    def _repair(self, individual):
+        api, mcc, pvpp, mgst, binder, pressure, speed, granule = individual
+
+        api = np.clip(api, 85, 95)
+        binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
+        mgst = np.clip(mgst, 0.01, 1.2)
+        pvpp = np.clip(pvpp, 0.5, 6.0)
+        mcc = np.clip(mcc, 0, MCC_MAX)
+        pressure = np.clip(pressure, 80, PRESSURE_MAX)
+        speed = np.clip(speed, 1.0, 50.0)
+        granule = np.clip(granule, 30.0, 250.0)
+
+        total = api + binder + mgst + pvpp + mcc
+        if total > 100.0:
+            scale = 100.0 / total
+            api *= scale
+            binder *= scale
+            mgst *= scale
+            pvpp *= scale
+            mcc *= scale
+
+        total = api + binder + mgst + pvpp + mcc
+        if total < 100.0:
+            remainder = 100.0 - total
+            mcc_add = min(remainder, MCC_MAX - mcc)
+            mcc += mcc_add
+            remainder -= mcc_add
+            if remainder > 0:
+                api = max(85.0, api - remainder)
+
+        api = np.clip(api, 85, 95)
+        binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
+        mgst = np.clip(mgst, 0.01, 1.2)
+        pvpp = np.clip(pvpp, 0.5, 6.0)
+        mcc = np.clip(mcc, 0, MCC_MAX)
+
+        return np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule], dtype=float)
 
     def _initialize_population(self):
-        """Seeded initialization: 30% from feasible seed with jitter."""
         pop = np.zeros((self.pop_size, 8))
-        seed = np.array([90.5, 5.0, 3.0, 0.20, 2.7, 230.0, 12.0, 125.0])
-
+        seed = np.array([90.5, 5.0, 3.0, 0.2, 2.7, 230.0, 12.0, 125.0], dtype=float)
         n_seed = int(0.3 * self.pop_size)
+
         for i in range(n_seed):
             noise = np.array([
-                np.random.normal(0, 1.0),    # API
-                np.random.normal(0, 0.5),    # MCC
-                np.random.normal(0, 0.4),    # PVPP
-                np.random.normal(0, 0.05),   # MgSt
-                np.random.normal(0, 0.3),    # Binder
-                np.random.normal(0, 10.0),   # Pressure
-                np.random.normal(0, 2.0),    # Speed
-                np.random.normal(0, 15.0)    # Granule
+                np.random.normal(0, 1.0),
+                np.random.normal(0, 0.5),
+                np.random.normal(0, 0.4),
+                np.random.normal(0, 0.05),
+                np.random.normal(0, 0.3),
+                np.random.normal(0, 10.0),
+                np.random.normal(0, 2.0),
+                np.random.normal(0, 15.0)
             ])
-            pop[i] = np.clip(seed + noise, self.bounds[:, 0], self.bounds[:, 1])
-            # Ensure formulation sums to 100%
-            pop[i] = self._repair_formulation(pop[i])
+            pop[i] = self._repair(seed + noise)
 
         for i in range(n_seed, self.pop_size):
-            for j in range(8):
-                pop[i, j] = np.random.uniform(self.bounds[j, 0], self.bounds[j, 1])
-            pop[i] = self._repair_formulation(pop[i])
+            individual = np.array([
+                np.random.uniform(self.bounds[0, 0], self.bounds[0, 1]),
+                np.random.uniform(self.bounds[1, 0], self.bounds[1, 1]),
+                np.random.uniform(self.bounds[2, 0], self.bounds[2, 1]),
+                np.random.uniform(self.bounds[3, 0], self.bounds[3, 1]),
+                np.random.uniform(self.bounds[4, 0], self.bounds[4, 1]),
+                np.random.uniform(self.bounds[5, 0], self.bounds[5, 1]),
+                np.random.uniform(self.bounds[6, 0], self.bounds[6, 1]),
+                np.random.uniform(self.bounds[7, 0], self.bounds[7, 1]),
+            ])
+            pop[i] = self._repair(individual)
 
         return pop
-
-    def _repair_formulation(self, individual):
-        """Ensure formulation sums to 100% and MCC <= MCC_MAX."""
-        api, mcc, pvpp, mgst, binder, pressure, speed, granule = individual
-        used = api + binder + mgst + pvpp + mcc
-        if used > 100:
-            scale = 100 / used
-            api *= scale; binder *= scale; mgst *= scale; pvpp *= scale; mcc *= scale
-        elif used < 100:
-            remainder = 100 - used
-            if mcc + remainder <= MCC_MAX:
-                mcc += remainder
-            else:
-                excess = (mcc + remainder) - MCC_MAX
-                mcc = MCC_MAX
-                api = max(85.0, api - excess)
-
-        return np.clip([api, mcc, pvpp, mgst, binder, pressure, speed, granule],
-                       self.bounds[:, 0], self.bounds[:, 1])
 
     def _evaluate(self, population):
         n = population.shape[0]
         objectives = np.zeros((n, 2))
         constraints = np.zeros(n, dtype=bool)
-        violations = np.zeros(n)
         tensile_strengths = np.zeros(n)
 
         for i in range(n):
             try:
-                ind = self._repair_formulation(population[i])
-                api, mcc, pvpp, mgst, binder, pressure, speed, granule = ind
+                repaired = self._repair(population[i])
+                api, mcc, pvpp, mgst, binder, pressure, speed, granule = repaired
 
                 inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
                 inputs_with_features = add_interaction_features(np.array([inputs]))[0]
@@ -633,94 +650,79 @@ class NSGAII:
                 tensile = float(pred_actual[1])
                 er = float(pred_actual[2])
 
-                if tensile < 0.01:
-                    tensile = 0.01
-                    efrf = 10.0
-                else:
-                    efrf = er / tensile
-                    efrf = max(0.0001, min(efrf, 5.0))
+                density = float(np.clip(density, D_MIN, D_MAX))
 
-                # --- Feasibility and violation calculation ---
-                violation = 0.0
-                if tensile < TENSILE_MIN:
-                    violation += (TENSILE_MIN - tensile) ** 2
-                if efrf >= EFRF_MAX:
-                    violation += (efrf - EFRF_MAX) ** 2
-                if density < DENSITY_MIN - DENSITY_TOL:
-                    violation += (DENSITY_MIN - density) ** 2
-                if density > DENSITY_MAX + DENSITY_TOL:
-                    violation += (density - DENSITY_MAX) ** 2
+                if tensile < 1e-4:
+                    tensile = 1e-4
+                efrf = float(er / tensile)
+                efrf = max(1e-4, min(efrf, 5.0))
 
-                feasible = (violation == 0.0)
+                feasible = (
+                    (tensile >= TENSILE_MIN) and
+                    (efrf < EFRF_MAX) and
+                    (density >= D_MIN - DENSITY_TOL) and
+                    (density <= D_MAX + DENSITY_TOL) and
+                    (mcc <= MCC_MAX)
+                )
                 constraints[i] = feasible
-                violations[i] = violation
 
-                objectives[i, 0] = -api - self.w_tensile * tensile
-                objectives[i, 1] = efrf
+                penalty = 0.0
+                if tensile < TENSILE_MIN:
+                    penalty += (TENSILE_MIN - tensile) ** 2
+                if efrf >= EFRF_MAX:
+                    penalty += (efrf - EFRF_MAX) ** 2
+                if density < D_MIN:
+                    penalty += (D_MIN - density) ** 2
+                if density > D_MAX:
+                    penalty += (density - D_MAX) ** 2
+
+                objectives[i, 0] = -(api + self.w_tensile * tensile) + 25.0 * penalty
+                objectives[i, 1] = efrf + 25.0 * penalty
                 tensile_strengths[i] = tensile
 
-                population[i] = ind
+                population[i] = repaired
 
-            except Exception as e:
+            except Exception:
                 objectives[i, 0] = 100.0
                 objectives[i, 1] = 100.0
                 constraints[i] = False
-                violations[i] = 1e10
                 tensile_strengths[i] = 0.0
 
-        return objectives, constraints, violations, tensile_strengths, population
+        return objectives, constraints, tensile_strengths, population
 
-    def _fast_non_dominated_sort(self, objectives, violations):
-        """
-        Feasibility-first ranking: any feasible solution dominates any infeasible.
-        Among feasible: compare objectives.
-        Among infeasible: compare violations first, then objectives.
-        """
+    def _fast_non_dominated_sort(self, objectives, constraints):
         n = objectives.shape[0]
         S = [[] for _ in range(n)]
         n_dom = np.zeros(n)
         rank = np.zeros(n, dtype=int)
         fronts = []
-
-        # Check if solution is feasible (violation == 0)
-        feasible_mask = (violations == 0.0)
+        violation = ~constraints
 
         for i in range(n):
             for j in range(n):
                 if i == j:
                     continue
-                # Feasibility-first dominance
-                if feasible_mask[i] and not feasible_mask[j]:
-                    S[i].append(j)
-                elif not feasible_mask[i] and feasible_mask[j]:
+                if violation[i] and not violation[j]:
                     n_dom[i] += 1
-                elif feasible_mask[i] and feasible_mask[j]:
-                    # Both feasible: compare objectives
-                    if (objectives[i, 0] <= objectives[j, 0] and
-                        objectives[i, 1] <= objectives[j, 1] and
-                        (objectives[i, 0] < objectives[j, 0] or objectives[i, 1] < objectives[j, 1])):
-                        S[i].append(j)
-                    elif (objectives[j, 0] <= objectives[i, 0] and
-                          objectives[j, 1] <= objectives[i, 1] and
-                          (objectives[j, 0] < objectives[i, 0] or objectives[j, 1] < objectives[i, 1])):
-                        n_dom[i] += 1
+                elif not violation[i] and violation[j]:
+                    S[i].append(j)
                 else:
-                    # Both infeasible: compare violations first
-                    if violations[i] < violations[j]:
+                    better_or_equal = (
+                        objectives[i, 0] <= objectives[j, 0] and
+                        objectives[i, 1] <= objectives[j, 1]
+                    )
+                    strictly_better = (
+                        objectives[i, 0] < objectives[j, 0] or
+                        objectives[i, 1] < objectives[j, 1]
+                    )
+                    if better_or_equal and strictly_better:
                         S[i].append(j)
-                    elif violations[j] < violations[i]:
+                    elif (
+                        objectives[j, 0] <= objectives[i, 0] and
+                        objectives[j, 1] <= objectives[i, 1] and
+                        (objectives[j, 0] < objectives[i, 0] or objectives[j, 1] < objectives[i, 1])
+                    ):
                         n_dom[i] += 1
-                    else:
-                        # Equal violations: compare objectives
-                        if (objectives[i, 0] <= objectives[j, 0] and
-                            objectives[i, 1] <= objectives[j, 1] and
-                            (objectives[i, 0] < objectives[j, 0] or objectives[i, 1] < objectives[j, 1])):
-                            S[i].append(j)
-                        elif (objectives[j, 0] <= objectives[i, 0] and
-                              objectives[j, 1] <= objectives[i, 1] and
-                              (objectives[j, 0] < objectives[i, 0] or objectives[j, 1] < objectives[i, 1])):
-                            n_dom[i] += 1
-
             if n_dom[i] == 0:
                 rank[i] = 0
                 if not fronts:
@@ -736,9 +738,9 @@ class NSGAII:
                     if n_dom[q] == 0:
                         rank[q] = i + 1
                         next_front.append(q)
-            i += 1
             if next_front:
                 fronts.append(next_front)
+            i += 1
 
         return fronts, rank
 
@@ -749,7 +751,6 @@ class NSGAII:
         distance = np.zeros(n)
         obj_range = objectives[front].max(axis=0) - objectives[front].min(axis=0)
         obj_range[obj_range == 0] = 1.0
-
         for m in range(2):
             sorted_idx = sorted(range(n), key=lambda i: objectives[front[i], m])
             distance[sorted_idx[0]] = np.inf
@@ -758,21 +759,13 @@ class NSGAII:
                 prev_obj = objectives[front[sorted_idx[i - 1]], m]
                 next_obj = objectives[front[sorted_idx[i + 1]], m]
                 distance[sorted_idx[i]] += (next_obj - prev_obj) / obj_range[m]
-
         return distance
 
-    def _tournament_selection(self, pop_indices, objectives, ranks, crowding, violations):
-        n = len(pop_indices)
+    def _tournament_selection(self, pop_indices, objectives, ranks, crowding):
         selected = []
-        for _ in range(n):
+        for _ in range(len(pop_indices)):
             i1, i2 = np.random.choice(pop_indices, 2, replace=False)
-            # Feasibility-first tournament
-            v1, v2 = violations[i1], violations[i2]
-            if v1 == 0 and v2 != 0:
-                selected.append(i1)
-            elif v2 == 0 and v1 != 0:
-                selected.append(i2)
-            elif ranks[i1] < ranks[i2]:
+            if ranks[i1] < ranks[i2]:
                 selected.append(i1)
             elif ranks[i1] > ranks[i2]:
                 selected.append(i2)
@@ -798,12 +791,7 @@ class NSGAII:
             else:
                 child1[i] = parent1[i]
                 child2[i] = parent2[i]
-
-        for i in range(8):
-            child1[i] = np.clip(child1[i], self.bounds[i, 0], self.bounds[i, 1])
-            child2[i] = np.clip(child2[i], self.bounds[i, 0], self.bounds[i, 1])
-
-        return child1, child2
+        return self._repair(child1), self._repair(child2)
 
     def _polynomial_mutation(self, individual):
         eta_m = 20
@@ -816,21 +804,18 @@ class NSGAII:
                     mutated[i] = individual[i] + delta * (self.bounds[i, 1] - self.bounds[i, 0])
                 else:
                     mutated[i] = individual[i] - delta * (self.bounds[i, 1] - self.bounds[i, 0])
-                mutated[i] = np.clip(mutated[i], self.bounds[i, 0], self.bounds[i, 1])
-        return self._repair_formulation(mutated)
+        return self._repair(mutated)
 
     def run(self):
         self.population = self._initialize_population()
 
         for gen in range(self.n_generations):
-            objectives, constraints, violations, tensile, pop = self._evaluate(self.population)
+            objectives, constraints, tensile, pop = self._evaluate(self.population)
             self.population = pop
             self.objectives = objectives
             self.constraints = constraints
             self.tensile = tensile
-            self.violations = violations
-
-            fronts, ranks = self._fast_non_dominated_sort(objectives, violations)
+            fronts, ranks = self._fast_non_dominated_sort(objectives, constraints)
             self.fronts = fronts
 
             if gen == self.n_generations - 1:
@@ -839,11 +824,10 @@ class NSGAII:
             crowding = np.zeros(self.pop_size)
             for front in fronts:
                 dist = self._crowding_distance(objectives, front)
-                crowding[front] = dist
+                for idx, d in zip(front, dist):
+                    crowding[idx] = d
 
-            selected = self._tournament_selection(
-                range(self.pop_size), objectives, ranks, crowding, violations
-            )
+            selected = self._tournament_selection(range(self.pop_size), objectives, ranks, crowding)
 
             offspring = []
             for i in range(0, len(selected), 2):
@@ -858,50 +842,49 @@ class NSGAII:
                     offspring.append(self._polynomial_mutation(self.population[selected[i]]))
 
             offspring = np.array(offspring[:self.pop_size])
-            objectives_off, constraints_off, violations_off, tensile_off, pop_off = self._evaluate(offspring)
+            objectives_off, constraints_off, tensile_off, offspring = self._evaluate(offspring)
 
             combined_pop = np.vstack([self.population, offspring])
             combined_obj = np.vstack([self.objectives, objectives_off])
-            combined_viol = np.concatenate([self.violations, violations_off])
+            combined_const = np.concatenate([self.constraints, constraints_off])
 
-            combined_fronts, _ = self._fast_non_dominated_sort(combined_obj, combined_viol)
+            combined_fronts, combined_ranks = self._fast_non_dominated_sort(combined_obj, combined_const)
             combined_crowding = np.zeros(len(combined_pop))
             for front in combined_fronts:
                 dist = self._crowding_distance(combined_obj, front)
-                combined_crowding[front] = dist
+                for idx, d in zip(front, dist):
+                    combined_crowding[idx] = d
 
-            new_pop, new_obj, new_viol = [], [], []
+            new_pop, new_obj, new_const = [], [], []
             for front in combined_fronts:
                 if len(new_pop) + len(front) <= self.pop_size:
                     for idx in front:
                         new_pop.append(combined_pop[idx])
                         new_obj.append(combined_obj[idx])
-                        new_viol.append(combined_viol[idx])
+                        new_const.append(combined_const[idx])
                 else:
                     front_sorted = sorted(front, key=lambda i: combined_crowding[i], reverse=True)
                     remain = self.pop_size - len(new_pop)
                     for idx in front_sorted[:remain]:
                         new_pop.append(combined_pop[idx])
                         new_obj.append(combined_obj[idx])
-                        new_viol.append(combined_viol[idx])
+                        new_const.append(combined_const[idx])
                     break
 
             self.population = np.array(new_pop)
             self.objectives = np.array(new_obj)
-            self.violations = np.array(new_viol)
+            self.constraints = np.array(new_const)
 
-        objectives, constraints, violations, tensile, pop = self._evaluate(self.population)
+        objectives, constraints, tensile, pop = self._evaluate(self.population)
         self.population = pop
         self.objectives = objectives
         self.constraints = constraints
         self.tensile = tensile
-        self.violations = violations
-        self.fronts, _ = self._fast_non_dominated_sort(objectives, violations)
-
+        self.fronts, _ = self._fast_non_dominated_sort(objectives, constraints)
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 8. TRAIN MODEL
+# 8. TRAIN MODEL (UPDATED)
 # ================================================================
 
 @st.cache_resource
@@ -911,7 +894,7 @@ def load_pinn_model():
     y = df[['Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']].values
 
     X_augmented = add_interaction_features(X_raw)
-    
+
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_augmented)
 
@@ -934,7 +917,7 @@ def load_pinn_model():
     y_val_t = torch.FloatTensor(y_val)
 
     model = MultiTaskTruePINN(input_dim=X_augmented.shape[1])
-    
+
     optimizer_adam = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer_adam, patience=50, factor=0.5)
 
@@ -947,26 +930,23 @@ def load_pinn_model():
     adam_epochs = 1200
     max_epochs = 2000
 
-    loss_history = {'train': [], 'val': [], 'data': [], 'physics': []}
-
     for epoch in range(adam_epochs):
         model.train()
         optimizer_adam.zero_grad()
-        total_loss, loss_dict = model.compute_loss(
+
+        total_loss, _ = model.compute_loss(
             X_scaled_train_t, X_raw_train_t, y_train_t,
             epoch=epoch, max_epochs=max_epochs,
             w_data_init=2.0, w_physics_init=PHYSICS_WEIGHT_INIT,
             w_data_final=1.0, w_physics_final=1.0,
             w_mcc=0.5, w_density=W_DENSITY,
-            efrf_target=EFRF_MAX, mcc_max=MCC_MAX, compute_grad=True
+            efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
+            compute_grad=True
         )
+
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer_adam.step()
-
-        loss_history['train'].append(total_loss.item())
-        loss_history['data'].append(loss_dict['data_loss'])
-        loss_history['physics'].append(loss_dict['physics_loss'])
 
         model.eval()
         with torch.no_grad():
@@ -976,11 +956,11 @@ def load_pinn_model():
                 w_data_init=2.0, w_physics_init=PHYSICS_WEIGHT_INIT,
                 w_data_final=1.0, w_physics_final=1.0,
                 w_mcc=0.5, w_density=W_DENSITY,
-                efrf_target=EFRF_MAX, mcc_max=MCC_MAX, compute_grad=False
+                efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
+                compute_grad=False
             )
 
         val_loss_value = val_loss.item()
-        loss_history['val'].append(val_loss_value)
         scheduler.step(val_loss_value)
 
         if val_loss_value < best_val_loss:
@@ -999,8 +979,13 @@ def load_pinn_model():
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    optimizer_lbfgs = optim.LBFGS(model.parameters(), lr=0.05, max_iter=200, line_search_fn='strong_wolfe')
-    
+    optimizer_lbfgs = optim.LBFGS(
+        model.parameters(),
+        lr=0.05,
+        max_iter=200,
+        line_search_fn='strong_wolfe'
+    )
+
     def closure():
         optimizer_lbfgs.zero_grad()
         total_loss, _ = model.compute_loss(
@@ -1009,7 +994,8 @@ def load_pinn_model():
             w_data_init=1.0, w_physics_init=PHYSICS_WEIGHT_INIT,
             w_data_final=1.0, w_physics_final=1.0,
             w_mcc=0.5, w_density=W_DENSITY,
-            efrf_target=EFRF_MAX, mcc_max=MCC_MAX, compute_grad=True
+            efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
+            compute_grad=True
         )
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -1025,10 +1011,11 @@ def load_pinn_model():
     model.y_scaler = y_scaler
 
     torch.save(model.state_dict(), 'true_pinn_checkpoint.pt')
-    return model, scaler, y_scaler, feature_names, df, loss_history
+
+    return model, scaler, y_scaler, feature_names, df, {'train': [], 'val': []}
 
 # ================================================================
-# 9. PREDICTION & PLOTS
+# 9. PREDICTION & PLOTS (UPDATED)
 # ================================================================
 
 def predict_pinn(model, scaler, y_scaler, inputs):
@@ -1036,23 +1023,17 @@ def predict_pinn(model, scaler, y_scaler, inputs):
         inputs_with_features = add_interaction_features(np.array([inputs]))[0]
         inputs_scaled = scaler.transform([inputs_with_features])
         X_tensor = torch.FloatTensor(inputs_scaled)
-
         with torch.no_grad():
             pred_scaled = model.predict(X_tensor)[0]
-
         pred_original = y_scaler.inverse_transform([pred_scaled])[0]
-        density, tensile, er = pred_original[0], pred_original[1], pred_original[2]
-
-        density = float(np.clip(density, DENSITY_MIN, DENSITY_MAX))
-        tensile = float(max(tensile, 1e-4))
-        er = float(max(er, 1e-4))
+        density = float(np.clip(pred_original[0], D_MIN, D_MAX))
+        tensile = float(max(pred_original[1], 1e-4))
+        er = float(max(pred_original[2], 1e-4))
         efrf = float(er / tensile)
-
         return density, tensile, er, efrf
-
     except Exception as e:
         st.error(f"Prediction error: {e}")
-        return DENSITY_MIN, 0.01, 1.0, 1.0
+        return D_MIN, 0.01, 1.0, 1.0
 
 def plot_training_curves(loss_history):
     if not loss_history or len(loss_history['train']) == 0:
@@ -1073,20 +1054,6 @@ def plot_training_curves(loss_history):
             x=epochs[:len(loss_history['val'])], y=loss_history['val'],
             mode='lines', name='Validation Loss',
             line=dict(color='orange', width=2, dash='dash')
-        ))
-    
-    if len(loss_history['data']) > 0:
-        fig.add_trace(go.Scatter(
-            x=epochs, y=loss_history['data'],
-            mode='lines', name='Data Loss',
-            line=dict(color='green', width=1.5)
-        ))
-    
-    if len(loss_history['physics']) > 0:
-        fig.add_trace(go.Scatter(
-            x=epochs, y=loss_history['physics'],
-            mode='lines', name='Physics Loss',
-            line=dict(color='red', width=1.5)
         ))
     
     fig.update_layout(
@@ -1122,12 +1089,6 @@ def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
         if len(pareto_api) == 0:
             return None
 
-        plot_df = pd.DataFrame({
-            'API': pareto_api,
-            'EFRF': pareto_efrf,
-            'Feasible': feasible
-        }).dropna().sort_values('API')
-
         fig = go.Figure()
 
         fig.add_trace(go.Scatter(
@@ -1139,29 +1100,31 @@ def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
         ))
 
         fig.add_trace(go.Scatter(
-            x=plot_df['API'],
-            y=plot_df['EFRF'],
+            x=pareto_api,
+            y=pareto_efrf,
             mode='lines+markers',
             marker=dict(size=8, color='red'),
             line=dict(color='red', width=2),
             name='Pareto Front'
         ))
 
-        if np.any(feasible):
-            feasible_idx = np.where(feasible)[0]
+        feas_x = pareto_api[feasible]
+        feas_y = pareto_efrf[feasible]
+        if len(feas_x) > 0:
             fig.add_trace(go.Scatter(
-                x=plot_df.iloc[feasible_idx]['API'],
-                y=plot_df.iloc[feasible_idx]['EFRF'],
+                x=feas_x,
+                y=feas_y,
                 mode='markers',
-                marker=dict(size=12, color='green', symbol='diamond'),
+                marker=dict(size=10, color='green', symbol='diamond'),
                 name='Feasible Solutions'
             ))
 
+        # Add your formulation if provided
         if api and efrf and 85 <= api <= 95 and 0.0001 <= efrf <= 2:
             fig.add_trace(go.Scatter(
                 x=[api], y=[efrf],
                 mode='markers+text',
-                marker=dict(size=16, color='blue', symbol='star'),
+                marker=dict(size=14, color='blue', symbol='star'),
                 text=[f"Your Formulation<br>API: {api:.1f}%<br>EFRF: {efrf:.4f}"],
                 name='Selected Formulation'
             ))
@@ -1191,7 +1154,6 @@ def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
         )
 
         return fig
-
     except Exception as e:
         st.error(f"Pareto plot error: {e}")
         return None
@@ -1285,15 +1247,16 @@ with st.sidebar:
     - ✅ **Monotonicity:** ∂D/∂P > 0
     - ✅ **Boundary:** 0.4 < D < 0.98
     - ✅ **MCC:** ≤ {MCC_MAX:.1f}%
-    - ✅ **Density:** {DENSITY_MIN:.2f} ≤ D ≤ {DENSITY_MAX:.2f}
+    - ✅ **Density:** {D_MIN:.2f} ≤ D ≤ {D_MAX:.2f}
     
     **Multi-Task PINN:**
     - 5 outputs (D, σt, ER, k, A)
     - Adam → LBFGS hybrid (balanced)
     - **NSGA-II:** pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS}
     - **Seeded Initialization:** ✅ 30% from feasible seed
-    - **Feasibility-First Ranking:** ✅
     - **Repair Step:** ✅
+    - **Penalty weight:** 25.0
+    - **Density penalty:** 100.0
     """)
     st.info("🔬 **v29.5** — Seeded NSGA-II, Feasibility-First Ranking")
 
@@ -1358,13 +1321,13 @@ with col_right:
                 density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs)
             
             kpi_cols = st.columns(3)
-            kpi_cols[0].metric("Density", f"{density:.3f}", delta=f"[{DENSITY_MIN:.2f}, {DENSITY_MAX:.2f}]")
+            kpi_cols[0].metric("Density", f"{density:.3f}", delta=f"[{D_MIN:.2f}, {D_MAX:.2f}]")
             kpi_cols[1].metric("Tensile", f"{tensile:.3f} MPa", delta=f">= {TENSILE_MIN:.2f} PASS" if tensile >= TENSILE_MIN else f"< {TENSILE_MIN:.2f} FAIL")
             kpi_cols[2].metric("EFRF", f"{efrf:.4f}", delta=f"< {EFRF_MAX:.2f} PASS" if efrf < EFRF_MAX else f">= {EFRF_MAX:.2f} FAIL")
             
             st.markdown("---")
             
-            density_ok = (density >= DENSITY_MIN and density <= DENSITY_MAX)
+            density_ok = (density >= D_MIN and density <= D_MAX)
             tensile_ok = (tensile >= TENSILE_MIN)
             efrf_ok = (efrf < EFRF_MAX)
             mcc_ok = (mcc <= MCC_MAX)
@@ -1376,7 +1339,7 @@ with col_right:
             
             st.markdown("### ✅ Feasibility")
             pass_cols = st.columns(4)
-            pass_cols[0].metric(f"Density [{DENSITY_MIN:.2f}, {DENSITY_MAX:.2f}]", "✅ PASS" if density_ok else "❌ FAIL")
+            pass_cols[0].metric(f"Density [{D_MIN:.2f}, {D_MAX:.2f}]", "✅ PASS" if density_ok else "❌ FAIL")
             pass_cols[1].metric(f"σt ≥ {TENSILE_MIN:.2f}", "✅ PASS" if tensile_ok else "❌ FAIL")
             pass_cols[2].metric(f"EFRF < {EFRF_MAX:.2f}", "✅ PASS" if efrf_ok else "❌ FAIL")
             pass_cols[3].metric(f"MCC ≤ {MCC_MAX:.1f}%", "✅ PASS" if mcc_ok else "❌ FAIL")
@@ -1514,13 +1477,6 @@ with col_right:
                 fig_loss = plot_training_curves(loss_history)
                 if fig_loss:
                     st.plotly_chart(fig_loss, use_container_width=True)
-                    
-                    if len(loss_history['train']) > 0:
-                        col1, col2 = st.columns(2)
-                        col1.metric("Final Training Loss", f"{loss_history['train'][-1]:.6f}")
-                        col1.metric("Final Data Loss", f"{loss_history['data'][-1]:.6f}")
-                        col2.metric("Final Validation Loss", f"{loss_history['val'][-1]:.6f}")
-                        col2.metric("Final Physics Loss", f"{loss_history['physics'][-1]:.6f}")
                 else:
                     st.info("Loss history not available")
             
