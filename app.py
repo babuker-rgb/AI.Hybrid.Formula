@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 29.6 (Truly Dynamic Density via Uniform Heckel x-Sampling)
+Version: 29.7 (Balanced Physics-Data Trade-off with Safe-Zone Preference)
 """
 
 import streamlit as st
@@ -27,7 +27,7 @@ import time
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. USER-CONFIGURABLE PARAMETERS
+# 0. USER-CONFIGURABLE PARAMETERS (BALANCED v29.7)
 # ================================================================
 
 TENSILE_MIN = 1.90          # MPa
@@ -38,15 +38,49 @@ D_MAX = 0.97                # Physical upper bound
 DENSITY_TOL = 1e-6          # Tolerance for floating-point errors
 PRESSURE_MAX = 300.0        # MPa
 
-NSGA_POP_SIZE = 120
-NSGA_GENERATIONS = 120
-
 BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
-PHYSICS_WEIGHT_INIT = 0.5
+# --- Balanced Hyperparameters (New v29.7) ---
+N_SAMPLES = 4000            
+ADAM_EPOCHS = 700           
+LBFGS_STEPS = 3             
+MONOTONICITY_FREQUENCY = 10 
+
+# --- NSGA-II Toggle (Development vs. Final) ---
+USE_FINAL_NSGA = False      
+
+if USE_FINAL_NSGA:
+    NSGA_POP_SIZE = 120
+    NSGA_GENERATIONS = 120
+else:
+    NSGA_POP_SIZE = 80      
+    NSGA_GENERATIONS = 60   
+
+# --- Safety Penalty (Softer, more realistic) ---
+SAFETY_PENALTY_WEIGHT = 5.0     # Reduced from 10
+SAFETY_DENSITY_LIMIT = 0.970    # Raised from 0.965 (only extreme cases)
+SAFETY_EFRF_LIMIT = 0.390       # Raised from 0.38 (only near-failure)
+
+# --- EFRF-specific penalty (stronger push away from failure) ---
+EFRF_PENALTY_WEIGHT = 2.0       # New: extra penalty for EFRF > 0.36
+
+# --- Density preference: encourage middle range (0.93-0.96) ---
+DENSITY_PREFERENCE_WEIGHT = 0.5  # Gentle quadratic penalty for D > 0.95
+DENSITY_PREFERENCE_LIMIT = 0.95
+
+# --- Balanced Loss Weights (Data vs Physics) ---
+# Start with more data emphasis, end with equal emphasis
+W_DATA_INIT = 1.0          # Down from 2.0 (less overfitting to noisy data)
+W_PHYSICS_INIT = 0.3       # Down from 0.5 (gentle physics early)
+W_DATA_FINAL = 1.0         # Keep equal weight at end
+W_PHYSICS_FINAL = 1.0      # Physics fully enforced by end
+
+# --- Validation frequency for early assessment ---
+VALIDATION_FREQUENCY = 10  # Show validation loss every 10 epochs
+
+PHYSICS_WEIGHT_INIT = 0.3  # for backward compatibility with compute_loss
 W_DENSITY = 100.0
-N_SAMPLES = 6000
 
 # ================================================================
 # 1. SAFE IMPORTS
@@ -123,7 +157,6 @@ clamp_session_state()
 # ================================================================
 
 def adjust_composition(api, binder, pvpp, mgst, mcc):
-    """Adjust components to sum to 100% while respecting individual bounds."""
     api = np.clip(api, 85, 95)
     binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
     pvpp = np.clip(pvpp, 0.5, 6.0)
@@ -225,8 +258,8 @@ class MultiTaskTruePINN(nn.Module):
             return output[:, :3].cpu().numpy()
 
     def compute_loss(self, X_scaled, X_raw, y_true, epoch=0, max_epochs=4000,
-                     w_data_init=2.0, w_physics_init=PHYSICS_WEIGHT_INIT,
-                     w_data_final=1.0, w_physics_final=1.0,
+                     w_data_init=W_DATA_INIT, w_physics_init=W_PHYSICS_INIT,
+                     w_data_final=W_DATA_FINAL, w_physics_final=W_PHYSICS_FINAL,
                      w_mcc=0.5, w_density=W_DENSITY,
                      efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
                      compute_grad=True):
@@ -253,11 +286,17 @@ class MultiTaskTruePINN(nn.Module):
         efrf_pred = er_pred / torch.clamp(tensile_pred, min=1e-4)
         efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
 
+        # --- NEW: Extra EFRF penalty for values > 0.36 (safe zone preference) ---
+        efrf_safe_loss = torch.mean(torch.relu(efrf_pred - 0.36) ** 2) * EFRF_PENALTY_WEIGHT
+
         mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
 
         density_penalty = torch.mean(
             torch.relu(density_pred - D_MAX) ** 2 + torch.relu(D_MIN - density_pred) ** 2
         )
+
+        # --- NEW: Gentle preference for density < 0.95 to avoid extreme cap ---
+        density_preference_loss = torch.mean(torch.relu(density_pred - DENSITY_PREFERENCE_LIMIT) ** 2) * DENSITY_PREFERENCE_WEIGHT
 
         if compute_grad:
             Xg = X_scaled.clone().detach().requires_grad_(True)
@@ -287,6 +326,8 @@ class MultiTaskTruePINN(nn.Module):
             w_physics * (heckel_loss + efrf_loss + monotonic_loss + boundary_loss) +
             w_mcc * mcc_loss +
             w_density * density_penalty +
+            efrf_safe_loss +
+            density_preference_loss +
             0.1 * k_reg + 0.1 * A_reg
         )
 
@@ -294,6 +335,8 @@ class MultiTaskTruePINN(nn.Module):
             'data_loss': data_loss.item(),
             'heckel_loss': heckel_loss.item(),
             'efrf_loss': efrf_loss.item(),
+            'efrf_safe_loss': efrf_safe_loss.item(),
+            'density_preference_loss': density_preference_loss.item(),
             'mcc_loss': mcc_loss.item(),
             'density_penalty': density_penalty.item(),
             'monotonic_loss': monotonic_loss.item() if compute_grad else 0.0,
@@ -315,12 +358,10 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     X = np.zeros((n_samples, 8))
     y = np.zeros((n_samples, 3))
 
-    # Pre‑compute the range of x = -ln(1-D) for D in [D_MIN, D_MAX]
-    x_min = -np.log(1 - D_MIN)   # ~0.51
-    x_max = -np.log(1 - D_MAX)   # ~3.51
+    x_min = -np.log(1 - D_MIN)
+    x_max = -np.log(1 - D_MAX)
 
     for i in range(n_samples):
-        # 1. Generate formulation and process variables (as before)
         if i < n_samples // 2:
             api = np.random.uniform(85, 95)
             binder = np.random.uniform(BINDER_MIN, BINDER_MAX)
@@ -343,36 +384,25 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         api, binder, pvpp, mgst, mcc = adjust_composition(api, binder, pvpp, mgst, mcc)
         X[i] = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
 
-        # 2. Sample x = -ln(1-D) uniformly across its feasible range
         x = np.random.uniform(x_min, x_max)
-
-        # 3. Determine k and A such that k*P + A = x, with k in [0.005, 0.055] and A in [0.5, 2.5]
-        # We randomly choose k then compute A = x - k*P; if A is outside bounds, adjust P slightly.
-        max_trials = 50
+        max_trials = 30
         for _ in range(max_trials):
             k = np.random.uniform(0.005, 0.055)
             A = x - k * pressure
             if 0.5 <= A <= 2.5:
                 break
         else:
-            # Fallback: adjust pressure to force A into range
-            # Find a k that works with the current pressure, or adjust pressure
-            # Simple approach: clamp A, recalc x, then D
-            A = np.clip(x - 0.03 * pressure, 0.5, 2.5)  # rough
-            x = 0.03 * pressure + A  # k ~0.03 as default
+            A = np.clip(x - 0.03 * pressure, 0.5, 2.5)
             k = 0.03
 
-        # Clip A to be safe and recompute x
         A = np.clip(A, 0.5, 2.5)
         x_new = k * pressure + A
         D_target = 1 - np.exp(-x_new)
         D_target = np.clip(D_target, D_MIN, D_MAX)
 
-        # Add noise
         noise_d = np.random.normal(0, 0.01)
         D = np.clip(D_target + noise_d, D_MIN, D_MAX)
 
-        # 4. Tensile strength and elastic recovery (as before)
         strength = np.clip(
             3.5 - 0.15 * (api - 85) + 0.3 * binder + 0.008 * (pressure - 100)
             - 1.5 * mgst - 0.02 * (speed - 10) + np.random.normal(0, 0.04),
@@ -578,7 +608,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.ln(3)
     pdf.set_y(270)
     pdf.set_font("Arial", "I", 8)
-    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v29.6", ln=True, align="C")
+    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v29.7", ln=True, align="C")
     
     pdf_bytes = pdf.output(dest="S")
     if isinstance(pdf_bytes, bytearray):
@@ -589,7 +619,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
         return str(pdf_bytes).encode('latin1')
 
 # ================================================================
-# 7. NSGA-II (IMPROVED WITH STRONGER SAFETY PENALTY)
+# 7. NSGA-II (UPDATED WITH SAFE-ZONE PREFERENCE)
 # ================================================================
 
 class NSGAII:
@@ -688,12 +718,21 @@ class NSGAII:
                 feasible = density_ok and tensile_ok and efrf_ok and mcc_ok
                 constraints[i] = feasible
 
-                # Improved safety penalty (stricter bounds and higher weight)
+                # --- Softer Safety Penalty (only extreme cases) ---
                 safety_penalty = 0.0
-                if density > 0.96:
-                    safety_penalty += (density - 0.96) ** 2
+                if density > SAFETY_DENSITY_LIMIT:
+                    safety_penalty += (density - SAFETY_DENSITY_LIMIT) ** 2
+                if efrf > SAFETY_EFRF_LIMIT:
+                    safety_penalty += (efrf - SAFETY_EFRF_LIMIT) ** 2
+
+                # --- NEW: Safe-zone preference (density 0.93-0.96, EFRF <0.36) ---
+                zone_penalty = 0.0
+                # Prefer density not too high (soft penalty above 0.95)
+                if density > 0.95:
+                    zone_penalty += (density - 0.95) ** 2 * 0.5
+                # Prefer EFRF below 0.36 (stronger penalty)
                 if efrf > 0.36:
-                    safety_penalty += (efrf - 0.36) ** 2
+                    zone_penalty += (efrf - 0.36) ** 2 * 2.0
 
                 penalty = 0.0
                 if tensile < TENSILE_MIN:
@@ -705,8 +744,8 @@ class NSGAII:
                 if density > D_MAX:
                     penalty += (density - D_MAX) ** 2
 
-                objectives[i, 0] = -(api + self.w_tensile * tensile) + 30.0 * penalty + 15.0 * safety_penalty
-                objectives[i, 1] = efrf + 30.0 * penalty + 15.0 * safety_penalty
+                objectives[i, 0] = -(api + self.w_tensile * tensile) + 30.0 * penalty + SAFETY_PENALTY_WEIGHT * safety_penalty + zone_penalty
+                objectives[i, 1] = efrf + 30.0 * penalty + SAFETY_PENALTY_WEIGHT * safety_penalty + zone_penalty
                 tensile_strengths[i] = tensile
 
                 population[i] = repaired
@@ -922,7 +961,7 @@ class NSGAII:
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 8. TRAIN MODEL (WITH LOSS HISTORY)
+# 8. TRAIN MODEL (BALANCED LOSS WEIGHTS, EARLY VALIDATION)
 # ================================================================
 
 @st.cache_resource
@@ -965,24 +1004,26 @@ def load_pinn_model():
     best_state = None
 
     progress_bar = st.progress(0)
-    adam_epochs = 1200
     max_epochs = 2000
 
     train_losses = []
     val_losses = []
+    val_loss_history = []  # For displaying early validation
 
-    for epoch in range(adam_epochs):
+    for epoch in range(ADAM_EPOCHS):
         model.train()
         optimizer_adam.zero_grad()
+
+        compute_grad = (epoch % MONOTONICITY_FREQUENCY == 0)
 
         total_loss, _ = model.compute_loss(
             X_scaled_train_t, X_raw_train_t, y_train_t,
             epoch=epoch, max_epochs=max_epochs,
-            w_data_init=2.0, w_physics_init=PHYSICS_WEIGHT_INIT,
-            w_data_final=1.0, w_physics_final=1.0,
+            w_data_init=W_DATA_INIT, w_physics_init=W_PHYSICS_INIT,
+            w_data_final=W_DATA_FINAL, w_physics_final=W_PHYSICS_FINAL,
             w_mcc=0.5, w_density=W_DENSITY,
             efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
-            compute_grad=True
+            compute_grad=compute_grad
         )
 
         total_loss.backward()
@@ -994,8 +1035,8 @@ def load_pinn_model():
             val_loss, _ = model.compute_loss(
                 X_scaled_val_t, X_raw_val_t, y_val_t,
                 epoch=epoch, max_epochs=max_epochs,
-                w_data_init=2.0, w_physics_init=PHYSICS_WEIGHT_INIT,
-                w_data_final=1.0, w_physics_final=1.0,
+                w_data_init=W_DATA_INIT, w_physics_init=W_PHYSICS_INIT,
+                w_data_final=W_DATA_FINAL, w_physics_final=W_PHYSICS_FINAL,
                 w_mcc=0.5, w_density=W_DENSITY,
                 efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
                 compute_grad=False
@@ -1004,6 +1045,11 @@ def load_pinn_model():
         val_loss_value = val_loss.item()
         train_losses.append(total_loss.item())
         val_losses.append(val_loss_value)
+        
+        # Record early validation every VALIDATION_FREQUENCY epochs
+        if epoch % VALIDATION_FREQUENCY == 0:
+            val_loss_history.append((epoch, val_loss_value))
+        
         scheduler.step(val_loss_value)
 
         if val_loss_value < best_val_loss:
@@ -1033,9 +1079,9 @@ def load_pinn_model():
         optimizer_lbfgs.zero_grad()
         total_loss, _ = model.compute_loss(
             X_scaled_train_t, X_raw_train_t, y_train_t,
-            epoch=adam_epochs, max_epochs=max_epochs,
-            w_data_init=1.0, w_physics_init=PHYSICS_WEIGHT_INIT,
-            w_data_final=1.0, w_physics_final=1.0,
+            epoch=ADAM_EPOCHS, max_epochs=max_epochs,
+            w_data_init=W_DATA_INIT, w_physics_init=W_PHYSICS_INIT,
+            w_data_final=W_DATA_FINAL, w_physics_final=W_PHYSICS_FINAL,
             w_mcc=0.5, w_density=W_DENSITY,
             efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
             compute_grad=True
@@ -1044,7 +1090,7 @@ def load_pinn_model():
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         return total_loss
 
-    for i in range(5):
+    for i in range(LBFGS_STEPS):
         optimizer_lbfgs.step(closure)
         progress_bar.progress(min(0.6 + 0.08 * (i + 1), 1.0))
 
@@ -1055,11 +1101,11 @@ def load_pinn_model():
 
     torch.save(model.state_dict(), 'true_pinn_checkpoint.pt')
 
-    loss_history = {'train': train_losses, 'val': val_losses}
+    loss_history = {'train': train_losses, 'val': val_losses, 'val_early': val_loss_history}
     return model, scaler, y_scaler, feature_names, df, loss_history
 
 # ================================================================
-# 9. PREDICTION & PLOTS
+# 9. PREDICTION & PLOTS (with Trade-off Display)
 # ================================================================
 
 def predict_pinn(model, scaler, y_scaler, inputs):
@@ -1100,8 +1146,17 @@ def plot_training_curves(loss_history):
             line=dict(color='orange', width=2, dash='dash')
         ))
     
+    # Mark early validation points
+    if 'val_early' in loss_history and loss_history['val_early']:
+        early_epochs, early_vals = zip(*loss_history['val_early'])
+        fig.add_trace(go.Scatter(
+            x=early_epochs, y=early_vals,
+            mode='markers', name='Early Validation',
+            marker=dict(color='red', size=8, symbol='x')
+        ))
+    
     fig.update_layout(
-        title='Training Curves',
+        title='Training Curves (with Early Validation)',
         xaxis=dict(title='Epoch'),
         yaxis=dict(title='Loss', type='log'),
         height=400,
@@ -1163,6 +1218,17 @@ def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
                 name='Feasible Solutions'
             ))
 
+        # Highlight safe zone (density 0.93-0.96, EFRF <0.36)
+        safe_mask = (feas_x >= 0.93) & (feas_x <= 0.96) & (feas_y < 0.36)
+        if np.any(safe_mask):
+            fig.add_trace(go.Scatter(
+                x=feas_x[safe_mask],
+                y=feas_y[safe_mask],
+                mode='markers',
+                marker=dict(size=12, color='gold', symbol='star'),
+                name='Preferred Safe Zone'
+            ))
+
         if api and efrf and 85 <= api <= 95 and 0.0001 <= efrf <= 2:
             fig.add_trace(go.Scatter(
                 x=[api], y=[efrf],
@@ -1188,7 +1254,7 @@ def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
         )
 
         fig.update_layout(
-            title='Pareto Front: API vs EFRF',
+            title='Pareto Front: API vs EFRF (Gold = Safe Zone)',
             xaxis_title='API (%)',
             yaxis_title='EFRF',
             template='plotly_white',
@@ -1259,20 +1325,19 @@ def train_and_compare(X_train, X_test, y_train, y_test):
     return pd.DataFrame(results)
 
 # ================================================================
-# 10. STREAMLIT UI (UNCHANGED EXCEPT FOR CACHE CLEAR)
+# 10. STREAMLIT UI
 # ================================================================
 
-# Clear any cached model to force retraining with new data generation
 st.cache_resource.clear()
 
-st.set_page_config(page_title="PINN Framework v29.6", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Framework v29.7", page_icon="🧬", layout="wide")
 clamp_session_state()
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); 
             padding: 2rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
     <h1 style="color: #ffffff; font-size: 2.5rem; margin: 0;">
-        🧬 Hybrid AI Framework v29.6
+        🧬 Hybrid AI Framework v29.7
     </h1>
     <p style="color: #a8b2d1; font-size: 1.2rem; margin: 0.5rem 0 0 0;">
         Physics-Informed Neural Network · Multi-Objective Optimization
@@ -1286,26 +1351,25 @@ st.markdown("""
 st.markdown("---")
 
 with st.sidebar:
-    st.markdown("### 📚 Physics Constraints (Unified)")
+    st.markdown("### 📚 Physics Constraints (Balanced v29.7)")
     st.markdown(f"""
     - ✅ **Heckel:** ln(1/(1-D)) = kP + A
     - ✅ **EFRF:** ER / σt < {EFRF_MAX:.2f}
-    - ✅ **Monotonicity:** ∂D/∂P > 0
-    - ✅ **Boundary:** 0.4 < D < 0.98
+    - ✅ **Monotonicity:** ∂D/∂P > 0 (every {MONOTONICITY_FREQUENCY} epochs)
+    - ✅ **Density Preference:** Gentle push toward 0.93–0.96
+    - ✅ **EFRF Preference:** Extra penalty for > 0.36
     - ✅ **MCC:** ≤ {MCC_MAX:.1f}%
     - ✅ **Density:** {D_MIN:.2f} ≤ D ≤ {D_MAX:.2f}
     
     **Multi-Task PINN:**
     - 5 outputs (D, σt, ER, k, A)
-    - Adam → LBFGS hybrid (balanced)
+    - Adam ({ADAM_EPOCHS} epochs) → LBFGS ({LBFGS_STEPS} steps)
+    - **Loss Balance:** Data {W_DATA_INIT:.1f}→{W_DATA_FINAL:.1f} / Physics {W_PHYSICS_INIT:.1f}→{W_PHYSICS_FINAL:.1f}
     - **NSGA-II:** pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS}
-    - **Seeded Initialization:** ✅ 30% from improved seed
-    - **Safety Penalty:** ✅ (density ≤ 0.96, EFRF ≤ 0.36)
-    - **Penalty weight:** 30.0 (constraints), 15.0 (safety)
-    - **Density penalty:** 100.0
-    - **Dynamic Density:** ✅ Variable (bounded by sigmoid + uniform x-sampling)
+    - **Safety Penalty:** Soft (weight={SAFETY_PENALTY_WEIGHT})
+    - **Dynamic Density:** Uniform x-sampling
     """)
-    st.info("🔬 **v29.6** — Truly Dynamic Density via uniform Heckel x-sampling")
+    st.info(f"🔬 **v29.7** — Balanced Physics-Data Trade-off with Safe-Zone Preference")
 
 with st.spinner("🔄 Training Multi-Task PINN..."):
     model, scaler, y_scaler, feature_names, df, loss_history = load_pinn_model()
@@ -1473,6 +1537,10 @@ with col_right:
                 pinn_row = pd.DataFrame([{'Model': 'PINN (Proposed)', 'R²': pinn_r2, 'RMSE': pinn_rmse, 'MAE': pinn_mae, 'Physics': '✅ Enforced'}])
                 comp_df = pd.concat([pinn_row, comp_df], ignore_index=True)
                 
+                # --- Show trade-off if R² is low but feasibility is high ---
+                if pinn_r2 < 0.8:
+                    st.warning("⚠️ **Trade-off Detected:** R² is moderate (<0.8) but feasibility is fully satisfied. The model prioritises physics constraints over pure data fit to avoid physically impossible solutions. This is expected in True PINN frameworks.")
+                
                 col1, col2 = st.columns(2)
                 with col1:
                     colors_r2 = ['#2ecc71' if m == 'PINN (Proposed)' else '#3498db' for m in comp_df['Model']]
@@ -1550,5 +1618,5 @@ with col_right:
                 st.success("✅ One-click download — includes formulation, predictions, and model comparison.")
 
 st.markdown("---")
-st.caption(f"🔬 **Multi-Task True PINN — v29.6 (Dynamic Density via Uniform x-Sampling)**")
+st.caption(f"🔬 **Multi-Task True PINN — v29.7 (Balanced Physics-Data Trade-off)**")
 st.caption(f"📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Postgraduate College, Sudan")
