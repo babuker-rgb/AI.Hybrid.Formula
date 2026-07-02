@@ -672,7 +672,6 @@ class NSGAII:
 
     def _repair(self, individual):
         # Individual comes from NSGA-II (raw weights within wider bounds internally)
-        # But we keep the same bounds as v29.8 for compatibility
         api, mcc, pvpp, mgst, binder, pressure, speed, granule = individual
         
         # Apply dynamic normalization (backend only)
@@ -686,12 +685,10 @@ class NSGAII:
         return np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule], dtype=float)
 
     def _initialize_population(self):
-        # Use wider bounds internally for exploration, but the user sees the original ranges
         pop = np.zeros((self.pop_size, 8))
         seed = np.array([90.0, 5.0, 3.0, 0.2, 3.0, 225.0, 12.0, 120.0], dtype=float)
         n_seed = int(0.3 * self.pop_size)
 
-        # Wider noise for exploration (but still within reasonable ranges)
         for i in range(n_seed):
             noise = np.array([
                 np.random.normal(0, 5.0),    # API
@@ -705,7 +702,6 @@ class NSGAII:
             ])
             pop[i] = self._repair(seed + noise)
 
-        # Generate random individuals with wider ranges (but will be normalized)
         for i in range(n_seed, self.pop_size):
             individual = np.array([
                 np.random.uniform(60, 100),    # API wider range
@@ -1363,7 +1359,7 @@ def train_and_compare(X_train, X_test, y_train, y_test):
     return pd.DataFrame(results)
 
 # ================================================================
-# 10. STREAMLIT UI - IDENTICAL TO v29.8 (NO CHANGES)
+# 10. STREAMLIT UI - IDENTICAL TO v29.8 (BUT WITH FIXED TABS)
 # ================================================================
 
 st.cache_resource.clear()
@@ -1458,17 +1454,199 @@ with col_left:
     
     predict_btn = st.button("🔬 Predict & Optimize", use_container_width=True)
 
+# ================================================================
+# RESULTS AND TABS (FIXED: TABS OUTSIDE predict_btn)
+# ================================================================
 with col_right:
     st.markdown("### 📈 Results")
     
+    # Define tabs first (always visible)
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        ["📉 Pareto Front", "🔍 Sensitivity", "📊 Model Comparison", "📈 Training Curves", "📄 Report"]
+    )
+    
+    # === TAB 1: Pareto Front ===
+    with tab1:
+        st.markdown("### 📉 Pareto Front")
+        if predict_btn:
+            fig_p = plot_pareto_plotly(objectives, constraints, fronts, nsga, api_norm, efrf)
+            if fig_p:
+                st.plotly_chart(fig_p, use_container_width=True)
+            else:
+                st.info("Pareto front not available.")
+        else:
+            st.info("👆 Please click 'Predict & Optimize' to generate the Pareto Front.")
+    
+    # === TAB 2: Sensitivity Analysis ===
+    with tab2:
+        st.markdown("### 🔍 Sensitivity Analysis")
+        if predict_btn:
+            fig_s = plot_sensitivity_plotly(inputs_norm, model, scaler, y_scaler)
+            if fig_s:
+                st.plotly_chart(fig_s, use_container_width=True)
+            else:
+                st.info("Sensitivity analysis not available.")
+        else:
+            st.info("👆 Please click 'Predict & Optimize' to run Sensitivity Analysis.")
+    
+    # === TAB 3: Model Comparison (FIXED) ===
+    with tab3:
+        st.markdown("### 📊 Model Performance Comparison")
+        st.caption("Hold-out test set (20% of data) — R², RMSE, MAE, and Physical Validity")
+        
+        if predict_btn:
+            # Prepare data
+            X_train, X_test, y_train, y_test = train_test_split(
+                df[feature_names].values, df['Tensile_Strength_MPa'].values,
+                test_size=0.2, random_state=42
+            )
+            X_train_aug = add_interaction_features(X_train)
+            X_test_aug = add_interaction_features(X_test)
+            X_train_scaled = scaler.transform(X_train_aug)
+            X_test_scaled = scaler.transform(X_test_aug)
+            
+            # PINN predictions
+            pinn_pred_scaled = model.predict(torch.tensor(X_test_scaled, dtype=torch.float32))
+            pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
+            pinn_r2 = r2_score(y_test, pinn_pred)
+            pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
+            pinn_mae = mean_absolute_error(y_test, pinn_pred)
+            
+            # Physical validity check for PINN
+            pinn_valid = "✅ Fully Valid"
+            try:
+                mono_pass = 0
+                efrf_pass = 0
+                density_pass = 0
+                for _ in range(50):
+                    idx = np.random.randint(0, len(X_test))
+                    sample = X_test[idx].copy()
+                    d1, _, _, e1 = predict_pinn(model, scaler, y_scaler, sample)
+                    sample[5] = min(sample[5] * 1.2, PRESSURE_MAX)
+                    d2, _, _, e2 = predict_pinn(model, scaler, y_scaler, sample)
+                    if d2 > d1: mono_pass += 1
+                    if e1 < EFRF_MAX: efrf_pass += 1
+                    if D_MIN <= d1 <= D_MAX: density_pass += 1
+                if mono_pass > 40 and efrf_pass > 45 and density_pass > 45:
+                    pinn_valid = "✅ Fully Valid"
+                else:
+                    pinn_valid = "⚠️ Partially Valid"
+            except:
+                pinn_valid = "⚠️ Partially Valid"
+            
+            # Train other models
+            comp_df = train_and_compare(X_train_scaled, X_test_scaled, y_train, y_test)
+            pinn_row = pd.DataFrame([{
+                'Model': 'PINN (Proposed)',
+                'R²': pinn_r2,
+                'RMSE': pinn_rmse,
+                'MAE': pinn_mae,
+                'Physical_Validity': pinn_valid
+            }])
+            comp_df = pd.concat([pinn_row, comp_df], ignore_index=True)
+            
+            # Show trade-off warning if R² < 0.8 but physical validity is high
+            if pinn_r2 < 0.8 and pinn_valid == "✅ Fully Valid":
+                st.warning("⚠️ **Trade-off Detected:** R² is moderate (<0.8) but physical validity is fully satisfied. The model prioritises physics constraints over pure data fit to avoid physically impossible solutions. This is expected in True PINN frameworks.")
+            
+            # Charts
+            col1, col2 = st.columns(2)
+            with col1:
+                colors_r2 = ['#2ecc71' if m == 'PINN (Proposed)' else '#3498db' for m in comp_df['Model']]
+                fig_r2 = go.Figure(data=[
+                    go.Bar(
+                        x=comp_df['Model'], 
+                        y=comp_df['R²'],
+                        marker_color=colors_r2,
+                        text=[f"{v:.4f}" for v in comp_df['R²']],
+                        textposition='outside'
+                    )
+                ])
+                fig_r2.update_layout(
+                    title='<b>R² Score Comparison</b>',
+                    yaxis=dict(title='R² Score', range=[0, 1.05]),
+                    height=350,
+                    showlegend=False
+                )
+                st.plotly_chart(fig_r2, use_container_width=True)
+            with col2:
+                colors_rmse = ['#e74c3c' if m == 'PINN (Proposed)' else '#95a5a6' for m in comp_df['Model']]
+                fig_rmse = go.Figure(data=[
+                    go.Bar(
+                        x=comp_df['Model'], 
+                        y=comp_df['RMSE'],
+                        marker_color=colors_rmse,
+                        text=[f"{v:.4f}" for v in comp_df['RMSE']],
+                        textposition='outside'
+                    )
+                ])
+                fig_rmse.update_layout(
+                    title='<b>RMSE Comparison</b>',
+                    yaxis=dict(title='RMSE (MPa)'),
+                    height=350,
+                    showlegend=False
+                )
+                st.plotly_chart(fig_rmse, use_container_width=True)
+            
+            # Table
+            st.dataframe(
+                comp_df.style.highlight_max(subset=['R²'], color='lightgreen')
+                          .highlight_min(subset=['RMSE', 'MAE'], color='lightcoral'),
+                use_container_width=True,
+                hide_index=True
+            )
+            comp_df_for_pdf = comp_df.copy()
+        else:
+            st.info("👆 Please click 'Predict & Optimize' to see the model performance comparison.")
+    
+    # === TAB 4: Training Curves ===
+    with tab4:
+        st.markdown("### 📈 Training Curves")
+        fig_loss = plot_training_curves(loss_history)
+        if fig_loss:
+            st.plotly_chart(fig_loss, use_container_width=True)
+        else:
+            st.info("Loss history not available.")
+    
+    # === TAB 5: Report ===
+    with tab5:
+        st.markdown("### 📄 Comprehensive Report (PDF)")
+        st.caption("Download a complete report with formulation details, predictions, and model comparison.")
+        
+        if predict_btn:
+            status = "PASS" if (density_ok and tensile_ok and efrf_ok and mcc_ok) else "FAIL"
+            timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            pdf_data = generate_full_pdf_report(
+                api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm, pressure, speed, granule,
+                density, tensile, er, efrf, status, timestamp,
+                model_comparison_df=comp_df
+            )
+            
+            st.download_button(
+                label="📥 Download Full Report (PDF)",
+                data=pdf_data,
+                file_name=f"formulation_report_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
+            st.success("✅ One-click download — includes formulation, predictions, and model comparison.")
+        else:
+            st.info("👆 Please click 'Predict & Optimize' to generate the report.")
+    
+    # === PREDICTION LOGIC (runs when button is clicked) ===
     if predict_btn:
         if abs(total - 100) > 0.1:
             st.warning("⚠️ Formulation must sum to 100%")
         else:
-            inputs = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
-            with st.spinner("🧠 Running prediction..."):
-                density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs)
+            # Apply backend normalization
+            api_norm, binder_norm, pvpp_norm, mgst_norm, mcc_norm = normalize_components(api, binder, pvpp, mgst, mcc)
+            inputs_norm = [api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm, pressure, speed, granule]
             
+            with st.spinner("🧠 Running prediction..."):
+                density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs_norm)
+            
+            # Display results
             kpi_cols = st.columns(3)
             kpi_cols[0].metric("Density", f"{density:.3f}", delta=f"[{D_MIN:.2f}, {D_MAX:.2f}]")
             kpi_cols[1].metric("Tensile", f"{tensile:.3f} MPa", delta=f">= {TENSILE_MIN:.2f} PASS" if tensile >= TENSILE_MIN else f"< {TENSILE_MIN:.2f} FAIL")
@@ -1479,7 +1657,7 @@ with col_right:
             density_ok = (density >= D_MIN and density <= D_MAX)
             tensile_ok = (tensile >= TENSILE_MIN)
             efrf_ok = (efrf < EFRF_MAX)
-            mcc_ok = (mcc <= MCC_MAX)
+            mcc_ok = (mcc_norm <= MCC_MAX)
             
             if density_ok and tensile_ok and efrf_ok and mcc_ok:
                 st.success(f"✅ Formulation satisfies all constraints (Density: {density:.3f}, σt ≥ {TENSILE_MIN:.2f}, EFRF < {EFRF_MAX:.2f})")
@@ -1495,7 +1673,7 @@ with col_right:
             
             with st.expander("🔬 Physics Verification"):
                 try:
-                    inputs_with_features = add_interaction_features(np.array([inputs]))[0]
+                    inputs_with_features = add_interaction_features(np.array([inputs_norm]))[0]
                     inputs_scaled = scaler.transform([inputs_with_features])
                     X_tensor = torch.tensor(inputs_scaled, dtype=torch.float32)
                     with torch.no_grad():
@@ -1506,7 +1684,7 @@ with col_right:
                 except:
                     pass
             
-            # --- NSGA-II ---
+            # NSGA-II
             st.markdown("### ⚙️ NSGA-II")
             bounds = np.array([
                 [60, 100], [0.1, 20], [0.1, 12], [0.01, 3.0], 
@@ -1530,156 +1708,8 @@ with col_right:
                         st.success(f"Optimal: API = {pareto_api[best_idx]:.2f}% | EFRF = {objectives[front0, 1][best_idx]:.4f}")
                     else:
                         st.warning("No feasible solutions found")
-            
-            # --- TABS ---
-            tab1, tab2, tab3, tab4, tab5 = st.tabs(
-                ["📉 Pareto Front", "🔍 Sensitivity", "📊 Model Comparison", "📈 Training Curves", "📄 Report"]
-            )
-            
-            with tab1:
-                st.markdown("### 📉 Pareto Front")
-                fig_p = plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf)
-                if fig_p:
-                    st.plotly_chart(fig_p, use_container_width=True)
                 else:
-                    st.info("Pareto front not available")
-            
-            with tab2:
-                st.markdown("### 🔍 Sensitivity Analysis")
-                fig_s = plot_sensitivity_plotly(inputs, model, scaler, y_scaler)
-                if fig_s:
-                    st.plotly_chart(fig_s, use_container_width=True)
-                else:
-                    st.info("Sensitivity analysis not available")
-            
-            with tab3:
-                st.markdown("### 📊 Model Performance Comparison")
-                st.caption("Hold-out test set (20% of data) — R², RMSE, MAE, and Physical Validity")
-                
-                X_train, X_test, y_train, y_test = train_test_split(
-                    df[feature_names].values, df['Tensile_Strength_MPa'].values,
-                    test_size=0.2, random_state=42
-                )
-                X_train_aug = add_interaction_features(X_train)
-                X_test_aug = add_interaction_features(X_test)
-                X_train_scaled = scaler.transform(X_train_aug)
-                X_test_scaled = scaler.transform(X_test_aug)
-                
-                pinn_pred_scaled = model.predict(torch.tensor(X_test_scaled, dtype=torch.float32))
-                pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
-                pinn_r2 = r2_score(y_test, pinn_pred)
-                pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
-                pinn_mae = mean_absolute_error(y_test, pinn_pred)
-                
-                pinn_valid = "✅ Fully Valid"
-                try:
-                    mono_pass = 0
-                    efrf_pass = 0
-                    density_pass = 0
-                    for _ in range(50):
-                        idx = np.random.randint(0, len(X_test))
-                        sample = X_test[idx].copy()
-                        d1, _, _, e1 = predict_pinn(model, scaler, y_scaler, sample)
-                        sample[5] = min(sample[5] * 1.2, PRESSURE_MAX)
-                        d2, _, _, e2 = predict_pinn(model, scaler, y_scaler, sample)
-                        if d2 > d1: mono_pass += 1
-                        if e1 < EFRF_MAX: efrf_pass += 1
-                        if D_MIN <= d1 <= D_MAX: density_pass += 1
-                    if mono_pass > 40 and efrf_pass > 45 and density_pass > 45:
-                        pinn_valid = "✅ Fully Valid"
-                    else:
-                        pinn_valid = "⚠️ Partially Valid"
-                except:
-                    pinn_valid = "⚠️ Partially Valid"
-                
-                comp_df = train_and_compare(X_train_scaled, X_test_scaled, y_train, y_test)
-                pinn_row = pd.DataFrame([{
-                    'Model': 'PINN (Proposed)',
-                    'R²': pinn_r2,
-                    'RMSE': pinn_rmse,
-                    'MAE': pinn_mae,
-                    'Physical_Validity': pinn_valid
-                }])
-                comp_df = pd.concat([pinn_row, comp_df], ignore_index=True)
-                
-                if pinn_r2 < 0.8 and pinn_valid == "✅ Fully Valid":
-                    st.warning("⚠️ **Trade-off Detected:** R² is moderate (<0.8) but physical validity is fully satisfied. The model prioritises physics constraints over pure data fit to avoid physically impossible solutions. This is expected in True PINN frameworks.")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    colors_r2 = ['#2ecc71' if m == 'PINN (Proposed)' else '#3498db' for m in comp_df['Model']]
-                    fig_r2 = go.Figure(data=[
-                        go.Bar(
-                            x=comp_df['Model'], 
-                            y=comp_df['R²'],
-                            marker_color=colors_r2,
-                            text=[f"{v:.4f}" for v in comp_df['R²']],
-                            textposition='outside'
-                        )
-                    ])
-                    fig_r2.update_layout(
-                        title='<b>R² Score Comparison</b>',
-                        yaxis=dict(title='R² Score', range=[0, 1.05]),
-                        height=350,
-                        showlegend=False
-                    )
-                    st.plotly_chart(fig_r2, use_container_width=True)
-                with col2:
-                    colors_rmse = ['#e74c3c' if m == 'PINN (Proposed)' else '#95a5a6' for m in comp_df['Model']]
-                    fig_rmse = go.Figure(data=[
-                        go.Bar(
-                            x=comp_df['Model'], 
-                            y=comp_df['RMSE'],
-                            marker_color=colors_rmse,
-                            text=[f"{v:.4f}" for v in comp_df['RMSE']],
-                            textposition='outside'
-                        )
-                    ])
-                    fig_rmse.update_layout(
-                        title='<b>RMSE Comparison</b>',
-                        yaxis=dict(title='RMSE (MPa)'),
-                        height=350,
-                        showlegend=False
-                    )
-                    st.plotly_chart(fig_rmse, use_container_width=True)
-                
-                st.dataframe(
-                    comp_df.style.highlight_max(subset=['R²'], color='lightgreen')
-                              .highlight_min(subset=['RMSE', 'MAE'], color='lightcoral'),
-                    use_container_width=True,
-                    hide_index=True
-                )
-                comp_df_for_pdf = comp_df.copy()
-            
-            with tab4:
-                st.markdown("### 📈 Training Curves")
-                fig_loss = plot_training_curves(loss_history)
-                if fig_loss:
-                    st.plotly_chart(fig_loss, use_container_width=True)
-                else:
-                    st.info("Loss history not available")
-            
-            with tab5:
-                st.markdown("### 📄 Comprehensive Report (PDF)")
-                st.caption("Download a complete report with formulation details, predictions, and model comparison.")
-                
-                status = "PASS" if (density_ok and tensile_ok and efrf_ok and mcc_ok) else "FAIL"
-                timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                
-                pdf_data = generate_full_pdf_report(
-                    api, mcc, pvpp, mgst, binder, pressure, speed, granule,
-                    density, tensile, er, efrf, status, timestamp,
-                    model_comparison_df=comp_df
-                )
-                
-                st.download_button(
-                    label="📥 Download Full Report (PDF)",
-                    data=pdf_data,
-                    file_name=f"formulation_report_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True
-                )
-                st.success("✅ One-click download — includes formulation, predictions, and model comparison.")
+                    st.warning("No Pareto front found. Try adjusting NSGA-II parameters.")
 
 st.markdown("---")
 st.caption(f"🔬 **Multi-Task True PINN — v29.9 (Backend Normalization + Physical Validity)**")
