@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 28.0 (Enhanced Comparison Table, Colored Diagrams, PDF Report)
+Version: 28.1 (Fixed EFRF & DENSITY_MAX)
 """
 
 import streamlit as st
@@ -33,7 +33,7 @@ warnings.filterwarnings('ignore')
 TENSILE_MIN = 1.90          # MPa
 EFRF_MAX = 0.40             # dimensionless
 MCC_MAX = 8.0               # %
-DENSITY_MAX = 0.99
+DENSITY_MAX = 0.97          # Changed from 0.99 to 0.97 (more realistic)
 PRESSURE_MAX = 300.0        # MPa
 
 NSGA_POP_SIZE = 100
@@ -55,7 +55,7 @@ except ImportError:
     XGB_AVAILABLE = False
 
 # ================================================================
-# 2. SESSION STATE
+# 2. SESSION STATE (unchanged)
 # ================================================================
 
 DEFAULTS = {
@@ -115,7 +115,7 @@ safe_initialize()
 clamp_session_state()
 
 # ================================================================
-# 3. FEATURE ENGINEERING
+# 3. FEATURE ENGINEERING (unchanged)
 # ================================================================
 
 def add_interaction_features(X_raw):
@@ -138,7 +138,7 @@ def add_interaction_features(X_raw):
     ], axis=1)
 
 # ================================================================
-# 4. MULTI-TASK TRUE PINN MODEL
+# 4. MULTI-TASK TRUE PINN MODEL (unchanged)
 # ================================================================
 
 class MultiTaskTruePINN(nn.Module):
@@ -253,7 +253,7 @@ class MultiTaskTruePINN(nn.Module):
         return total_loss, loss_dict
 
 # ================================================================
-# 5. DATA GENERATION
+# 5. DATA GENERATION (unchanged)
 # ================================================================
 
 def generate_pinn_data(n_samples=600, random_state=42):
@@ -321,7 +321,7 @@ def generate_pinn_data(n_samples=600, random_state=42):
     return df, feature_names
 
 # ================================================================
-# 6. PDF GENERATION (Full Report with Comparison Table)
+# 6. PDF GENERATION (unchanged)
 # ================================================================
 
 def sanitize_text(text):
@@ -339,7 +339,6 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf = FPDF()
     pdf.add_page()
     
-    # Header
     pdf.set_font("Arial", "B", 18)
     pdf.cell(0, 10, sanitize_text("Formulation Optimization Report"), ln=True, align="C")
     pdf.set_font("Arial", "I", 11)
@@ -348,7 +347,6 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.cell(0, 6, f"Date: {timestamp}", ln=True, align="C")
     pdf.ln(4)
     
-    # Author
     pdf.set_font("Arial", "B", 12)
     pdf.set_text_color(0, 0, 150)
     pdf.cell(0, 8, "Chem. Eng. Babuker A. Abdalla, PhD Researcher", ln=True, align="C")
@@ -357,7 +355,6 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.cell(0, 6, "Nile Valley University, Postgraduate College, Sudan", ln=True, align="C")
     pdf.ln(5)
     
-    # 1. Formulation Summary
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, sanitize_text("1. Formulation Summary"), ln=True, fill=True)
@@ -383,7 +380,6 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     
     pdf.ln(4)
     
-    # 2. Process Parameters
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, sanitize_text("2. Process Parameters"), ln=True, fill=True)
@@ -404,7 +400,6 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     
     pdf.ln(4)
     
-    # 3. Prediction Results
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, sanitize_text("3. Prediction Results"), ln=True, fill=True)
@@ -428,7 +423,6 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     
     pdf.ln(4)
     
-    # 4. Status
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, sanitize_text("4. Overall Status"), ln=True, fill=True)
@@ -442,7 +436,6 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.set_text_color(0, 0, 0)
     pdf.ln(4)
     
-    # 5. Model Comparison (if provided)
     if model_comparison_df is not None and not model_comparison_df.empty:
         pdf.set_font("Arial", "B", 13)
         pdf.set_fill_color(230, 230, 230)
@@ -465,7 +458,6 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
             pdf.cell(40, 6, sanitize_text(str(row['Physics'])), 1, 1, "L")
         pdf.ln(4)
     
-    # 6. Recommendations
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, sanitize_text("6. Recommendations"), ln=True, fill=True)
@@ -489,7 +481,6 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     
     pdf.ln(4)
     
-    # 7. Contact
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, sanitize_text("7. Contact Information"), ln=True, fill=True)
@@ -502,7 +493,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.ln(3)
     pdf.set_y(270)
     pdf.set_font("Arial", "I", 8)
-    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v28.0", ln=True, align="C")
+    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v28.1", ln=True, align="C")
     
     pdf_bytes = pdf.output(dest="S")
     if isinstance(pdf_bytes, bytearray):
@@ -513,16 +504,17 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
         return str(pdf_bytes).encode('latin1')
 
 # ================================================================
-# 7. NSGA-II
+# 7. NSGA-II (FIXED: Correct EFRF calculation)
 # ================================================================
 
 class NSGAII:
-    def __init__(self, model, scaler, bounds,
+    def __init__(self, model, scaler, y_scaler, bounds,
                  pop_size=NSGA_POP_SIZE,
                  n_generations=NSGA_GENERATIONS,
                  w_tensile=0.0):
         self.model = model
         self.scaler = scaler
+        self.y_scaler = y_scaler
         self.bounds = bounds
         self.pop_size = pop_size
         self.n_generations = n_generations
@@ -574,16 +566,19 @@ class NSGAII:
                 X_tensor = torch.FloatTensor(inputs_scaled)
                 
                 with torch.no_grad():
-                    pred = self.model.predict(X_tensor)[0]
+                    pred_scaled = self.model.predict(X_tensor)[0]
+                    # --- FIX: Inverse transform to get actual values ---
+                    pred_actual = self.y_scaler.inverse_transform([pred_scaled])[0]
                 
-                tensile = float(pred[1])
-                er = float(pred[2])
+                density = float(pred_actual[0])
+                tensile = float(pred_actual[1])
+                er = float(pred_actual[2])
                 
                 if tensile < 0.01:
                     tensile = 0.01
                     efrf = 10.0
                 else:
-                    efrf = er / tensile
+                    efrf = er / tensile  # Correct EFRF from actual values
                     efrf = max(0.0001, min(efrf, 5.0))
                 
                 constraints[i] = (tensile >= TENSILE_MIN and efrf < EFRF_MAX)
@@ -789,7 +784,7 @@ class NSGAII:
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 8. TRAIN MODEL
+# 8. TRAIN MODEL (unchanged)
 # ================================================================
 
 @st.cache_resource
@@ -932,7 +927,7 @@ def load_pinn_model():
     return model, scaler, y_scaler, feature_names, df, {'train': [], 'val': []}
 
 # ================================================================
-# 9. PREDICTION & PLOTS
+# 9. PREDICTION & PLOTS (FIXED: use y_scaler)
 # ================================================================
 
 def predict_pinn(model, scaler, y_scaler, inputs):
@@ -1096,10 +1091,10 @@ def train_and_compare(X_train, X_test, y_train, y_test):
     return pd.DataFrame(results)
 
 # ================================================================
-# 10. STREAMLIT UI
+# 10. STREAMLIT UI (UPDATED: pass y_scaler to NSGA-II)
 # ================================================================
 
-st.set_page_config(page_title="PINN Framework v28", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Framework v28.1", page_icon="🧬", layout="wide")
 clamp_session_state()
 
 # --- HERO SECTION ---
@@ -1107,7 +1102,7 @@ st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); 
             padding: 2rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
     <h1 style="color: #ffffff; font-size: 2.5rem; margin: 0;">
-        🧬 Hybrid AI Framework v28.0
+        🧬 Hybrid AI Framework v28.1
     </h1>
     <p style="color: #a8b2d1; font-size: 1.2rem; margin: 0.5rem 0 0 0;">
         Physics-Informed Neural Network · Multi-Objective Optimization
@@ -1129,15 +1124,16 @@ with st.sidebar:
     - ✅ **Monotonicity:** ∂D/∂P > 0
     - ✅ **Boundary:** 0.4 < D < 0.98
     - ✅ **MCC:** ≤ {MCC_MAX:.1f}%
-    - ✅ **Density:** ≤ 1.0
+    - ✅ **Density:** ≤ {DENSITY_MAX:.2f}
     
     **Multi-Task PINN:**
     - 5 outputs (D, σt, ER, k, A)
     - Adam → LBFGS hybrid
     - **NSGA-II:** pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS}
     - **Binder max:** {BINDER_MAX:.1f}%
+    - **Fixed EFRF calculation** ✅
     """)
-    st.info("🔬 **v28.0** — Enhanced Comparison & PDF Report")
+    st.info("🔬 **v28.1** — Fixed EFRF & DENSITY_MAX")
 
 # --- LOAD MODEL ---
 with st.spinner("🔄 Training Multi-Task PINN..."):
@@ -1204,7 +1200,7 @@ with col_right:
             
             # --- KPIs ---
             kpi_cols = st.columns(3)
-            kpi_cols[0].metric("Density", f"{density:.3f}", delta="0.99 ideal")
+            kpi_cols[0].metric("Density", f"{density:.3f}", delta=f"≤ {DENSITY_MAX:.2f} ideal")
             kpi_cols[1].metric("Tensile", f"{tensile:.3f} MPa", delta=f">= {TENSILE_MIN:.2f} PASS" if tensile >= TENSILE_MIN else f"< {TENSILE_MIN:.2f} FAIL")
             kpi_cols[2].metric("EFRF", f"{efrf:.4f}", delta=f"< {EFRF_MAX:.2f} PASS" if efrf < EFRF_MAX else f">= {EFRF_MAX:.2f} FAIL")
             
@@ -1245,7 +1241,8 @@ with col_right:
             ])
             with st.spinner(f"🔄 Running NSGA-II (pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS})..."):
                 start_time = time.time()
-                nsga = NSGAII(model, scaler, bounds, pop_size=NSGA_POP_SIZE, n_generations=NSGA_GENERATIONS, w_tensile=0.0)
+                # Pass y_scaler to NSGA-II
+                nsga = NSGAII(model, scaler, y_scaler, bounds, pop_size=NSGA_POP_SIZE, n_generations=NSGA_GENERATIONS, w_tensile=0.0)
                 pop, objectives, constraints, fronts = nsga.run()
                 elapsed = time.time() - start_time
                 st.caption(f"⏱️ NSGA-II completed in {elapsed:.1f} seconds")
@@ -1262,7 +1259,7 @@ with col_right:
                     else:
                         st.warning("No feasible solutions found")
             
-            # --- TABS FOR ORGANIZED RESULTS ---
+            # --- TABS ---
             tab1, tab2, tab3, tab4 = st.tabs(["📉 Pareto Front", "🔍 Sensitivity", "📊 Model Comparison", "📄 Report"])
             
             with tab1:
@@ -1285,7 +1282,6 @@ with col_right:
                 st.markdown("### 📊 Model Performance Comparison")
                 st.caption("Hold-out test set (20% of data) — R², RMSE, MAE")
                 
-                # Prepare data
                 X_train, X_test, y_train, y_test = train_test_split(
                     df[feature_names].values, df['Tensile_Strength_MPa'].values,
                     test_size=0.2, random_state=42
@@ -1295,23 +1291,19 @@ with col_right:
                 X_train_scaled = scaler.transform(X_train_aug)
                 X_test_scaled = scaler.transform(X_test_aug)
                 
-                # PINN predictions on test set
                 pinn_pred_scaled = model.predict(torch.FloatTensor(X_test_scaled))
                 pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
                 pinn_r2 = r2_score(y_test, pinn_pred)
                 pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
                 pinn_mae = mean_absolute_error(y_test, pinn_pred)
                 
-                # Baseline models
                 comp_df = train_and_compare(X_train_scaled, X_test_scaled, y_train, y_test)
                 pinn_row = pd.DataFrame([{'Model': 'PINN (Proposed)', 'R²': pinn_r2, 'RMSE': pinn_rmse, 'MAE': pinn_mae, 'Physics': '✅ Enforced'}])
                 comp_df = pd.concat([pinn_row, comp_df], ignore_index=True)
                 
-                # --- Colored Diagrams ---
                 col1, col2 = st.columns(2)
                 
                 with col1:
-                    # R² Bar Chart (Colored)
                     colors_r2 = ['#2ecc71' if m == 'PINN (Proposed)' else '#3498db' for m in comp_df['Model']]
                     fig_r2 = go.Figure(data=[
                         go.Bar(
@@ -1331,7 +1323,6 @@ with col_right:
                     st.plotly_chart(fig_r2, use_container_width=True)
                 
                 with col2:
-                    # RMSE Bar Chart (Colored)
                     colors_rmse = ['#e74c3c' if m == 'PINN (Proposed)' else '#95a5a6' for m in comp_df['Model']]
                     fig_rmse = go.Figure(data=[
                         go.Bar(
@@ -1350,7 +1341,6 @@ with col_right:
                     )
                     st.plotly_chart(fig_rmse, use_container_width=True)
                 
-                # --- Comparison Table (Stylized) ---
                 st.dataframe(
                     comp_df.style.highlight_max(subset=['R²'], color='lightgreen')
                               .highlight_min(subset=['RMSE', 'MAE'], color='lightcoral'),
@@ -1358,7 +1348,6 @@ with col_right:
                     hide_index=True
                 )
                 
-                # Store comparison for PDF
                 comp_df_for_pdf = comp_df.copy()
             
             with tab4:
@@ -1368,7 +1357,6 @@ with col_right:
                 status = "PASS" if (tensile >= TENSILE_MIN and efrf < EFRF_MAX) else "FAIL"
                 timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 
-                # Generate PDF with comparison data
                 pdf_data = generate_full_pdf_report(
                     api, mcc, pvpp, mgst, binder, pressure, speed, granule,
                     density, tensile, er, efrf, status, timestamp,
@@ -1385,5 +1373,5 @@ with col_right:
                 st.success("✅ One-click download — includes formulation, predictions, and model comparison.")
 
 st.markdown("---")
-st.caption(f"🔬 **Multi-Task True PINN — v28.0 (Enhanced Comparison & PDF)**")
+st.caption(f"🔬 **Multi-Task True PINN — v28.1 (Fixed EFRF & DENSITY_MAX)**")
 st.caption(f"📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Postgraduate College, Sudan")
