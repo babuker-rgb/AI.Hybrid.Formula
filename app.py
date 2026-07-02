@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 29.9 (Fully Optimized - Pareto Front Fixed)
+Version: 29.10 (Enhanced Tensile Physics - Target R² ≥ 0.85)
 """
 
 import streamlit as st
@@ -27,7 +27,7 @@ import time
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. USER-CONFIGURABLE PARAMETERS
+# 0. USER-CONFIGURABLE PARAMETERS (ENHANCED v29.10)
 # ================================================================
 
 TENSILE_MIN = 1.90          # MPa
@@ -41,9 +41,9 @@ PRESSURE_MAX = 300.0        # MPa
 BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
-# --- Balanced Hyperparameters ---
-N_SAMPLES = 4000            
-ADAM_EPOCHS = 700           
+# --- Enhanced Hyperparameters ---
+N_SAMPLES = 5000            # زيادة العينات (من 4000)
+ADAM_EPOCHS = 800           # زيادة طفيفة (من 700)
 LBFGS_STEPS = 3             
 MONOTONICITY_FREQUENCY = 10 
 
@@ -56,16 +56,17 @@ else:
     NSGA_POP_SIZE = 80      
     NSGA_GENERATIONS = 60   
 
-# --- Loss Weights ---
+# --- ENHANCED Loss Weights ---
 W_DENSITY = 12.0            
-TENSILE_DATA_WEIGHT = 2.0   
-TENSILE_PHYSICS_WEIGHT = 0.5
+TENSILE_DATA_WEIGHT = 2.5   # زيادة (من 2.0)
+TENSILE_PHYSICS_WEIGHT = 2.0 # زيادة كبيرة (من 0.5)
+TENSILE_BINDER_WEIGHT = 0.5 # جديد: علاقة المقاومة مع الرابط
 
 # --- Physics / Data Balance ---
 W_DATA_INIT = 1.0          
 W_PHYSICS_INIT = 0.3       
 W_DATA_FINAL = 1.0         
-W_PHYSICS_FINAL = 0.6      
+W_PHYSICS_FINAL = 0.7       # زيادة طفيفة (من 0.6)
 
 # --- Safety Penalty (Soft) ---
 SAFETY_PENALTY_WEIGHT = 5.0     
@@ -88,7 +89,7 @@ except ImportError:
     XGB_AVAILABLE = False
 
 # ================================================================
-# 2. SESSION STATE
+# 2. SESSION STATE (UNCHANGED)
 # ================================================================
 
 DEFAULTS = {
@@ -148,29 +149,22 @@ safe_initialize()
 clamp_session_state()
 
 # ================================================================
-# 3. DYNAMIC NORMALIZATION (BACKEND)
+# 3. DYNAMIC NORMALIZATION (UNCHANGED)
 # ================================================================
 
 def normalize_components(api, binder, pvpp, mgst, mcc):
-    """
-    Dynamic Normalization - converts raw weights to percentages summing to 100%.
-    Used only in the backend (NSGA-II and data generation).
-    """
-    # 1. Protect against zeros/negatives
     api = max(api, 0.1)
     binder = max(binder, 0.1)
     pvpp = max(pvpp, 0.1)
     mgst = max(mgst, 0.01)
     mcc = max(mcc, 0.1)
     
-    # 2. Clip to reasonable upper bounds
     api = min(api, 100.0)
     binder = min(binder, 15.0)
     pvpp = min(pvpp, 15.0)
     mgst = min(mgst, 3.0)
     mcc = min(mcc, 25.0)
     
-    # 3. Normalize to sum = 100%
     total = api + binder + pvpp + mgst + mcc
     if total <= 0:
         total = 1.0
@@ -181,7 +175,6 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
     mgst_norm = (mgst / total) * 100
     mcc_norm = (mcc / total) * 100
     
-    # 4. Enforce MCC ≤ 8%
     if mcc_norm > MCC_MAX:
         excess = mcc_norm - MCC_MAX
         mcc_norm = MCC_MAX
@@ -192,7 +185,6 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
             pvpp_norm += excess * (pvpp_norm / other_sum)
             mgst_norm += excess * (mgst_norm / other_sum)
     
-    # 5. Enforce API ≥ 85%
     if api_norm < 85.0:
         deficit = 85.0 - api_norm
         api_norm = 85.0
@@ -202,7 +194,6 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
             pvpp_norm -= deficit * (pvpp_norm / other_sum) if pvpp_norm > 0 else 0
             mgst_norm -= deficit * (mgst_norm / other_sum) if mgst_norm > 0 else 0
     
-    # 6. Enforce API ≤ 95%
     if api_norm > 95.0:
         excess = api_norm - 95.0
         api_norm = 95.0
@@ -213,14 +204,12 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
             mgst_norm += excess * (mgst_norm / other_sum) if mgst_norm > 0 else 0
             mcc_norm += excess * (mcc_norm / other_sum) if mcc_norm > 0 else 0
     
-    # 7. Final clipping to allowed ranges
     api_norm = np.clip(api_norm, 85, 95)
     binder_norm = np.clip(binder_norm, 0.5, 5.0)
     pvpp_norm = np.clip(pvpp_norm, 0.5, 6.0)
     mgst_norm = np.clip(mgst_norm, 0.01, 1.2)
     mcc_norm = np.clip(mcc_norm, 0, MCC_MAX)
     
-    # 8. Final re-normalization to ensure sum = 100%
     total_final = api_norm + binder_norm + pvpp_norm + mgst_norm + mcc_norm
     if total_final > 0 and abs(total_final - 100) > 0.1:
         scale = 100 / total_final
@@ -230,7 +219,6 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
         mgst_norm *= scale
         mcc_norm *= scale
     
-    # 9. Final clip after re-normalization
     api_norm = np.clip(api_norm, 85, 95)
     binder_norm = np.clip(binder_norm, 0.5, 5.0)
     pvpp_norm = np.clip(pvpp_norm, 0.5, 6.0)
@@ -259,7 +247,7 @@ def add_interaction_features(X_raw):
     ], axis=1)
 
 # ================================================================
-# 4. MULTI-TASK TRUE PINN MODEL (PHYSICS ENFORCED)
+# 4. MULTI-TASK TRUE PINN MODEL (ENHANCED PHYSICS)
 # ================================================================
 
 def bounded_density(raw):
@@ -268,11 +256,12 @@ def bounded_density(raw):
 class MultiTaskTruePINN(nn.Module):
     def __init__(self, input_dim=13, output_dim=5):
         super(MultiTaskTruePINN, self).__init__()
+        # ENHANCED: larger network
         self.network = nn.Sequential(
-            nn.Linear(input_dim, 256), nn.LayerNorm(256), nn.Tanh(), nn.Dropout(0.05),
-            nn.Linear(256, 256), nn.LayerNorm(256), nn.Tanh(), nn.Dropout(0.05),
-            nn.Linear(256, 128), nn.LayerNorm(128), nn.Tanh(),
-            nn.Linear(128, output_dim)
+            nn.Linear(input_dim, 384), nn.LayerNorm(384), nn.Tanh(), nn.Dropout(0.05),
+            nn.Linear(384, 384), nn.LayerNorm(384), nn.Tanh(), nn.Dropout(0.05),
+            nn.Linear(384, 192), nn.LayerNorm(192), nn.Tanh(),
+            nn.Linear(192, output_dim)
         )
 
     def forward(self, X):
@@ -300,6 +289,7 @@ class MultiTaskTruePINN(nn.Module):
                      compute_grad=True):
         pressure_real = X_raw[:, 5].view(-1, 1)
         mcc_real = X_raw[:, 1].view(-1, 1)
+        binder_real = X_raw[:, 4].view(-1, 1)
 
         y_pred = self.forward(X_scaled)
         density_pred = y_pred[:, 0:1]
@@ -331,7 +321,12 @@ class MultiTaskTruePINN(nn.Module):
         )
         density_preference_loss = torch.mean(torch.relu(density_pred - DENSITY_PREFERENCE_LIMIT) ** 2) * DENSITY_PREFERENCE_WEIGHT
 
+        # --- ENHANCED TENSILE PHYSICS ---
+        # 1. Tensile should increase with density (original)
         tensile_physics_loss = torch.mean(torch.relu(0.3 - (tensile_pred * density_pred)) ** 2) * TENSILE_PHYSICS_WEIGHT
+        
+        # 2. NEW: Tensile should increase with binder content (physical law)
+        tensile_binder_loss = torch.mean(torch.relu(0.05 - (tensile_pred * binder_real)) ** 2) * TENSILE_BINDER_WEIGHT
 
         if compute_grad:
             Xg = X_scaled.clone().detach().requires_grad_(True)
@@ -358,7 +353,7 @@ class MultiTaskTruePINN(nn.Module):
 
         total_loss = (
             w_data * data_loss +
-            w_physics * (heckel_loss + efrf_loss + monotonic_loss + boundary_loss + tensile_physics_loss) +
+            w_physics * (heckel_loss + efrf_loss + monotonic_loss + boundary_loss + tensile_physics_loss + tensile_binder_loss) +
             w_mcc * mcc_loss +
             w_density * density_penalty +
             efrf_safe_loss +
@@ -372,6 +367,7 @@ class MultiTaskTruePINN(nn.Module):
             'heckel_loss': heckel_loss.item(),
             'efrf_loss': efrf_loss.item(),
             'tensile_physics_loss': tensile_physics_loss.item(),
+            'tensile_binder_loss': tensile_binder_loss.item(),
             'mcc_loss': mcc_loss.item(),
             'density_penalty': density_penalty.item(),
             'monotonic_loss': monotonic_loss.item() if compute_grad else 0.0,
@@ -383,7 +379,7 @@ class MultiTaskTruePINN(nn.Module):
         return total_loss, loss_dict
 
 # ================================================================
-# 5. DATA GENERATION
+# 5. DATA GENERATION (ENHANCED - NONLINEAR TENSILE)
 # ================================================================
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
@@ -409,6 +405,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         
         X[i] = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
 
+        # Heckel physics for density
         x = np.random.uniform(x_min, x_max)
         max_trials = 30
         for _ in range(max_trials):
@@ -428,11 +425,21 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         noise_d = np.random.normal(0, 0.01)
         D = np.clip(D_target + noise_d, D_MIN, D_MAX)
 
-        strength = np.clip(
-            3.5 - 0.15 * (api - 85) + 0.3 * binder + 0.008 * (pressure - 100)
-            - 1.5 * mgst - 0.02 * (speed - 10) + np.random.normal(0, 0.04),
-            0.5, 6.0
+        # --- ENHANCED TENSILE STRENGTH (NONLINEAR INTERACTIONS) ---
+        strength = (
+            3.5 
+            - 0.15 * (api - 85) 
+            + 0.3 * binder 
+            + 0.008 * (pressure - 100)
+            - 1.5 * mgst 
+            - 0.02 * (speed - 10)
+            + 0.05 * (api - 85) * binder      # تفاعل API × Binder
+            - 0.03 * (pressure - 100) * mgst   # تفاعل Pressure × MgSt
+            + 0.01 * binder * (pressure - 100) / 100  # تفاعل Binder × Pressure
+            + np.random.normal(0, 0.04)
         )
+        strength = np.clip(strength, 0.5, 6.0)
+        
         er = np.clip(
             1.8 + 0.3 * (api - 85)/10 + 0.08 * (speed - 10)/30
             - 0.1 * (pressure - 100)/150 + np.random.normal(0, 0.03),
@@ -450,7 +457,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# 6. PDF GENERATION
+# 6. PDF GENERATION (UNCHANGED - truncated for length)
 # ================================================================
 
 def sanitize_text(text):
@@ -633,7 +640,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.ln(3)
     pdf.set_y(270)
     pdf.set_font("Arial", "I", 8)
-    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v29.9", ln=True, align="C")
+    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v29.10", ln=True, align="C")
     
     pdf_bytes = pdf.output(dest="S")
     if isinstance(pdf_bytes, bytearray):
@@ -644,7 +651,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
         return str(pdf_bytes).encode('latin1')
 
 # ================================================================
-# 7. NSGA-II
+# 7. NSGA-II (UNCHANGED FROM v29.9 - truncated for length)
 # ================================================================
 
 class NSGAII:
@@ -982,7 +989,7 @@ class NSGAII:
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 8. TRAIN MODEL
+# 8. TRAIN MODEL (UNCHANGED - but uses new parameters)
 # ================================================================
 
 @st.cache_resource
@@ -1125,7 +1132,7 @@ def load_pinn_model():
     return model, scaler, y_scaler, feature_names, df, loss_history
 
 # ================================================================
-# 9. PREDICTION & PLOTS
+# 9. PREDICTION & PLOTS (UNCHANGED)
 # ================================================================
 
 def predict_pinn(model, scaler, y_scaler, inputs):
@@ -1345,19 +1352,19 @@ def train_and_compare(X_train, X_test, y_train, y_test):
     return pd.DataFrame(results)
 
 # ================================================================
-# 10. STREAMLIT UI
+# 10. STREAMLIT UI (UNCHANGED)
 # ================================================================
 
 st.cache_resource.clear()
 
-st.set_page_config(page_title="PINN Framework v29.9", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Framework v29.10", page_icon="🧬", layout="wide")
 clamp_session_state()
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); 
             padding: 2rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
     <h1 style="color: #ffffff; font-size: 2.5rem; margin: 0;">
-        🧬 Hybrid AI Framework v29.9
+        🧬 Hybrid AI Framework v29.10
     </h1>
     <p style="color: #a8b2d1; font-size: 1.2rem; margin: 0.5rem 0 0 0;">
         Physics-Informed Neural Network · Multi-Objective Optimization
@@ -1371,29 +1378,30 @@ st.markdown("""
 st.markdown("---")
 
 with st.sidebar:
-    st.markdown("### 📚 Physics Constraints (v29.9)")
+    st.markdown("### 📚 Physics Constraints (v29.10)")
     st.markdown(f"""
     - ✅ **Heckel:** ln(1/(1-D)) = kP + A
     - ✅ **EFRF:** ER / σt < {EFRF_MAX:.2f}
     - ✅ **Monotonicity:** ∂D/∂P > 0 (every {MONOTONICITY_FREQUENCY} epochs)
     - ✅ **Density Preference:** Gentle push toward 0.93–0.96
     - ✅ **EFRF Preference:** Extra penalty for > 0.36
-    - ✅ **Tensile Physics:** Penalize low σt at high D
+    - ✅ **Tensile Physics:** σt × D + σt × Binder (ENHANCED)
     - ✅ **MCC:** ≤ {MCC_MAX:.1f}%
     - ✅ **Density:** {D_MIN:.2f} ≤ D ≤ {D_MAX:.2f}
     
-    **Multi-Task PINN:**
+    **Multi-Task PINN (v29.10):**
     - 5 outputs (D, σt, ER, k, A)
     - Adam ({ADAM_EPOCHS}) → LBFGS ({LBFGS_STEPS})
+    - **Enhanced Network:** 384→384→192 neurons
     - Loss Balance: Data {W_DATA_INIT:.1f}→{W_DATA_FINAL:.1f} / Physics {W_PHYSICS_INIT:.1f}→{W_PHYSICS_FINAL:.1f}
     - NSGA-II: pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS}
-    - **Backend Normalization:** Dynamic normalization applied internally for flexibility
+    - **Backend Normalization:** Dynamic normalization applied internally
     """)
-    st.info(f"🔬 **v29.9** — Backend Normalization + Physical Validity")
+    st.info(f"🔬 **v29.10** — Enhanced Tensile Physics (Target R² ≥ 0.85)")
 
-with st.spinner("🔄 Training Multi-Task PINN..."):
+with st.spinner("🔄 Training Multi-Task PINN (v29.10 Enhanced)..."):
     model, scaler, y_scaler, feature_names, df, loss_history = load_pinn_model()
-st.success("✅ Multi-Task True PINN trained successfully")
+st.success("✅ Multi-Task True PINN (v29.10) trained successfully")
 
 st.markdown("### 🧪 Quick Experiments")
 exp_cols = st.columns(4)
@@ -1438,10 +1446,10 @@ with col_left:
         speed = st.slider("🔄 Speed (rpm)", 1.0, 50.0, get_safe_value('speed'), 0.5, key="speed")
         granule = st.slider("🔬 Granule Size (µm)", 30.0, 250.0, get_safe_value('granule'), 1.0, key="granule")
     
-    predict_btn = st.button("🔬 Predict & Optimize", use_container_width=True)
+    predict_btn = st.button("🔬 Predict & Optimize (v29.10)", use_container_width=True)
 
 # ================================================================
-# RESULTS & TABS (FIXED - NSGA-II RUNS BEFORE TABS)
+# RESULTS & TABS (Same structure as v29.9)
 # ================================================================
 with col_right:
     st.markdown("### 📈 Results")
@@ -1478,7 +1486,7 @@ with col_right:
             api_use, mcc_use, pvpp_use, mgst_use, binder_use = api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm
             
             # Run prediction
-            with st.spinner("🧠 Running prediction..."):
+            with st.spinner("🧠 Running prediction (v29.10)..."):
                 density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs_norm)
             
             # Display KPIs
@@ -1508,7 +1516,7 @@ with col_right:
             pass_cols[3].metric(f"MCC ≤ {MCC_MAX:.1f}%", "✅ PASS" if mcc_ok else "❌ FAIL")
             
             # Physics Verification
-            with st.expander("🔬 Physics Verification"):
+            with st.expander("🔬 Physics Verification (v29.10 Enhanced)"):
                 try:
                     inputs_with_features = add_interaction_features(np.array([inputs_norm]))[0]
                     inputs_scaled = scaler.transform([inputs_with_features])
@@ -1517,7 +1525,7 @@ with col_right:
                         full_output = model.forward(X_tensor).numpy()[0]
                     st.metric("k (Plasticity)", f"{full_output[3]:.4f}")
                     st.metric("A (Rearrangement)", f"{full_output[4]:.4f}")
-                    st.caption("Density is naturally bounded by the model architecture.")
+                    st.caption("Enhanced physics: σt × D + σt × Binder")
                 except:
                     pass
             
@@ -1612,7 +1620,7 @@ with col_right:
         elif predict_btn and objectives is not None:
             st.info("Pareto front not available (no feasible solutions found).")
         else:
-            st.info("👆 Please click 'Predict & Optimize' with a valid formulation (total = 100%) to generate the Pareto Front.")
+            st.info("👆 Please click 'Predict & Optimize (v29.10)' with a valid formulation (total = 100%) to generate the Pareto Front.")
     
     # === TAB 2: Sensitivity ===
     with tab2:
@@ -1624,7 +1632,7 @@ with col_right:
             else:
                 st.info("Sensitivity analysis not available.")
         else:
-            st.info("👆 Please click 'Predict & Optimize' with a valid formulation to run Sensitivity Analysis.")
+            st.info("👆 Please click 'Predict & Optimize (v29.10)' with a valid formulation to run Sensitivity Analysis.")
     
     # === TAB 3: Model Comparison ===
     with tab3:
@@ -1634,6 +1642,8 @@ with col_right:
         if predict_btn and not comp_df.empty:
             pinn_r2_val = comp_df[comp_df['Model'] == 'PINN (Proposed)']['R²'].values[0] if not comp_df.empty else 0
             pinn_valid_val = comp_df[comp_df['Model'] == 'PINN (Proposed)']['Physical_Validity'].values[0] if not comp_df.empty else ""
+            
+            st.metric("PINN R² (v29.10)", f"{pinn_r2_val:.4f}", delta="Target: ≥ 0.85")
             
             if pinn_r2_val < 0.8 and pinn_valid_val == "✅ Fully Valid":
                 st.warning("⚠️ **Trade-off Detected:** R² is moderate (<0.8) but physical validity is fully satisfied. The model prioritises physics constraints over pure data fit to avoid physically impossible solutions. This is expected in True PINN frameworks.")
@@ -1651,7 +1661,7 @@ with col_right:
                     )
                 ])
                 fig_r2.update_layout(
-                    title='<b>R² Score Comparison</b>',
+                    title='<b>R² Score Comparison (v29.10 Enhanced)</b>',
                     yaxis=dict(title='R² Score', range=[0, 1.05]),
                     height=350,
                     showlegend=False
@@ -1669,7 +1679,7 @@ with col_right:
                     )
                 ])
                 fig_rmse.update_layout(
-                    title='<b>RMSE Comparison</b>',
+                    title='<b>RMSE Comparison (v29.10 Enhanced)</b>',
                     yaxis=dict(title='RMSE (MPa)'),
                     height=350,
                     showlegend=False
@@ -1686,11 +1696,11 @@ with col_right:
             if predict_btn:
                 st.info("Formulation must sum to 100% to generate comparison data.")
             else:
-                st.info("👆 Please click 'Predict & Optimize' with a valid formulation to see model performance comparison.")
+                st.info("👆 Please click 'Predict & Optimize (v29.10)' with a valid formulation to see model performance comparison.")
     
     # === TAB 4: Training Curves ===
     with tab4:
-        st.markdown("### 📈 Training Curves")
+        st.markdown("### 📈 Training Curves (v29.10)")
         fig_loss = plot_training_curves(loss_history)
         if fig_loss:
             st.plotly_chart(fig_loss, use_container_width=True)
@@ -1724,8 +1734,8 @@ with col_right:
             if predict_btn:
                 st.info("Formulation must sum to 100% to generate the report.")
             else:
-                st.info("👆 Please click 'Predict & Optimize' with a valid formulation to generate the report.")
+                st.info("👆 Please click 'Predict & Optimize (v29.10)' with a valid formulation to generate the report.")
 
 st.markdown("---")
-st.caption(f"🔬 **Multi-Task True PINN — v29.9 (Backend Normalization + Physical Validity)**")
+st.caption(f"🔬 **Multi-Task True PINN — v29.10 (Enhanced Tensile Physics - Target R² ≥ 0.85)**")
 st.caption(f"📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Postgraduate College, Sudan")
