@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 29.22 (Fixed Plotly Layout Bug)
+Version: 29.23 (Enhanced Density Sensitivity + R² Fine-Tuning)
 """
 
 import streamlit as st
@@ -29,7 +29,7 @@ import os
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. USER-CONFIGURABLE PARAMETERS (v29.22)
+# 0. USER-CONFIGURABLE PARAMETERS (v29.23)
 # ================================================================
 
 TENSILE_MIN = 1.90          # MPa
@@ -68,30 +68,30 @@ DENSITY_LOWER_CONSTRAINT = 0.90
 DENSITY_UPPER_CONSTRAINT = 0.97
 USE_SMART_SEEDING = True
 
-# --- Loss Weights ---
-W_DENSITY = 1.5
-W_TENSILE = 3.0              # Real-space MSE weight
-W_TENSILE_PHYSICS = 0.1      # Light physics: σt × D > 0.3
+# --- Loss Weights (v29.23 - Enhanced Density Sensitivity & R² Tuning) ---
+W_DENSITY = 2.0                 # Increased from 1.5 to give more weight to density data
+W_TENSILE = 5.0                 # Increased from 3.0 to push R² higher
+W_TENSILE_PHYSICS = 0.05        # Reduced from 0.1 to allow more data flexibility
 W_PHYSICS_BASE = 0.5
 W_PHYSICS_FINAL = 1.5
 W_EFRF = 2.0
-W_DENSITY_PENALTY = 12.0
+W_DENSITY_PENALTY = 5.0         # REDUCED from 12.0 to allow density to vary more
 
 # --- Ryshkewitch (removed) ---
 RYSK_LOSS_WEIGHT = 0.0
 
-# --- Safety Penalty ---
+# --- Safety Penalty (softer preferences) ---
 SAFETY_PENALTY_WEIGHT = 5.0
 SAFETY_DENSITY_LIMIT = 0.970
 SAFETY_EFRF_LIMIT = 0.390
 EFRF_PENALTY_WEIGHT = 2.0
-DENSITY_PREFERENCE_WEIGHT = 0.3
+DENSITY_PREFERENCE_WEIGHT = 0.05   # Reduced from 0.3 to remove strong pull to 0.95
 DENSITY_PREFERENCE_LIMIT = 0.95
 
 PHYSICS_WEIGHT_INIT = 0.3
 
 # ================================================================
-# 1. SAFE IMPORTS & SESSION STATE
+# 1. SAFE IMPORTS & SESSION STATE (UNCHANGED)
 # ================================================================
 
 try:
@@ -157,7 +157,7 @@ safe_initialize()
 clamp_session_state()
 
 # ================================================================
-# 2. HELPER FUNCTIONS
+# 2. HELPER FUNCTIONS (UNCHANGED)
 # ================================================================
 
 def normalize_components(api, binder, pvpp, mgst, mcc):
@@ -242,7 +242,7 @@ def add_interaction_features(X_raw):
     ], axis=1)
 
 # ================================================================
-# 3. PINN MODEL (v29.22)
+# 3. PINN MODEL (v29.23 - Enhanced Sensitivity)
 # ================================================================
 
 def bounded_density(raw):
@@ -256,6 +256,9 @@ class MultiTaskTruePINN(nn.Module):
             nn.Tanh(),
             nn.Dropout(0.05),
             nn.Linear(384, 384),
+            nn.Tanh(),
+            nn.Dropout(0.05),
+            nn.Linear(384, 384),      # Extra layer for better capacity
             nn.Tanh(),
             nn.Dropout(0.05),
             nn.Linear(384, 192),
@@ -298,38 +301,39 @@ class MultiTaskTruePINN(nn.Module):
         k_pred = y_pred[:, 3:4]
         A_pred = y_pred[:, 4:5]
 
+        # Dynamic scheduling
         progress = epoch / max_epochs
         schedule_factor = 1 / (1 + math.exp(-10 * (progress - 0.5)))
         w_physics = w_physics_base + (w_physics_final - w_physics_base) * schedule_factor
         w_physics = max(w_physics, 0.1)
 
-        # --- Data Loss ---
+        # Data Loss (Real-space MSE)
         density_data_loss = nn.MSELoss()(density_pred, y_true[:, 0:1])
         tensile_data_loss = nn.MSELoss()(tensile_pred, y_true[:, 1:2])
         er_data_loss = nn.MSELoss()(er_pred, y_true[:, 2:3])
         data_loss = density_data_loss + w_tensile * tensile_data_loss + er_data_loss
 
-        # --- Light Tensile Physics (σt × D > 0.3) ---
+        # Light Tensile Physics (σt × D > 0.3)
         tensile_physics_loss = torch.mean(torch.relu(0.3 - (tensile_pred * density_pred)) ** 2) * w_tensile_physics
 
-        # --- Heckel Equation ---
+        # Heckel Equation
         heckel_lhs = torch.log(1.0 / torch.clamp(1.0 - density_pred, min=1e-4))
         heckel_rhs = k_pred * pressure_real + A_pred
         heckel_loss = torch.mean((heckel_lhs - heckel_rhs) ** 2)
 
-        # --- EFRF Bound ---
+        # EFRF Bound
         efrf_pred = er_pred / torch.clamp(tensile_pred, min=1e-4)
         efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
         efrf_safe_loss = torch.mean(torch.relu(efrf_pred - 0.36) ** 2) * EFRF_PENALTY_WEIGHT
 
-        # --- Density Bounds ---
+        # Density Bounds & Preferences
         mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
         density_penalty = torch.mean(
             torch.relu(density_pred - D_MAX) ** 2 + torch.relu(D_MIN - density_pred) ** 2
         )
         density_preference_loss = torch.mean(torch.relu(density_pred - DENSITY_PREFERENCE_LIMIT) ** 2) * DENSITY_PREFERENCE_WEIGHT
 
-        # --- Monotonicity (∂D/∂P > 0) ---
+        # Monotonicity (∂D/∂P > 0)
         if compute_grad:
             Xg = X_scaled.clone().detach().requires_grad_(True)
             yg = self.forward(Xg)
@@ -345,17 +349,17 @@ class MultiTaskTruePINN(nn.Module):
         else:
             monotonic_original = torch.tensor(0.0, device=X_scaled.device)
 
-        # --- Boundary Smoothness ---
+        # Boundary Smoothness
         boundary_loss = (
             torch.mean(torch.relu((D_MIN + 0.1) - density_pred) ** 2) +
             torch.mean(torch.relu(density_pred - D_MAX) ** 2)
         )
 
-        # --- Regularization ---
+        # Regularization
         k_reg = torch.mean(torch.relu(k_pred - 0.1) ** 2) + torch.mean(torch.relu(0.005 - k_pred) ** 2)
         A_reg = torch.mean(torch.relu(A_pred - 2.0) ** 2) + torch.mean(torch.relu(0.5 - A_pred) ** 2)
 
-        # --- Total Loss ---
+        # Total Loss
         total_loss = (
             data_loss +
             w_density_penalty * density_penalty +
@@ -382,7 +386,7 @@ class MultiTaskTruePINN(nn.Module):
         return total_loss, loss_dict
 
 # ================================================================
-# 4. DATA GENERATION
+# 4. DATA GENERATION (UNCHANGED)
 # ================================================================
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
@@ -460,7 +464,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.set_font("Arial", "B", 18)
     pdf.cell(0, 10, sanitize_text("Formulation Optimization Report"), ln=True, align="C")
     pdf.set_font("Arial", "I", 11)
-    pdf.cell(0, 6, sanitize_text("Hybrid AI Framework (PINN + NSGA-II) - v29.22"), ln=True, align="C")
+    pdf.cell(0, 6, sanitize_text("Hybrid AI Framework (PINN + NSGA-II) - v29.23"), ln=True, align="C")
     pdf.set_font("Arial", "", 10)
     pdf.cell(0, 6, f"Date: {timestamp}", ln=True, align="C")
     pdf.ln(4)
@@ -597,7 +601,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.ln(3)
     pdf.set_y(270)
     pdf.set_font("Arial", "I", 8)
-    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v29.22", ln=True, align="C")
+    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v29.23", ln=True, align="C")
     pdf_bytes = pdf.output(dest="S")
     if isinstance(pdf_bytes, bytearray):
         return bytes(pdf_bytes)
@@ -944,11 +948,11 @@ class NSGAII:
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 7. TRAIN MODEL (v29.22)
+# 7. TRAIN MODEL (v29.23)
 # ================================================================
 
 @st.cache_resource
-def load_pinn_model(version="v29.22"):
+def load_pinn_model(version="v29.23"):
     checkpoint_path = 'true_pinn_checkpoint.pt'
     if os.path.exists(checkpoint_path):
         os.remove(checkpoint_path)
@@ -985,6 +989,12 @@ def load_pinn_model(version="v29.22"):
     val_losses = []
     val_loss_history = []
     for epoch in range(ADAM_EPOCHS):
+        # Dynamic learning rate annealing (reduce after 500 epochs)
+        if epoch == 500:
+            for param_group in optimizer_adam.param_groups:
+                param_group['lr'] = 0.0002
+            st.caption(f"🔽 Learning rate reduced to 0.0002 at epoch {epoch}")
+
         model.train()
         optimizer_adam.zero_grad()
         compute_grad = (epoch % MONOTONICITY_FREQUENCY == 0)
@@ -1065,7 +1075,7 @@ def load_pinn_model(version="v29.22"):
     return model, scaler, y_scaler, feature_names, df, loss_history
 
 # ================================================================
-# 8. PREDICTION & PLOTS
+# 8. PREDICTION & PLOTS (UNCHANGED)
 # ================================================================
 
 def predict_pinn(model, scaler, y_scaler, inputs):
@@ -1096,7 +1106,7 @@ def plot_training_curves(loss_history):
     if 'val_early' in loss_history and loss_history['val_early']:
         early_epochs, early_vals = zip(*loss_history['val_early'])
         fig.add_trace(go.Scatter(x=early_epochs, y=early_vals, mode='markers', name='Early Validation', marker=dict(color='red', size=8, symbol='x')))
-    fig.update_layout(title='Training Curves (v29.22 - Back to Basics)', xaxis_title='Epoch', yaxis_title='Loss', yaxis_type='log', height=400, hovermode='x unified')
+    fig.update_layout(title='Training Curves (v29.23 - Enhanced Sensitivity)', xaxis_title='Epoch', yaxis_title='Loss', yaxis_type='log', height=400, hovermode='x unified')
     return fig
 
 def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
@@ -1180,19 +1190,19 @@ def train_and_compare(X_train, X_test, y_train, y_test):
     return pd.DataFrame(results)
 
 # ================================================================
-# 9. STREAMLIT UI
+# 9. STREAMLIT UI (UNCHANGED)
 # ================================================================
 
 st.cache_resource.clear()
 
-st.set_page_config(page_title="PINN Framework v29.22", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Framework v29.23", page_icon="🧬", layout="wide")
 clamp_session_state()
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
             padding: 2rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
     <h1 style="color: #ffffff; font-size: 2.5rem; margin: 0;">
-        🧬 Hybrid AI Framework v29.22
+        🧬 Hybrid AI Framework v29.23
     </h1>
     <p style="color: #a8b2d1; font-size: 1.2rem; margin: 0.5rem 0 0 0;">
         Physics-Informed Neural Network · Multi-Objective Optimization
@@ -1201,7 +1211,7 @@ st.markdown("""
         Nile Valley University · Postgraduate College · Sudan
     </p>
     <p style="color: #ffd700; font-size: 0.85rem; margin: 0.5rem 0 0 0;">
-        ⚡ v29.22 — Back to Basics: Real-space MSE + Light Tensile Physics
+        ⚡ v29.23 — Enhanced Density Sensitivity + R² Fine-Tuning
     </p>
 </div>
 """, unsafe_allow_html=True)
@@ -1209,31 +1219,32 @@ st.markdown("""
 st.markdown("---")
 
 with st.sidebar:
-    st.markdown("### 📚 Physics Constraints (v29.22)")
+    st.markdown("### 📚 Physics Constraints (v29.23)")
     st.markdown(f"""
     - ✅ **Heckel:** ln(1/(1-D)) = kP + A
     - ✅ **EFRF:** ER / σt < {EFRF_MAX:.2f}
     - ✅ **Monotonicity:** ∂D/∂P > 0 (every {MONOTONICITY_FREQUENCY} epochs)
     - ✅ **Density Preference:** Safe zone 0.90–0.97 (expanded)
     - ✅ **EFRF Preference:** Extra penalty for > 0.36
-    - ✅ **Tensile Physics:** Light constraint σt × D > 0.3
-    - ✅ **Dynamic Scheduling:** Sigmoid annealing
+    - ✅ **Tensile Physics:** Light constraint σt × D > 0.3 (reduced weight)
+    - ✅ **Dynamic Scheduling:** Sigmoid annealing + LR drop at epoch 500
     - ✅ **MCC:** ≤ {MCC_MAX:.1f}%
     - ✅ **Density:** {D_MIN:.2f} ≤ D ≤ {D_MAX:.2f}
 
-    **Multi-Task PINN (v29.22):**
+    **Multi-Task PINN (v29.23):**
     - 5 outputs (D, σt, ER, k, A)
-    - Adam ({ADAM_EPOCHS}) lr=0.001
-    - Network: 384→384→192 with Tanh
-    - Loss: Real-space MSE + Light physics
+    - Adam (1000) lr=0.001 → 0.0002 at 500
+    - Network: 384→384→384→192 with Tanh
+    - Loss: Real-space MSE, Light physics
     - Gradient Clipping: max_norm = 1.0
     - NSGA-II: pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS}
+    - **Enhanced Density Sensitivity:** Reduced density penalty (5.0) and preference (0.05)
     """)
-    st.info(f"🔬 **v29.22** — Back to Basics")
+    st.info(f"🔬 **v29.23** — Enhanced Sensitivity & R² Fine-Tuning")
 
-with st.spinner("🔄 Training Multi-Task PINN (v29.22)..."):
-    model, scaler, y_scaler, feature_names, df, loss_history = load_pinn_model(version="v29.22")
-st.success("✅ Multi-Task True PINN (v29.22) trained successfully")
+with st.spinner("🔄 Training Multi-Task PINN (v29.23)..."):
+    model, scaler, y_scaler, feature_names, df, loss_history = load_pinn_model(version="v29.23")
+st.success("✅ Multi-Task True PINN (v29.23) trained successfully")
 
 st.markdown("### 🧪 Quick Experiments")
 exp_cols = st.columns(4)
@@ -1275,10 +1286,10 @@ with col_left:
         pressure = st.slider("⚙️ Pressure (MPa)", 80.0, PRESSURE_MAX, get_safe_value('pressure'), 1.0, key="pressure")
         speed = st.slider("🔄 Speed (rpm)", 1.0, 50.0, get_safe_value('speed'), 0.5, key="speed")
         granule = st.slider("🔬 Granule Size (µm)", 30.0, 250.0, get_safe_value('granule'), 1.0, key="granule")
-    predict_btn = st.button("🔬 Predict & Optimize (v29.22)", use_container_width=True)
+    predict_btn = st.button("🔬 Predict & Optimize (v29.23)", use_container_width=True)
 
 # ================================================================
-# RESULTS & TABS (FIXED PLOTLY LAYOUT)
+# RESULTS & TABS (UNCHANGED)
 # ================================================================
 with col_right:
     st.markdown("### 📈 Results")
@@ -1309,7 +1320,7 @@ with col_right:
             api_norm, binder_norm, pvpp_norm, mgst_norm, mcc_norm = normalize_components(api, binder, pvpp, mgst, mcc)
             inputs_norm = [api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm, pressure, speed, granule]
             api_use, mcc_use, pvpp_use, mgst_use, binder_use = api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm
-            with st.spinner("🧠 Running prediction (v29.22)..."):
+            with st.spinner("🧠 Running prediction (v29.23)..."):
                 density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs_norm)
             kpi_cols = st.columns(3)
             kpi_cols[0].metric("Density", f"{density:.3f}", delta=f"[{D_MIN:.2f}, {D_MAX:.2f}]")
@@ -1330,7 +1341,7 @@ with col_right:
             pass_cols[1].metric(f"σt ≥ {TENSILE_MIN:.2f}", "✅ PASS" if tensile_ok else "❌ FAIL")
             pass_cols[2].metric(f"EFRF < {EFRF_MAX:.2f}", "✅ PASS" if efrf_ok else "❌ FAIL")
             pass_cols[3].metric(f"MCC ≤ {MCC_MAX:.1f}%", "✅ PASS" if mcc_ok else "❌ FAIL")
-            with st.expander("🔬 Physics Verification (v29.22)"):
+            with st.expander("🔬 Physics Verification (v29.23)"):
                 try:
                     inputs_with_features = add_interaction_features(np.array([inputs_norm]))[0]
                     inputs_scaled = scaler.transform([inputs_with_features])
@@ -1339,7 +1350,7 @@ with col_right:
                         full_output = model.forward(X_tensor).numpy()[0]
                     st.metric("k (Plasticity)", f"{full_output[3]:.4f}")
                     st.metric("A (Rearrangement)", f"{full_output[4]:.4f}")
-                    st.caption("v29.22: Real-space MSE + Light physics")
+                    st.caption("v29.23: Enhanced Density Sensitivity")
                 except:
                     pass
             st.markdown("### ⚙️ NSGA-II")
@@ -1426,7 +1437,7 @@ with col_right:
         elif predict_btn and objectives is not None:
             st.info("Pareto front not available (no feasible solutions found).")
         else:
-            st.info("👆 Please click 'Predict & Optimize (v29.22)' with a valid formulation (total = 100%) to generate the Pareto Front.")
+            st.info("👆 Please click 'Predict & Optimize (v29.23)' with a valid formulation (total = 100%) to generate the Pareto Front.")
 
     with tab2:
         st.markdown("### 🔍 Sensitivity Analysis")
@@ -1437,27 +1448,26 @@ with col_right:
             else:
                 st.info("Sensitivity analysis not available.")
         else:
-            st.info("👆 Please click 'Predict & Optimize (v29.22)' with a valid formulation to run Sensitivity Analysis.")
+            st.info("👆 Please click 'Predict & Optimize (v29.23)' with a valid formulation to run Sensitivity Analysis.")
 
     with tab3:
-        st.markdown("### 📊 Model Performance Comparison (v29.22)")
+        st.markdown("### 📊 Model Performance Comparison (v29.23)")
         st.caption("Hold-out test set (20% of data) — R², RMSE, MAE, and Physical Validity")
         if predict_btn and not comp_df.empty:
             pinn_r2_val = comp_df[comp_df['Model'] == 'PINN (Proposed)']['R²'].values[0] if not comp_df.empty else 0
             pinn_valid_val = comp_df[comp_df['Model'] == 'PINN (Proposed)']['Physical_Validity'].values[0] if not comp_df.empty else ""
-            st.metric("PINN R² (v29.22)", f"{pinn_r2_val:.4f}", delta="Target: ≥ 0.85")
+            st.metric("PINN R² (v29.23)", f"{pinn_r2_val:.4f}", delta="Target: ≥ 0.85")
             if pinn_r2_val < 0.8 and pinn_valid_val == "✅ Fully Valid":
                 st.warning("⚠️ **Trade-off Detected:** R² is moderate (<0.8) but physical validity is fully satisfied. The model prioritises physics constraints over pure data fit to avoid physically impossible solutions. This is expected in True PINN frameworks.")
             col1, col2 = st.columns(2)
             with col1:
                 colors_r2 = ['#2ecc71' if m == 'PINN (Proposed)' else '#3498db' for m in comp_df['Model']]
                 fig_r2 = go.Figure(data=[
-                    go.Bar(x=comp_df['Model'], y=comp_df['R²'], marker_color=colors_r2, 
+                    go.Bar(x=comp_df['Model'], y=comp_df['R²'], marker_color=colors_r2,
                            text=[f"{v:.4f}" for v in comp_df['R²']], textposition='outside')
                 ])
-                # FIXED: Moved 'range' inside yaxis dict
                 fig_r2.update_layout(
-                    title='<b>R² Score Comparison (v29.22)</b>',
+                    title='<b>R² Score Comparison (v29.23)</b>',
                     yaxis=dict(title='R² Score', range=[0, 1.05]),
                     height=350,
                     showlegend=False
@@ -1470,23 +1480,23 @@ with col_right:
                            text=[f"{v:.4f}" for v in comp_df['RMSE']], textposition='outside')
                 ])
                 fig_rmse.update_layout(
-                    title='<b>RMSE Comparison (v29.22)</b>',
+                    title='<b>RMSE Comparison (v29.23)</b>',
                     yaxis=dict(title='RMSE (MPa)'),
                     height=350,
                     showlegend=False
                 )
                 st.plotly_chart(fig_rmse, use_container_width=True)
             st.dataframe(comp_df.style.highlight_max(subset=['R²'], color='lightgreen')
-                        .highlight_min(subset=['RMSE', 'MAE'], color='lightcoral'), 
+                        .highlight_min(subset=['RMSE', 'MAE'], color='lightcoral'),
                         use_container_width=True, hide_index=True)
         else:
             if predict_btn:
                 st.info("Formulation must sum to 100% to generate comparison data.")
             else:
-                st.info("👆 Please click 'Predict & Optimize (v29.22)' with a valid formulation to see model performance comparison.")
+                st.info("👆 Please click 'Predict & Optimize (v29.23)' with a valid formulation to see model performance comparison.")
 
     with tab4:
-        st.markdown("### 📈 Training Curves (v29.22)")
+        st.markdown("### 📈 Training Curves (v29.23)")
         fig_loss = plot_training_curves(loss_history)
         if fig_loss:
             st.plotly_chart(fig_loss, use_container_width=True)
@@ -1516,8 +1526,8 @@ with col_right:
             if predict_btn:
                 st.info("Formulation must sum to 100% to generate the report.")
             else:
-                st.info("👆 Please click 'Predict & Optimize (v29.22)' with a valid formulation to generate the report.")
+                st.info("👆 Please click 'Predict & Optimize (v29.23)' with a valid formulation to generate the report.")
 
 st.markdown("---")
-st.caption(f"🔬 **Multi-Task True PINN — v29.22 (Back to Basics: Real-space MSE + Light Physics)**")
+st.caption(f"🔬 **Multi-Task True PINN — v29.23 (Enhanced Density Sensitivity + R² Fine-Tuning)**")
 st.caption(f"📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Postgraduate College, Sudan")
