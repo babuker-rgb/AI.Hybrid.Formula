@@ -1393,7 +1393,7 @@ st.markdown("""
         Nile Valley University · Postgraduate College · Sudan
     </p>
     <p style="color: #ffd700; font-size: 0.85rem; margin: 0.5rem 0 0 0;">
-        ⚡ v29.11 — Ryshkewitch-Duckworth Physics + Soft Sigmoid Scheduling (FIXED)
+        ⚡ v29.11 — Ryshkewitch-Duckworth Physics
     </p>
 </div>
 """, unsafe_allow_html=True)
