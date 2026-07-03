@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 29.11 (Enhanced with Ryshkewitch-Duckworth Physics + Soft Sigmoid Scheduling)
+Version: 29.12 (Optimized Loss Balance - Target R² ≥ 0.85)
 """
 
 import streamlit as st
@@ -28,7 +28,7 @@ import math
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. USER-CONFIGURABLE PARAMETERS (v29.11 ENHANCED)
+# 0. USER-CONFIGURABLE PARAMETERS (v29.12 FINAL TUNE)
 # ================================================================
 
 TENSILE_MIN = 1.90          # MPa
@@ -44,7 +44,7 @@ BINDER_MAX = 5.0
 
 # --- Enhanced Hyperparameters ---
 N_SAMPLES = 5000            # More samples for complex physics
-ADAM_EPOCHS = 900           # Increased for better convergence with new physics
+ADAM_EPOCHS = 900           # Increased for better convergence
 LBFGS_STEPS = 3             
 MONOTONICITY_FREQUENCY = 10 
 
@@ -57,11 +57,12 @@ else:
     NSGA_POP_SIZE = 80      
     NSGA_GENERATIONS = 60   
 
-# --- Loss Weights ---
+# --- FIXED: ENHANCED LOSS WEIGHTS (v29.12) ---
 W_DENSITY = 12.0            
-TENSILE_DATA_WEIGHT = 2.5   
-TENSILE_PHYSICS_WEIGHT = 2.0 
+TENSILE_DATA_WEIGHT = 5.0   # Increased from 2.5 (forces fit to tensile data)
+TENSILE_PHYSICS_WEIGHT = 4.0 # Increased from 2.0 (balances physics)
 TENSILE_BINDER_WEIGHT = 0.5 
+RYSZHKEWITCH_LOSS_WEIGHT = 0.3  # Reduced from 0.5 (allows data to dominate slightly)
 
 # --- Physics / Data Balance (Initial/Final) ---
 W_DATA_INIT = 1.0          
@@ -69,7 +70,7 @@ W_PHYSICS_INIT = 0.3
 W_DATA_FINAL = 1.0         
 W_PHYSICS_FINAL = 0.7      
 
-# --- Ryshkewitch-Duckworth Constants ---
+# --- Ryshkewitch-Duckworth Constants (Keep as fixed references) ---
 RYSK_SIGMA0_LOG = 1.2       # ln(σ0) ~ 1.2
 RYSK_B = 2.0                # b ~ 2.0
 
@@ -252,7 +253,7 @@ def add_interaction_features(X_raw):
     ], axis=1)
 
 # ================================================================
-# 4. MULTI-TASK TRUE PINN MODEL (ENHANCED PHYSICS v29.11)
+# 4. MULTI-TASK TRUE PINN MODEL (v29.12 OPTIMIZED LOSS)
 # ================================================================
 
 def bounded_density(raw):
@@ -285,7 +286,7 @@ class MultiTaskTruePINN(nn.Module):
             output = self.forward(X_scaled)
             return output[:, :3].cpu().numpy()
 
-    def compute_loss(self, X_scaled, X_raw, y_true, epoch=0, max_epochs=ADAM_EPOCHS,  # FIXED: max_epochs = ADAM_EPOCHS
+    def compute_loss(self, X_scaled, X_raw, y_true, epoch=0, max_epochs=ADAM_EPOCHS,
                      w_data_init=W_DATA_INIT, w_physics_init=W_PHYSICS_INIT,
                      w_data_final=W_DATA_FINAL, w_physics_final=W_PHYSICS_FINAL,
                      w_mcc=0.5, w_density=W_DENSITY,
@@ -304,21 +305,15 @@ class MultiTaskTruePINN(nn.Module):
 
         # ================================================================
         # 1. SOFT SIGMOID SCHEDULING (Fixes Gradient Shock)
-        #    Now max_epochs = ADAM_EPOCHS so transition completes during Adam phase.
         # ================================================================
         t = epoch / max_epochs
-        
-        # Sigmoid transition: smooth, avoids sudden jumps
         sigmoid_val = 1 / (1 + math.exp(-10 * (t - 0.4)))
-        
         w_data = w_data_init + (w_data_final - w_data_init) * sigmoid_val
         w_physics = w_physics_init + (w_physics_final - w_physics_init) * sigmoid_val
-        
-        # Safety: ensure weights never go to zero
         w_data = max(w_data, 0.1)
         w_physics = max(w_physics, 0.1)
 
-        # --- Data Loss (Weighted Tensile) ---
+        # --- DATA LOSS (v29.12: Tensile gets 5.0 weight) ---
         density_data_loss = nn.MSELoss()(density_pred, y_true[:, 0:1])
         tensile_data_loss = nn.MSELoss()(tensile_pred, y_true[:, 1:2])
         er_data_loss = nn.MSELoss()(er_pred, y_true[:, 2:3])
@@ -339,22 +334,27 @@ class MultiTaskTruePINN(nn.Module):
         efrf_safe_loss = torch.mean(torch.relu(efrf_pred - 0.36) ** 2) * EFRF_PENALTY_WEIGHT
 
         # ================================================================
-        # 4. PHYSICS LOSS 3: RYSZHKEWITCH-DUCKWORTH (ENHANCED TENSILE PHYSICS)
-        #    ln(σt) = ln(σ0) - b * (1 - D)
-        #    This enforces exponential relationship, correcting the linear bias of synthetic data.
+        # 4. PHYSICS LOSS 3: TENSILE-DENSITY RELATION (v29.12: weight 4.0)
+        # ================================================================
+        tensile_physics_loss = torch.mean(torch.relu(0.3 - (tensile_pred * density_pred)) ** 2) * TENSILE_PHYSICS_WEIGHT
+
+        # ================================================================
+        # 5. PHYSICS LOSS 4: RYSZHKEWITCH-DUCKWORTH (v29.12: weight 0.3)
+        #    Reduced weight allows the model to correct the linear bias
+        #    of the synthetic data without fully overriding it.
         # ================================================================
         log_tensile_pred = torch.log(tensile_pred + 1e-6)
         porosity = 1.0 - density_pred
         target_log_tensile = RYSK_SIGMA0_LOG - RYSK_B * porosity
-        ryshkewitch_loss = torch.mean((log_tensile_pred - target_log_tensile) ** 2) * 0.5
+        ryshkewitch_loss = torch.mean((log_tensile_pred - target_log_tensile) ** 2) * RYSZHKEWITCH_LOSS_WEIGHT
 
         # ================================================================
-        # 5. PHYSICS LOSS 4: TENSILE-BINDER RELATION
+        # 6. PHYSICS LOSS 5: TENSILE-BINDER RELATION
         # ================================================================
         tensile_binder_loss = torch.mean(torch.relu(0.05 - (tensile_pred * binder_real)) ** 2) * TENSILE_BINDER_WEIGHT
 
         # ================================================================
-        # 6. PHYSICS LOSS 5: MCC BOUND & DENSITY PREFERENCES
+        # 7. PHYSICS LOSS 6: MCC BOUND & DENSITY PREFERENCES
         # ================================================================
         mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
         density_penalty = torch.mean(
@@ -363,7 +363,7 @@ class MultiTaskTruePINN(nn.Module):
         density_preference_loss = torch.mean(torch.relu(density_pred - DENSITY_PREFERENCE_LIMIT) ** 2) * DENSITY_PREFERENCE_WEIGHT
 
         # ================================================================
-        # 7. PHYSICS LOSS 6: MONOTONICITY (∂D/∂P > 0)
+        # 8. PHYSICS LOSS 7: MONOTONICITY (∂D/∂P > 0)
         # ================================================================
         if compute_grad:
             Xg = X_scaled.clone().detach().requires_grad_(True)
@@ -381,7 +381,7 @@ class MultiTaskTruePINN(nn.Module):
             monotonic_loss = torch.tensor(0.0, device=X_scaled.device)
 
         # ================================================================
-        # 8. PHYSICS LOSS 7: BOUNDARY SMOOTHNESS
+        # 9. PHYSICS LOSS 8: BOUNDARY SMOOTHNESS
         # ================================================================
         boundary_loss = (
             torch.mean(torch.relu((D_MIN + 0.1) - density_pred) ** 2) +
@@ -393,12 +393,12 @@ class MultiTaskTruePINN(nn.Module):
         A_reg = torch.mean(torch.relu(A_pred - 2.0) ** 2) + torch.mean(torch.relu(0.5 - A_pred) ** 2)
 
         # ================================================================
-        # 9. TOTAL LOSS (WITH ENHANCED PHYSICS)
+        # 10. TOTAL LOSS (v29.12 BALANCED)
         # ================================================================
         total_loss = (
             w_data * data_loss +
             w_physics * (heckel_loss + efrf_loss + monotonic_loss + boundary_loss + 
-                         tensile_binder_loss + ryshkewitch_loss) +
+                         tensile_physics_loss + tensile_binder_loss + ryshkewitch_loss) +
             w_mcc * mcc_loss +
             w_density * density_penalty +
             efrf_safe_loss +
@@ -406,13 +406,14 @@ class MultiTaskTruePINN(nn.Module):
             0.1 * k_reg + 0.1 * A_reg
         )
 
-        # --- Loss Dictionary (Updated) ---
+        # --- Loss Dictionary ---
         loss_dict = {
             'data_loss': data_loss.item(),
             'tensile_data_loss': tensile_data_loss.item(),
             'heckel_loss': heckel_loss.item(),
             'efrf_loss': efrf_loss.item(),
-            'rys_hkewitch_loss': ryshkewitch_loss.item(),
+            'tensile_physics_loss': tensile_physics_loss.item(),
+            'ryshkewitch_loss': ryshkewitch_loss.item(),
             'tensile_binder_loss': tensile_binder_loss.item(),
             'mcc_loss': mcc_loss.item(),
             'density_penalty': density_penalty.item(),
@@ -472,8 +473,6 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         D = np.clip(D_target + noise_d, D_MIN, D_MAX)
 
         # --- ENHANCED TENSILE STRENGTH (NONLINEAR INTERACTIONS) ---
-        # Note: This linear model with interactions intentionally introduces bias
-        # that the Ryshkewitch-Duckworth physics loss will correct during training.
         strength = (
             3.5 
             - 0.15 * (api - 85) 
@@ -525,7 +524,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.set_font("Arial", "B", 18)
     pdf.cell(0, 10, sanitize_text("Formulation Optimization Report"), ln=True, align="C")
     pdf.set_font("Arial", "I", 11)
-    pdf.cell(0, 6, sanitize_text("Hybrid AI Framework (PINN + NSGA-II) - v29.11"), ln=True, align="C")
+    pdf.cell(0, 6, sanitize_text("Hybrid AI Framework (PINN + NSGA-II) - v29.12"), ln=True, align="C")
     pdf.set_font("Arial", "", 10)
     pdf.cell(0, 6, f"Date: {timestamp}", ln=True, align="C")
     pdf.ln(4)
@@ -688,7 +687,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.ln(3)
     pdf.set_y(270)
     pdf.set_font("Arial", "I", 8)
-    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v29.11", ln=True, align="C")
+    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v29.12", ln=True, align="C")
     
     pdf_bytes = pdf.output(dest="S")
     if isinstance(pdf_bytes, bytearray):
@@ -767,13 +766,12 @@ class NSGAII:
         constraints = np.zeros(n, dtype=bool)
         tensile_strengths = np.zeros(n)
 
-        # Pre-allocate arrays for efficiency
         for i in range(n):
             try:
                 repaired = self._repair(population[i])
                 api, mcc, pvpp, mgst, binder, pressure, speed, granule = repaired
 
-                # OPTIMIZATION: Build inputs array directly (avoid repeated list creation overhead)
+                # Optimized array creation
                 inputs = np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule]).reshape(1, -1)
                 inputs_with_features = add_interaction_features(inputs)[0]
                 inputs_scaled = self.scaler.transform([inputs_with_features])
@@ -1039,7 +1037,7 @@ class NSGAII:
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 8. TRAIN MODEL (UPDATED: max_epochs = ADAM_EPOCHS)
+# 8. TRAIN MODEL (v29.12 - uses optimized loss)
 # ================================================================
 
 @st.cache_resource
@@ -1093,7 +1091,6 @@ def load_pinn_model():
 
         compute_grad = (epoch % MONOTONICITY_FREQUENCY == 0)
 
-        # FIXED: max_epochs = ADAM_EPOCHS so scheduling completes during Adam phase
         total_loss, _ = model.compute_loss(
             X_scaled_train_t, X_raw_train_t, y_train_t,
             epoch=epoch, max_epochs=ADAM_EPOCHS,
@@ -1154,8 +1151,6 @@ def load_pinn_model():
 
     def closure():
         optimizer_lbfgs.zero_grad()
-        # During LBFGS, we want the final physics weight to be fully active
-        # So we set epoch = ADAM_EPOCHS (or a value close to max_epochs)
         final_epoch = ADAM_EPOCHS
         total_loss, _ = model.compute_loss(
             X_scaled_train_t, X_raw_train_t, y_train_t,
@@ -1235,7 +1230,7 @@ def plot_training_curves(loss_history):
         ))
     
     fig.update_layout(
-        title='Training Curves (v29.11 - Soft Sigmoid Scheduling)',
+        title='Training Curves (v29.12 - Optimized Loss Balance)',
         xaxis=dict(title='Epoch'),
         yaxis=dict(title='Loss', type='log'),
         height=400,
@@ -1410,14 +1405,14 @@ def train_and_compare(X_train, X_test, y_train, y_test):
 
 st.cache_resource.clear()
 
-st.set_page_config(page_title="PINN Framework v29.11", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Framework v29.12", page_icon="🧬", layout="wide")
 clamp_session_state()
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); 
             padding: 2rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
     <h1 style="color: #ffffff; font-size: 2.5rem; margin: 0;">
-        🧬 Hybrid AI Framework v29.11
+        🧬 Hybrid AI Framework v29.12
     </h1>
     <p style="color: #a8b2d1; font-size: 1.2rem; margin: 0.5rem 0 0 0;">
         Physics-Informed Neural Network · Multi-Objective Optimization
@@ -1426,7 +1421,7 @@ st.markdown("""
         Nile Valley University · Postgraduate College · Sudan
     </p>
     <p style="color: #ffd700; font-size: 0.85rem; margin: 0.5rem 0 0 0;">
-        ⚡ v29.11 — Ryshkewitch-Duckworth Physics + Soft Sigmoid Scheduling (FIXED)
+        ⚡ v29.12 — Optimized Loss Balance (Target R² ≥ 0.85)
     </p>
 </div>
 """, unsafe_allow_html=True)
@@ -1434,32 +1429,32 @@ st.markdown("""
 st.markdown("---")
 
 with st.sidebar:
-    st.markdown("### 📚 Physics Constraints (v29.11)")
+    st.markdown("### 📚 Physics Constraints (v29.12)")
     st.markdown(f"""
     - ✅ **Heckel:** ln(1/(1-D)) = kP + A
     - ✅ **EFRF:** ER / σt < {EFRF_MAX:.2f}
     - ✅ **Monotonicity:** ∂D/∂P > 0 (every {MONOTONICITY_FREQUENCY} epochs)
     - ✅ **Density Preference:** Gentle push toward 0.93–0.96
     - ✅ **EFRF Preference:** Extra penalty for > 0.36
-    - ✅ **Tensile Physics (NEW):** Ryshkewitch-Duckworth equation
-      <br>ln(σt) = ln(σ0) - b·(1-D)
-    - ✅ **Soft Scheduling (FIXED):** Sigmoid transition completes during Adam phase
+    - ✅ **Tensile Physics:** Data weight 5.0, Physics weight 4.0 (OPTIMIZED)
+    - ✅ **Ryshkewitch-Duckworth:** Reduced weight 0.3 (allows data fit)
+    - ✅ **Soft Scheduling:** Sigmoid transition completes during Adam
     - ✅ **MCC:** ≤ {MCC_MAX:.1f}%
     - ✅ **Density:** {D_MIN:.2f} ≤ D ≤ {D_MAX:.2f}
     
-    **Multi-Task PINN (v29.11):**
+    **Multi-Task PINN (v29.12):**
     - 5 outputs (D, σt, ER, k, A)
     - Adam ({ADAM_EPOCHS}) → LBFGS ({LBFGS_STEPS})
     - Enhanced Network: 384→384→192 neurons
     - Loss Balance: Sigmoid transition {W_DATA_INIT:.1f}→{W_DATA_FINAL:.1f} / {W_PHYSICS_INIT:.1f}→{W_PHYSICS_FINAL:.1f}
     - NSGA-II: pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS}
-    - **Backend Normalization:** Dynamic normalization applied internally
+    - **Optimized Weights:** Data {TENSILE_DATA_WEIGHT}, Physics {TENSILE_PHYSICS_WEIGHT}, Ryshkewitch {RYSZHKEWITCH_LOSS_WEIGHT}
     """)
-    st.info(f"🔬 **v29.11** — Ryshkewitch-Duckworth + Sigmoid Scheduling (FIXED)")
+    st.info(f"🔬 **v29.12** — Optimized Loss Balance (Final Tune)")
 
-with st.spinner("🔄 Training Multi-Task PINN (v29.11 Enhanced Physics)..."):
+with st.spinner("🔄 Training Multi-Task PINN (v29.12 Optimized)..."):
     model, scaler, y_scaler, feature_names, df, loss_history = load_pinn_model()
-st.success("✅ Multi-Task True PINN (v29.11) trained successfully")
+st.success("✅ Multi-Task True PINN (v29.12) trained successfully")
 
 st.markdown("### 🧪 Quick Experiments")
 exp_cols = st.columns(4)
@@ -1504,10 +1499,10 @@ with col_left:
         speed = st.slider("🔄 Speed (rpm)", 1.0, 50.0, get_safe_value('speed'), 0.5, key="speed")
         granule = st.slider("🔬 Granule Size (µm)", 30.0, 250.0, get_safe_value('granule'), 1.0, key="granule")
     
-    predict_btn = st.button("🔬 Predict & Optimize (v29.11)", use_container_width=True)
+    predict_btn = st.button("🔬 Predict & Optimize (v29.12)", use_container_width=True)
 
 # ================================================================
-# RESULTS & TABS (SAME STRUCTURE AS v29.10)
+# RESULTS & TABS (SAME STRUCTURE AS v29.11)
 # ================================================================
 with col_right:
     st.markdown("### 📈 Results")
@@ -1544,7 +1539,7 @@ with col_right:
             api_use, mcc_use, pvpp_use, mgst_use, binder_use = api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm
             
             # Run prediction
-            with st.spinner("🧠 Running prediction (v29.11)..."):
+            with st.spinner("🧠 Running prediction (v29.12)..."):
                 density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs_norm)
             
             # Display KPIs
@@ -1574,7 +1569,7 @@ with col_right:
             pass_cols[3].metric(f"MCC ≤ {MCC_MAX:.1f}%", "✅ PASS" if mcc_ok else "❌ FAIL")
             
             # Physics Verification
-            with st.expander("🔬 Physics Verification (v29.11 Enhanced)"):
+            with st.expander("🔬 Physics Verification (v29.12 Optimized)"):
                 try:
                     inputs_with_features = add_interaction_features(np.array([inputs_norm]))[0]
                     inputs_scaled = scaler.transform([inputs_with_features])
@@ -1583,7 +1578,7 @@ with col_right:
                         full_output = model.forward(X_tensor).numpy()[0]
                     st.metric("k (Plasticity)", f"{full_output[3]:.4f}")
                     st.metric("A (Rearrangement)", f"{full_output[4]:.4f}")
-                    st.caption("Enhanced physics: Ryshkewitch-Duckworth + Binder relation")
+                    st.caption("v29.12: Data weight 5.0, Physics weight 4.0, Ryshkewitch 0.3")
                 except:
                     pass
             
@@ -1678,7 +1673,7 @@ with col_right:
         elif predict_btn and objectives is not None:
             st.info("Pareto front not available (no feasible solutions found).")
         else:
-            st.info("👆 Please click 'Predict & Optimize (v29.11)' with a valid formulation (total = 100%) to generate the Pareto Front.")
+            st.info("👆 Please click 'Predict & Optimize (v29.12)' with a valid formulation (total = 100%) to generate the Pareto Front.")
     
     # === TAB 2: Sensitivity ===
     with tab2:
@@ -1690,18 +1685,18 @@ with col_right:
             else:
                 st.info("Sensitivity analysis not available.")
         else:
-            st.info("👆 Please click 'Predict & Optimize (v29.11)' with a valid formulation to run Sensitivity Analysis.")
+            st.info("👆 Please click 'Predict & Optimize (v29.12)' with a valid formulation to run Sensitivity Analysis.")
     
     # === TAB 3: Model Comparison ===
     with tab3:
-        st.markdown("### 📊 Model Performance Comparison (v29.11)")
+        st.markdown("### 📊 Model Performance Comparison (v29.12)")
         st.caption("Hold-out test set (20% of data) — R², RMSE, MAE, and Physical Validity")
         
         if predict_btn and not comp_df.empty:
             pinn_r2_val = comp_df[comp_df['Model'] == 'PINN (Proposed)']['R²'].values[0] if not comp_df.empty else 0
             pinn_valid_val = comp_df[comp_df['Model'] == 'PINN (Proposed)']['Physical_Validity'].values[0] if not comp_df.empty else ""
             
-            st.metric("PINN R² (v29.11)", f"{pinn_r2_val:.4f}", delta="Target: ≥ 0.85")
+            st.metric("PINN R² (v29.12)", f"{pinn_r2_val:.4f}", delta="Target: ≥ 0.85")
             
             if pinn_r2_val < 0.8 and pinn_valid_val == "✅ Fully Valid":
                 st.warning("⚠️ **Trade-off Detected:** R² is moderate (<0.8) but physical validity is fully satisfied. The model prioritises physics constraints over pure data fit to avoid physically impossible solutions. This is expected in True PINN frameworks.")
@@ -1719,7 +1714,7 @@ with col_right:
                     )
                 ])
                 fig_r2.update_layout(
-                    title='<b>R² Score Comparison (v29.11)</b>',
+                    title='<b>R² Score Comparison (v29.12)</b>',
                     yaxis=dict(title='R² Score', range=[0, 1.05]),
                     height=350,
                     showlegend=False
@@ -1737,7 +1732,7 @@ with col_right:
                     )
                 ])
                 fig_rmse.update_layout(
-                    title='<b>RMSE Comparison (v29.11)</b>',
+                    title='<b>RMSE Comparison (v29.12)</b>',
                     yaxis=dict(title='RMSE (MPa)'),
                     height=350,
                     showlegend=False
@@ -1754,11 +1749,11 @@ with col_right:
             if predict_btn:
                 st.info("Formulation must sum to 100% to generate comparison data.")
             else:
-                st.info("👆 Please click 'Predict & Optimize (v29.11)' with a valid formulation to see model performance comparison.")
+                st.info("👆 Please click 'Predict & Optimize (v29.12)' with a valid formulation to see model performance comparison.")
     
     # === TAB 4: Training Curves ===
     with tab4:
-        st.markdown("### 📈 Training Curves (v29.11 - Soft Sigmoid)")
+        st.markdown("### 📈 Training Curves (v29.12 - Optimized Balance)")
         fig_loss = plot_training_curves(loss_history)
         if fig_loss:
             st.plotly_chart(fig_loss, use_container_width=True)
@@ -1792,8 +1787,8 @@ with col_right:
             if predict_btn:
                 st.info("Formulation must sum to 100% to generate the report.")
             else:
-                st.info("👆 Please click 'Predict & Optimize (v29.11)' with a valid formulation to generate the report.")
+                st.info("👆 Please click 'Predict & Optimize (v29.12)' with a valid formulation to generate the report.")
 
 st.markdown("---")
-st.caption(f"🔬 **Multi-Task True PINN — v29.11 (Ryshkewitch-Duckworth + Sigmoid Scheduling - FIXED)**")
+st.caption(f"🔬 **Multi-Task True PINN — v29.12 (Optimized Loss Balance - Target R² ≥ 0.85)**")
 st.caption(f"📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Postgraduate College, Sudan")
