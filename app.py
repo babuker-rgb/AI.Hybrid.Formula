@@ -25,7 +25,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 import time
 import math
-import os  # Added for checkpoint management
+import os
 warnings.filterwarnings('ignore')
 
 # ================================================================
@@ -73,7 +73,7 @@ W_PHYSICS_FINAL = 0.7
 # --- Ryshkewitch-Duckworth Constants (Reduced to near-zero) ---
 RYSK_SIGMA0_LOG = 1.2       
 RYSK_B = 2.0                
-RYSK_LOSS_WEIGHT = 0.05     # ALMOST ELIMINATED
+RYSK_LOSS_WEIGHT = 0.05     
 
 # --- Safety Penalty ---
 SAFETY_PENALTY_WEIGHT = 5.0     
@@ -1012,7 +1012,7 @@ class NSGAII:
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 8. TRAIN MODEL (v29.13 - WITH DIAGNOSTIC LOGGING)
+# 8. TRAIN MODEL (v29.13 - WITH DIAGNOSTIC LOGGING AND FIXED EVALUATION)
 # ================================================================
 
 @st.cache_resource
@@ -1164,13 +1164,20 @@ def load_pinn_model():
         optimizer_lbfgs.step(closure)
         progress_bar.progress(min(0.6 + 0.08 * (i + 1), 1.0))
 
-    # --- FINAL EVALUATION ON TEST SET (ensured to use updated model) ---
+    # --- FINAL EVALUATION ON TEST SET (corrected scale) ---
     model.eval()
     with torch.no_grad():
         X_test_t = torch.tensor(X_scaled_test, dtype=torch.float32)
         pred_scaled = model.predict(X_test_t)
-        pred_tensile = y_scaler.inverse_transform(pred_scaled)[:, 1]
-        test_r2 = r2_score(y_test, pred_tensile)
+        # Restore original scale for predictions
+        pred_original = y_scaler.inverse_transform(pred_scaled)
+        pred_tensile = pred_original[:, 1]
+
+        # Restore original scale for true values
+        y_test_original = y_scaler.inverse_transform(y_test)
+        y_tensile_true = y_test_original[:, 1]
+
+        test_r2 = r2_score(y_tensile_true, pred_tensile)
         st.caption(f"📊 Test R² (Tensile) = {test_r2:.4f}")
 
     model.feature_names = feature_names
@@ -1406,7 +1413,7 @@ def train_and_compare(X_train, X_test, y_train, y_test):
 # 10. STREAMLIT UI (UNCHANGED - except version label)
 # ================================================================
 
-# REMOVED: st.cache_resource.clear()
+st.cache_resource.clear()  # optional, can be removed after first run
 
 st.set_page_config(page_title="PINN Framework v29.13", page_icon="🧬", layout="wide")
 clamp_session_state()
