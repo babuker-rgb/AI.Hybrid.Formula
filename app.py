@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 29.23 (Enhanced Density Sensitivity + R² Fine-Tuning)
+Version: 29.24 (Residual Architecture + Mish Activation + R² Fine-Tuning)
 """
 
 import streamlit as st
@@ -29,7 +29,7 @@ import os
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. USER-CONFIGURABLE PARAMETERS (v29.23)
+# 0. USER-CONFIGURABLE PARAMETERS (v29.24)
 # ================================================================
 
 TENSILE_MIN = 1.90          # MPa
@@ -68,30 +68,30 @@ DENSITY_LOWER_CONSTRAINT = 0.90
 DENSITY_UPPER_CONSTRAINT = 0.97
 USE_SMART_SEEDING = True
 
-# --- Loss Weights (v29.23 - Enhanced Density Sensitivity & R² Tuning) ---
-W_DENSITY = 2.0                 # Increased from 1.5 to give more weight to density data
-W_TENSILE = 5.0                 # Increased from 3.0 to push R² higher
-W_TENSILE_PHYSICS = 0.05        # Reduced from 0.1 to allow more data flexibility
+# --- Loss Weights (v29.24 - fine-tuned) ---
+W_DENSITY = 2.0
+W_TENSILE = 5.0
+W_TENSILE_PHYSICS = 0.05
 W_PHYSICS_BASE = 0.5
 W_PHYSICS_FINAL = 1.5
 W_EFRF = 2.0
-W_DENSITY_PENALTY = 5.0         # REDUCED from 12.0 to allow density to vary more
+W_DENSITY_PENALTY = 5.0
 
 # --- Ryshkewitch (removed) ---
 RYSK_LOSS_WEIGHT = 0.0
 
-# --- Safety Penalty (softer preferences) ---
+# --- Safety Penalty ---
 SAFETY_PENALTY_WEIGHT = 5.0
 SAFETY_DENSITY_LIMIT = 0.970
 SAFETY_EFRF_LIMIT = 0.390
 EFRF_PENALTY_WEIGHT = 2.0
-DENSITY_PREFERENCE_WEIGHT = 0.05   # Reduced from 0.3 to remove strong pull to 0.95
+DENSITY_PREFERENCE_WEIGHT = 0.05
 DENSITY_PREFERENCE_LIMIT = 0.95
 
 PHYSICS_WEIGHT_INIT = 0.3
 
 # ================================================================
-# 1. SAFE IMPORTS & SESSION STATE (UNCHANGED)
+# 1. SAFE IMPORTS & SESSION STATE
 # ================================================================
 
 try:
@@ -157,7 +157,7 @@ safe_initialize()
 clamp_session_state()
 
 # ================================================================
-# 2. HELPER FUNCTIONS (UNCHANGED)
+# 2. HELPER FUNCTIONS
 # ================================================================
 
 def normalize_components(api, binder, pvpp, mgst, mcc):
@@ -242,32 +242,52 @@ def add_interaction_features(X_raw):
     ], axis=1)
 
 # ================================================================
-# 3. PINN MODEL (v29.23 - Enhanced Sensitivity)
+# 3. RESIDUAL PINN MODEL (v29.24 - Enhanced Architecture)
 # ================================================================
 
 def bounded_density(raw):
     return D_MIN + (D_MAX - D_MIN) * torch.sigmoid(raw)
 
+# Residual Block with Mish activation
+class ResidualBlock(nn.Module):
+    def __init__(self, features):
+        super(ResidualBlock, self).__init__()
+        self.linear1 = nn.Linear(features, features)
+        self.linear2 = nn.Linear(features, features)
+        self.activation = nn.Mish()  # Mish: x * tanh(softplus(x))
+
+    def forward(self, x):
+        residual = x
+        x = self.activation(self.linear1(x))
+        x = self.linear2(x)
+        # Residual connection
+        return residual + x
+
 class MultiTaskTruePINN(nn.Module):
     def __init__(self, input_dim=13, output_dim=5):
         super(MultiTaskTruePINN, self).__init__()
-        self.network = nn.Sequential(
+        # Input projection
+        self.input_layer = nn.Sequential(
             nn.Linear(input_dim, 384),
-            nn.Tanh(),
-            nn.Dropout(0.05),
-            nn.Linear(384, 384),
-            nn.Tanh(),
-            nn.Dropout(0.05),
-            nn.Linear(384, 384),      # Extra layer for better capacity
-            nn.Tanh(),
-            nn.Dropout(0.05),
-            nn.Linear(384, 192),
-            nn.Tanh(),
-            nn.Linear(192, output_dim)
+            nn.Mish()
         )
+        # Residual blocks for capturing complex interactions
+        self.res_block1 = ResidualBlock(384)
+        self.res_block2 = ResidualBlock(384)
+        # Transition to output (use Tanh for stability)
+        self.transition = nn.Sequential(
+            nn.Linear(384, 192),
+            nn.Tanh()  # Keep Tanh here for numerical safety
+        )
+        self.output_layer = nn.Linear(192, output_dim)
 
     def forward(self, X):
-        raw = self.network(X)
+        x = self.input_layer(X)
+        x = self.res_block1(x)
+        x = self.res_block2(x)
+        x = self.transition(x)
+        raw = self.output_layer(x)
+
         density = bounded_density(raw[:, 0:1])
         tensile = torch.nn.functional.softplus(raw[:, 1:2]) + 1e-4
         er = torch.nn.functional.softplus(raw[:, 2:3]) + 1e-4
@@ -464,7 +484,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.set_font("Arial", "B", 18)
     pdf.cell(0, 10, sanitize_text("Formulation Optimization Report"), ln=True, align="C")
     pdf.set_font("Arial", "I", 11)
-    pdf.cell(0, 6, sanitize_text("Hybrid AI Framework (PINN + NSGA-II) - v29.23"), ln=True, align="C")
+    pdf.cell(0, 6, sanitize_text("Hybrid AI Framework (PINN + NSGA-II) - v29.24"), ln=True, align="C")
     pdf.set_font("Arial", "", 10)
     pdf.cell(0, 6, f"Date: {timestamp}", ln=True, align="C")
     pdf.ln(4)
@@ -601,7 +621,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.ln(3)
     pdf.set_y(270)
     pdf.set_font("Arial", "I", 8)
-    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v29.23", ln=True, align="C")
+    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v29.24", ln=True, align="C")
     pdf_bytes = pdf.output(dest="S")
     if isinstance(pdf_bytes, bytearray):
         return bytes(pdf_bytes)
@@ -948,11 +968,11 @@ class NSGAII:
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 7. TRAIN MODEL (v29.23)
+# 7. TRAIN MODEL (v29.24 - Residual + LBFGS Fine-Tuning)
 # ================================================================
 
 @st.cache_resource
-def load_pinn_model(version="v29.23"):
+def load_pinn_model(version="v29.24"):
     checkpoint_path = 'true_pinn_checkpoint.pt'
     if os.path.exists(checkpoint_path):
         os.remove(checkpoint_path)
@@ -977,19 +997,25 @@ def load_pinn_model(version="v29.23"):
     X_scaled_val_t = torch.tensor(X_scaled_val, dtype=torch.float32)
     X_raw_val_t = torch.tensor(X_raw_val, dtype=torch.float32)
     y_val_t = torch.tensor(y_val, dtype=torch.float32)
+
     model = MultiTaskTruePINN(input_dim=X_augmented.shape[1])
+
+    # Adam phase
     optimizer_adam = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer_adam, patience=50, factor=0.5)
+
     best_val_loss = float('inf')
     patience = 120
     counter = 0
     best_state = None
     progress_bar = st.progress(0)
+
     train_losses = []
     val_losses = []
     val_loss_history = []
+
     for epoch in range(ADAM_EPOCHS):
-        # Dynamic learning rate annealing (reduce after 500 epochs)
+        # Dynamic learning rate annealing (reduce after 500)
         if epoch == 500:
             for param_group in optimizer_adam.param_groups:
                 param_group['lr'] = 0.0002
@@ -998,6 +1024,7 @@ def load_pinn_model(version="v29.23"):
         model.train()
         optimizer_adam.zero_grad()
         compute_grad = (epoch % MONOTONICITY_FREQUENCY == 0)
+
         total_loss, _ = model.compute_loss(
             X_scaled_train_t, X_raw_train_t, y_train_t,
             epoch=epoch, max_epochs=ADAM_EPOCHS,
@@ -1009,8 +1036,10 @@ def load_pinn_model(version="v29.23"):
             efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
             compute_grad=compute_grad
         )
+
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
         if (epoch + 1) % 100 == 0:
             grad_norms = []
             for name, param in model.named_parameters():
@@ -1018,7 +1047,10 @@ def load_pinn_model(version="v29.23"):
                     grad_norms.append(param.grad.norm().item())
             if grad_norms:
                 st.caption(f"🔍 Epoch {epoch+1}: Grad norm range = {min(grad_norms):.6f} - {max(grad_norms):.6f}")
+
         optimizer_adam.step()
+
+        # Validation
         model.eval()
         with torch.no_grad():
             val_loss, _ = model.compute_loss(
@@ -1032,27 +1064,72 @@ def load_pinn_model(version="v29.23"):
                 efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
                 compute_grad=False
             )
+
         val_loss_value = val_loss.item()
         train_losses.append(total_loss.item())
         val_losses.append(val_loss_value)
+
         if epoch % 10 == 0:
             val_loss_history.append((epoch, val_loss_value))
+
         scheduler.step(val_loss_value)
+
         if val_loss_value < best_val_loss:
             best_val_loss = val_loss_value
             counter = 0
             best_state = {k: v.clone() for k, v in model.state_dict().items()}
         else:
             counter += 1
+
         if counter > patience:
             break
+
         if (epoch + 1) % 100 == 0:
             progress_bar.progress(min((epoch + 1) / ADAM_EPOCHS, 0.6))
+
+    # Load best state from Adam phase
     if best_state is not None:
         model.load_state_dict(best_state)
-        st.caption("✅ Model loaded with best validation state.")
+        st.caption("✅ Model loaded with best validation state from Adam.")
     else:
-        st.caption("⚠️ No best state saved. Using final weights.")
+        st.caption("⚠️ No best state saved. Using final Adam weights.")
+
+    # ================================================================
+    # L-BFGS Fine-Tuning Phase (last 50 epochs for precision)
+    # ================================================================
+    st.caption("🔧 Starting L-BFGS fine-tuning phase (50 iterations)...")
+    optimizer_lbfgs = optim.LBFGS(
+        model.parameters(),
+        lr=0.01,
+        max_iter=50,
+        line_search_fn='strong_wolfe'
+    )
+
+    # Prepare data for LBFGS (use the best validation state, or final)
+    # We'll run LBFGS on the training set with a fixed epoch (last epoch)
+    def closure():
+        optimizer_lbfgs.zero_grad()
+        # Use the final epoch for the physics weight (w_physics ~ final value)
+        total_loss, _ = model.compute_loss(
+            X_scaled_train_t, X_raw_train_t, y_train_t,
+            epoch=ADAM_EPOCHS, max_epochs=ADAM_EPOCHS,
+            w_density=W_DENSITY,
+            w_tensile=W_TENSILE,
+            w_tensile_physics=W_TENSILE_PHYSICS,
+            w_physics_base=W_PHYSICS_BASE, w_physics_final=W_PHYSICS_FINAL,
+            w_mcc=0.5, w_density_penalty=W_DENSITY_PENALTY,
+            efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
+            compute_grad=True
+        )
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        return total_loss
+
+    for lbfgs_iter in range(1):  # Run a single LBFGS optimization block of 50 iterations
+        optimizer_lbfgs.step(closure)
+        st.caption(f"🔧 L-BFGS fine-tuning completed.")
+
+    # Final evaluation
     model.eval()
     with torch.no_grad():
         X_test_t = torch.tensor(X_scaled_test, dtype=torch.float32)
@@ -1067,10 +1144,12 @@ def load_pinn_model(version="v29.23"):
         else:
             test_r2 = -1.0
         st.caption(f"📊 Test R² (Tensile) = {test_r2:.4f}")
+
     model.feature_names = feature_names
     model.scaler = scaler
     model.y_scaler = y_scaler
     torch.save(model.state_dict(), checkpoint_path)
+
     loss_history = {'train': train_losses, 'val': val_losses, 'val_early': val_loss_history}
     return model, scaler, y_scaler, feature_names, df, loss_history
 
@@ -1106,7 +1185,7 @@ def plot_training_curves(loss_history):
     if 'val_early' in loss_history and loss_history['val_early']:
         early_epochs, early_vals = zip(*loss_history['val_early'])
         fig.add_trace(go.Scatter(x=early_epochs, y=early_vals, mode='markers', name='Early Validation', marker=dict(color='red', size=8, symbol='x')))
-    fig.update_layout(title='Training Curves (v29.23 - Enhanced Sensitivity)', xaxis_title='Epoch', yaxis_title='Loss', yaxis_type='log', height=400, hovermode='x unified')
+    fig.update_layout(title='Training Curves (v29.24 - Residual Architecture)', xaxis_title='Epoch', yaxis_title='Loss', yaxis_type='log', height=400, hovermode='x unified')
     return fig
 
 def plot_pareto_plotly(objectives, constraints, fronts, nsga, api, efrf):
@@ -1195,14 +1274,14 @@ def train_and_compare(X_train, X_test, y_train, y_test):
 
 st.cache_resource.clear()
 
-st.set_page_config(page_title="PINN Framework v29.23", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Framework v29.24", page_icon="🧬", layout="wide")
 clamp_session_state()
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
             padding: 2rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
     <h1 style="color: #ffffff; font-size: 2.5rem; margin: 0;">
-        🧬 Hybrid AI Framework v29.23
+        🧬 Hybrid AI Framework v29.24
     </h1>
     <p style="color: #a8b2d1; font-size: 1.2rem; margin: 0.5rem 0 0 0;">
         Physics-Informed Neural Network · Multi-Objective Optimization
@@ -1211,7 +1290,7 @@ st.markdown("""
         Nile Valley University · Postgraduate College · Sudan
     </p>
     <p style="color: #ffd700; font-size: 0.85rem; margin: 0.5rem 0 0 0;">
-        ⚡ v29.23 — Enhanced Density Sensitivity + R² Fine-Tuning
+        ⚡ v29.24 — Residual Architecture + Mish + LBFGS Fine-Tuning
     </p>
 </div>
 """, unsafe_allow_html=True)
@@ -1219,32 +1298,31 @@ st.markdown("""
 st.markdown("---")
 
 with st.sidebar:
-    st.markdown("### 📚 Physics Constraints (v29.23)")
+    st.markdown("### 📚 Physics Constraints (v29.24)")
     st.markdown(f"""
     - ✅ **Heckel:** ln(1/(1-D)) = kP + A
     - ✅ **EFRF:** ER / σt < {EFRF_MAX:.2f}
     - ✅ **Monotonicity:** ∂D/∂P > 0 (every {MONOTONICITY_FREQUENCY} epochs)
     - ✅ **Density Preference:** Safe zone 0.90–0.97 (expanded)
     - ✅ **EFRF Preference:** Extra penalty for > 0.36
-    - ✅ **Tensile Physics:** Light constraint σt × D > 0.3 (reduced weight)
-    - ✅ **Dynamic Scheduling:** Sigmoid annealing + LR drop at epoch 500
+    - ✅ **Tensile Physics:** Light constraint σt × D > 0.3
+    - ✅ **Dynamic Scheduling:** Sigmoid annealing + LR drop at 500
     - ✅ **MCC:** ≤ {MCC_MAX:.1f}%
     - ✅ **Density:** {D_MIN:.2f} ≤ D ≤ {D_MAX:.2f}
 
-    **Multi-Task PINN (v29.23):**
+    **Multi-Task PINN (v29.24):**
     - 5 outputs (D, σt, ER, k, A)
-    - Adam (1000) lr=0.001 → 0.0002 at 500
-    - Network: 384→384→384→192 with Tanh
+    - **Residual Architecture:** 2 ResBlocks with Mish activation
+    - Adam (1000) → L-BFGS (50 iterations) fine-tuning
     - Loss: Real-space MSE, Light physics
     - Gradient Clipping: max_norm = 1.0
     - NSGA-II: pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS}
-    - **Enhanced Density Sensitivity:** Reduced density penalty (5.0) and preference (0.05)
     """)
-    st.info(f"🔬 **v29.23** — Enhanced Sensitivity & R² Fine-Tuning")
+    st.info(f"🔬 **v29.24** — Residual Architecture for R² Boost")
 
-with st.spinner("🔄 Training Multi-Task PINN (v29.23)..."):
-    model, scaler, y_scaler, feature_names, df, loss_history = load_pinn_model(version="v29.23")
-st.success("✅ Multi-Task True PINN (v29.23) trained successfully")
+with st.spinner("🔄 Training Multi-Task PINN (v29.24)..."):
+    model, scaler, y_scaler, feature_names, df, loss_history = load_pinn_model(version="v29.24")
+st.success("✅ Multi-Task True PINN (v29.24) trained successfully")
 
 st.markdown("### 🧪 Quick Experiments")
 exp_cols = st.columns(4)
@@ -1286,10 +1364,10 @@ with col_left:
         pressure = st.slider("⚙️ Pressure (MPa)", 80.0, PRESSURE_MAX, get_safe_value('pressure'), 1.0, key="pressure")
         speed = st.slider("🔄 Speed (rpm)", 1.0, 50.0, get_safe_value('speed'), 0.5, key="speed")
         granule = st.slider("🔬 Granule Size (µm)", 30.0, 250.0, get_safe_value('granule'), 1.0, key="granule")
-    predict_btn = st.button("🔬 Predict & Optimize (v29.23)", use_container_width=True)
+    predict_btn = st.button("🔬 Predict & Optimize (v29.24)", use_container_width=True)
 
 # ================================================================
-# RESULTS & TABS (UNCHANGED)
+# RESULTS & TABS (UNCHANGED - same as v29.23)
 # ================================================================
 with col_right:
     st.markdown("### 📈 Results")
@@ -1320,7 +1398,7 @@ with col_right:
             api_norm, binder_norm, pvpp_norm, mgst_norm, mcc_norm = normalize_components(api, binder, pvpp, mgst, mcc)
             inputs_norm = [api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm, pressure, speed, granule]
             api_use, mcc_use, pvpp_use, mgst_use, binder_use = api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm
-            with st.spinner("🧠 Running prediction (v29.23)..."):
+            with st.spinner("🧠 Running prediction (v29.24)..."):
                 density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs_norm)
             kpi_cols = st.columns(3)
             kpi_cols[0].metric("Density", f"{density:.3f}", delta=f"[{D_MIN:.2f}, {D_MAX:.2f}]")
@@ -1341,7 +1419,7 @@ with col_right:
             pass_cols[1].metric(f"σt ≥ {TENSILE_MIN:.2f}", "✅ PASS" if tensile_ok else "❌ FAIL")
             pass_cols[2].metric(f"EFRF < {EFRF_MAX:.2f}", "✅ PASS" if efrf_ok else "❌ FAIL")
             pass_cols[3].metric(f"MCC ≤ {MCC_MAX:.1f}%", "✅ PASS" if mcc_ok else "❌ FAIL")
-            with st.expander("🔬 Physics Verification (v29.23)"):
+            with st.expander("🔬 Physics Verification (v29.24)"):
                 try:
                     inputs_with_features = add_interaction_features(np.array([inputs_norm]))[0]
                     inputs_scaled = scaler.transform([inputs_with_features])
@@ -1350,7 +1428,7 @@ with col_right:
                         full_output = model.forward(X_tensor).numpy()[0]
                     st.metric("k (Plasticity)", f"{full_output[3]:.4f}")
                     st.metric("A (Rearrangement)", f"{full_output[4]:.4f}")
-                    st.caption("v29.23: Enhanced Density Sensitivity")
+                    st.caption("v29.24: Residual Architecture + Mish + LBFGS")
                 except:
                     pass
             st.markdown("### ⚙️ NSGA-II")
@@ -1437,7 +1515,7 @@ with col_right:
         elif predict_btn and objectives is not None:
             st.info("Pareto front not available (no feasible solutions found).")
         else:
-            st.info("👆 Please click 'Predict & Optimize (v29.23)' with a valid formulation (total = 100%) to generate the Pareto Front.")
+            st.info("👆 Please click 'Predict & Optimize (v29.24)' with a valid formulation (total = 100%) to generate the Pareto Front.")
 
     with tab2:
         st.markdown("### 🔍 Sensitivity Analysis")
@@ -1448,15 +1526,15 @@ with col_right:
             else:
                 st.info("Sensitivity analysis not available.")
         else:
-            st.info("👆 Please click 'Predict & Optimize (v29.23)' with a valid formulation to run Sensitivity Analysis.")
+            st.info("👆 Please click 'Predict & Optimize (v29.24)' with a valid formulation to run Sensitivity Analysis.")
 
     with tab3:
-        st.markdown("### 📊 Model Performance Comparison (v29.23)")
+        st.markdown("### 📊 Model Performance Comparison (v29.24)")
         st.caption("Hold-out test set (20% of data) — R², RMSE, MAE, and Physical Validity")
         if predict_btn and not comp_df.empty:
             pinn_r2_val = comp_df[comp_df['Model'] == 'PINN (Proposed)']['R²'].values[0] if not comp_df.empty else 0
             pinn_valid_val = comp_df[comp_df['Model'] == 'PINN (Proposed)']['Physical_Validity'].values[0] if not comp_df.empty else ""
-            st.metric("PINN R² (v29.23)", f"{pinn_r2_val:.4f}", delta="Target: ≥ 0.85")
+            st.metric("PINN R² (v29.24)", f"{pinn_r2_val:.4f}", delta="Target: ≥ 0.85")
             if pinn_r2_val < 0.8 and pinn_valid_val == "✅ Fully Valid":
                 st.warning("⚠️ **Trade-off Detected:** R² is moderate (<0.8) but physical validity is fully satisfied. The model prioritises physics constraints over pure data fit to avoid physically impossible solutions. This is expected in True PINN frameworks.")
             col1, col2 = st.columns(2)
@@ -1467,7 +1545,7 @@ with col_right:
                            text=[f"{v:.4f}" for v in comp_df['R²']], textposition='outside')
                 ])
                 fig_r2.update_layout(
-                    title='<b>R² Score Comparison (v29.23)</b>',
+                    title='<b>R² Score Comparison (v29.24)</b>',
                     yaxis=dict(title='R² Score', range=[0, 1.05]),
                     height=350,
                     showlegend=False
@@ -1480,7 +1558,7 @@ with col_right:
                            text=[f"{v:.4f}" for v in comp_df['RMSE']], textposition='outside')
                 ])
                 fig_rmse.update_layout(
-                    title='<b>RMSE Comparison (v29.23)</b>',
+                    title='<b>RMSE Comparison (v29.24)</b>',
                     yaxis=dict(title='RMSE (MPa)'),
                     height=350,
                     showlegend=False
@@ -1493,10 +1571,10 @@ with col_right:
             if predict_btn:
                 st.info("Formulation must sum to 100% to generate comparison data.")
             else:
-                st.info("👆 Please click 'Predict & Optimize (v29.23)' with a valid formulation to see model performance comparison.")
+                st.info("👆 Please click 'Predict & Optimize (v29.24)' with a valid formulation to see model performance comparison.")
 
     with tab4:
-        st.markdown("### 📈 Training Curves (v29.23)")
+        st.markdown("### 📈 Training Curves (v29.24)")
         fig_loss = plot_training_curves(loss_history)
         if fig_loss:
             st.plotly_chart(fig_loss, use_container_width=True)
@@ -1526,8 +1604,8 @@ with col_right:
             if predict_btn:
                 st.info("Formulation must sum to 100% to generate the report.")
             else:
-                st.info("👆 Please click 'Predict & Optimize (v29.23)' with a valid formulation to generate the report.")
+                st.info("👆 Please click 'Predict & Optimize (v29.24)' with a valid formulation to generate the report.")
 
 st.markdown("---")
-st.caption(f"🔬 **Multi-Task True PINN — v29.23 (Enhanced Density Sensitivity + R² Fine-Tuning)**")
+st.caption(f"🔬 **Multi-Task True PINN — v29.24 (Residual Architecture + Mish + LBFGS Fine-Tuning)**")
 st.caption(f"📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Postgraduate College, Sudan")
