@@ -160,13 +160,10 @@ safe_initialize()
 clamp_session_state()
 
 # ================================================================
-# 2. HELPER FUNCTIONS
+# 2. HELPER FUNCTIONS (COMPLETED)
 # ================================================================
 
 def normalize_components(api, binder, pvpp, mgst, mcc):
-    """
-    Normalize the formulation components to sum to 100% with bounds.
-    """
     api = max(api, 0.1)
     binder = max(binder, 0.1)
     pvpp = max(pvpp, 0.1)
@@ -185,8 +182,7 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
     pvpp_norm = (pvpp / total) * 100
     mgst_norm = (mgst / total) * 100
     mcc_norm = (mcc / total) * 100
-
-    # Enforce MCC upper bound
+    # Enforce MCC ≤ MCC_MAX
     if mcc_norm > MCC_MAX:
         excess = mcc_norm - MCC_MAX
         mcc_norm = MCC_MAX
@@ -196,8 +192,7 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
             binder_norm += excess * (binder_norm / other_sum)
             pvpp_norm += excess * (pvpp_norm / other_sum)
             mgst_norm += excess * (mgst_norm / other_sum)
-
-    # Enforce API lower bound 85%
+    # Enforce API in [85, 95]
     if api_norm < 85.0:
         deficit = 85.0 - api_norm
         api_norm = 85.0
@@ -206,8 +201,6 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
             binder_norm -= deficit * (binder_norm / other_sum) if binder_norm > 0 else 0
             pvpp_norm -= deficit * (pvpp_norm / other_sum) if pvpp_norm > 0 else 0
             mgst_norm -= deficit * (mgst_norm / other_sum) if mgst_norm > 0 else 0
-
-    # Enforce API upper bound 95%
     if api_norm > 95.0:
         excess = api_norm - 95.0
         api_norm = 95.0
@@ -217,15 +210,12 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
             pvpp_norm += excess * (pvpp_norm / other_sum) if pvpp_norm > 0 else 0
             mgst_norm += excess * (mgst_norm / other_sum) if mgst_norm > 0 else 0
             mcc_norm += excess * (mcc_norm / other_sum) if mcc_norm > 0 else 0
-
-    # Clip individual bounds
+    # Final clipping
     api_norm = np.clip(api_norm, 85, 95)
     binder_norm = np.clip(binder_norm, 0.5, 5.0)
     pvpp_norm = np.clip(pvpp_norm, 0.5, 6.0)
     mgst_norm = np.clip(mgst_norm, 0.01, 1.2)
     mcc_norm = np.clip(mcc_norm, 0, MCC_MAX)
-
-    # Ensure sum is exactly 100%
     total_final = api_norm + binder_norm + pvpp_norm + mgst_norm + mcc_norm
     if total_final > 0 and abs(total_final - 100) > 0.1:
         scale = 100 / total_final
@@ -234,19 +224,15 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
         pvpp_norm *= scale
         mgst_norm *= scale
         mcc_norm *= scale
-        # Re-clip after scaling
-        api_norm = np.clip(api_norm, 85, 95)
-        binder_norm = np.clip(binder_norm, 0.5, 5.0)
-        pvpp_norm = np.clip(pvpp_norm, 0.5, 6.0)
-        mgst_norm = np.clip(mgst_norm, 0.01, 1.2)
-        mcc_norm = np.clip(mcc_norm, 0, MCC_MAX)
-
+    # Re-clip after scaling
+    api_norm = np.clip(api_norm, 85, 95)
+    binder_norm = np.clip(binder_norm, 0.5, 5.0)
+    pvpp_norm = np.clip(pvpp_norm, 0.5, 6.0)
+    mgst_norm = np.clip(mgst_norm, 0.01, 1.2)
+    mcc_norm = np.clip(mcc_norm, 0, MCC_MAX)
     return api_norm, binder_norm, pvpp_norm, mgst_norm, mcc_norm
 
 def add_interaction_features(X_raw):
-    """
-    Add engineered interaction features (pressure, binder, API, speed, MCC).
-    """
     pressure = X_raw[:, 5:6]
     binder = X_raw[:, 4:5]
     api = X_raw[:, 0:1]
@@ -263,22 +249,23 @@ def add_interaction_features(X_raw):
     ], axis=1)
 
 # ================================================================
-# 3. RESIDUAL PINN MODEL (with Mish compatibility fix)
+# 3. RESIDUAL PINN MODEL (with Mish fallback)
 # ================================================================
 
-# Define Mish activation if not available in this PyTorch version
-if not hasattr(nn, 'Mish'):
+# PyTorch 1.9+ has nn.Mish; for older versions we define it manually.
+if hasattr(nn, 'Mish'):
+    Mish = nn.Mish
+else:
     class Mish(nn.Module):
         def forward(self, x):
-            return x * torch.tanh(nn.functional.softplus(x))
-    nn.Mish = Mish  # Monkey-patch for compatibility
+            return x * torch.tanh(torch.nn.functional.softplus(x))
 
 class ResidualBlock(nn.Module):
     def __init__(self, features):
         super(ResidualBlock, self).__init__()
         self.linear1 = nn.Linear(features, features)
         self.linear2 = nn.Linear(features, features)
-        self.activation = nn.Mish()
+        self.activation = Mish()
 
     def forward(self, x):
         identity = x
@@ -291,7 +278,7 @@ class MultiTaskTruePINN(nn.Module):
         super(MultiTaskTruePINN, self).__init__()
         self.input_layer = nn.Sequential(
             nn.Linear(input_dim, 384),
-            nn.Mish()
+            Mish()
         )
         self.res_block1 = ResidualBlock(384)
         self.res_block2 = ResidualBlock(384)
@@ -341,41 +328,32 @@ class MultiTaskTruePINN(nn.Module):
         k_pred = y_pred[:, 3:4]
         A_pred = y_pred[:, 4:5]
 
-        # Physics weight scheduling
         progress = epoch / max_epochs
         schedule_factor = 1 / (1 + math.exp(-10 * (progress - 0.5)))
         w_physics = w_physics_base + (w_physics_final - w_physics_base) * schedule_factor
         w_physics = max(w_physics, 0.1)
 
-        # Data losses
         density_data_loss = nn.MSELoss()(density_pred, y_true[:, 0:1])
         tensile_data_loss = nn.MSELoss()(tensile_pred, y_true[:, 1:2])
         er_data_loss = nn.MSELoss()(er_pred, y_true[:, 2:3])
         data_loss = density_data_loss + w_tensile * tensile_data_loss + er_data_loss
 
-        # Tensile physics (σt * D > 0.3)
         tensile_physics_loss = torch.mean(torch.relu(0.3 - (tensile_pred * density_pred)) ** 2) * w_tensile_physics
 
-        # Heckel loss
         heckel_lhs = torch.log(1.0 / torch.clamp(1.0 - density_pred, min=1e-4))
         heckel_rhs = k_pred * pressure_real + A_pred
         heckel_loss = torch.mean((heckel_lhs - heckel_rhs) ** 2)
 
-        # EFRF loss
         efrf_pred = er_pred / torch.clamp(tensile_pred, min=1e-4)
         efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
         efrf_safe_loss = torch.mean(torch.relu(efrf_pred - 0.36) ** 2) * EFRF_PENALTY_WEIGHT
 
-        # MCC constraint
         mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
-
-        # Density bound penalty
         density_penalty = torch.mean(
             torch.relu(density_pred - D_MAX) ** 2 + torch.relu(D_MIN - density_pred) ** 2
         )
         density_preference_loss = torch.mean(torch.relu(density_pred - DENSITY_PREFERENCE_LIMIT) ** 2) * DENSITY_PREFERENCE_WEIGHT
 
-        # Monotonicity (∂D/∂P > 0)
         if compute_grad:
             Xg = X_scaled.clone().detach().requires_grad_(True)
             yg = self.forward(Xg)
@@ -391,13 +369,11 @@ class MultiTaskTruePINN(nn.Module):
         else:
             monotonic_original = torch.tensor(0.0, device=X_scaled.device)
 
-        # Boundary loss (soft)
         boundary_loss = (
             torch.mean(torch.relu((D_MIN + 0.1) - density_pred) ** 2) +
             torch.mean(torch.relu(density_pred - D_MAX) ** 2)
         )
 
-        # Regularization for Heckel parameters
         k_reg = torch.mean(torch.relu(k_pred - 0.1) ** 2) + torch.mean(torch.relu(0.005 - k_pred) ** 2)
         A_reg = torch.mean(torch.relu(A_pred - 2.0) ** 2) + torch.mean(torch.relu(0.5 - A_pred) ** 2)
 
@@ -468,13 +444,13 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         noise_d = np.random.normal(0, 0.01)
         D = np.clip(D_target + noise_d, D_MIN, D_MAX)
 
-        # --- NONLINEAR TENSILE STRENGTH (Ryshkewitch-Duckworth) ---
+        # --- NONLINEAR TENSILE STRENGTH (Ryshkewitch-Duckworth physics) ---
         sigma0 = np.random.uniform(4.0, 8.0)
         b = np.random.uniform(1.5, 3.5)
         porosity = 1.0 - D
         tensile_base = sigma0 * np.exp(-b * porosity)
 
-        # Formulation effects (multiplicative)
+        # Formulation interactions
         api_effect = 1.0 - 0.005 * (api - 85)
         binder_effect = 1.0 + 0.03 * (binder - 2.0)
         mgst_effect = 1.0 - 0.1 * (mgst - 0.2)
@@ -485,7 +461,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         strength = strength * np.random.normal(1.0, 0.03)
         strength = np.clip(strength, 0.5, 6.0)
 
-        # --- Elastic Recovery ---
+        # --- Elastic Recovery (ER) ---
         er_base = 1.8 + 0.3 * (api - 85)/10 + 0.08 * (speed - 10)/30 - 0.1 * (pressure - 100)/150
         er_base = er_base * (1.0 - 0.15 * (D - 0.4))
         er = np.clip(er_base + np.random.normal(0, 0.03), 0.5, 4.0)
@@ -501,7 +477,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# 5. PDF GENERATION
+# 5. PDF GENERATION (sanitized)
 # ================================================================
 
 def sanitize_text(text):
@@ -662,7 +638,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
         return str(pdf_bytes).encode('latin1')
 
 # ================================================================
-# 6. NSGA-II
+# 6. NSGA-II (unchanged)
 # ================================================================
 
 class NSGAII:
@@ -1114,7 +1090,7 @@ def load_pinn_model(version="v29.25"):
     else:
         st.caption("⚠️ No best state saved. Using final weights from Adam.")
 
-    # --- Phase 2: L-BFGS Fine-Tuning ---
+    # --- Phase 2: L-BFGS Fine-Tuning (5 steps) ---
     st.caption("🔄 Starting L-BFGS fine-tuning phase...")
     optimizer_lbfgs = optim.LBFGS(
         model.parameters(),
