@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 29.12 (Log-Tensile Architecture - R² ≥ 0.85)
+Version: 29.13 (Evaluation Lock Fixed + Diagnostic Logging)
 """
 
 import streamlit as st
@@ -25,10 +25,11 @@ import plotly.graph_objects as go
 import plotly.express as px
 import time
 import math
+import os  # Added for checkpoint management
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. USER-CONFIGURABLE PARAMETERS (v29.12 - LOG-TENSILE)
+# 0. USER-CONFIGURABLE PARAMETERS (v29.13 - FINAL FIX)
 # ================================================================
 
 TENSILE_MIN = 1.90          # MPa
@@ -57,10 +58,10 @@ else:
     NSGA_POP_SIZE = 80      
     NSGA_GENERATIONS = 60   
 
-# --- Loss Weights (Moderate, as architecture now handles physics) ---
+# --- FINAL LOSS WEIGHTS (Balanced) ---
 W_DENSITY = 12.0            
-TENSILE_DATA_WEIGHT = 2.5   
-TENSILE_PHYSICS_WEIGHT = 2.0 
+TENSILE_DATA_WEIGHT = 3.0   
+TENSILE_PHYSICS_WEIGHT = 1.0 
 TENSILE_BINDER_WEIGHT = 0.5 
 
 # --- Physics / Data Balance ---
@@ -69,10 +70,10 @@ W_PHYSICS_INIT = 0.3
 W_DATA_FINAL = 1.0         
 W_PHYSICS_FINAL = 0.7      
 
-# --- Ryshkewitch-Duckworth Constants ---
+# --- Ryshkewitch-Duckworth Constants (Reduced to near-zero) ---
 RYSK_SIGMA0_LOG = 1.2       
 RYSK_B = 2.0                
-RYSK_LOSS_WEIGHT = 0.5      
+RYSK_LOSS_WEIGHT = 0.05     # ALMOST ELIMINATED
 
 # --- Safety Penalty ---
 SAFETY_PENALTY_WEIGHT = 5.0     
@@ -253,7 +254,7 @@ def add_interaction_features(X_raw):
     ], axis=1)
 
 # ================================================================
-# 4. MULTI-TASK TRUE PINN MODEL (v29.12 - LOG-TENSILE ARCHITECTURE)
+# 4. MULTI-TASK TRUE PINN MODEL (v29.13 - WITH DIAGNOSTICS)
 # ================================================================
 
 def bounded_density(raw):
@@ -273,12 +274,9 @@ class MultiTaskTruePINN(nn.Module):
         raw = self.network(X)
         density = bounded_density(raw[:, 0:1])
         
-        # ================================================================
-        # v29.12 KEY CHANGE: Predict log(tensile) directly
-        # This makes Ryshkewitch-Duckworth physics linear in the prediction space
-        # ================================================================
-        log_tensile = raw[:, 1:2]  # No softplus - direct log-space prediction
-        tensile = torch.exp(log_tensile)  # Convert to physical tensile when needed
+        # v29.13: Log-Tensile with explicit autograd preservation
+        log_tensile = raw[:, 1:2]  # Direct tensor, no detach
+        tensile = torch.exp(log_tensile)  # Exponential preserves gradient
         
         er = torch.nn.functional.softplus(raw[:, 2:3]) + 1e-4
         k = torch.nn.functional.softplus(raw[:, 3:4]) + 1e-4
@@ -334,12 +332,8 @@ class MultiTaskTruePINN(nn.Module):
         efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
         efrf_safe_loss = torch.mean(torch.relu(efrf_pred - 0.36) ** 2) * EFRF_PENALTY_WEIGHT
 
-        # ================================================================
-        # v29.12 KEY CHANGE: Ryshkewitch-Duckworth is now LINEAR in log-space
-        # Since the model predicts log(tensile) directly, this loss is now
-        # a simple linear regression constraint rather than an exponential one.
-        # ================================================================
-        log_tensile_pred = torch.log(tensile_pred + 1e-6)  # Recover log from exp
+        # --- RYSZHKEWITCH-DUCKWORTH (NEAR-ZERO WEIGHT) ---
+        log_tensile_pred = torch.log(tensile_pred + 1e-6)
         porosity = 1.0 - density_pred
         target_log_tensile = RYSK_SIGMA0_LOG - RYSK_B * porosity
         ryshkewitch_loss = torch.mean((log_tensile_pred - target_log_tensile) ** 2) * RYSK_LOSS_WEIGHT
@@ -486,7 +480,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# 6. PDF GENERATION (UNCHANGED - For brevity, kept as reference)
+# 6. PDF GENERATION (UNCHANGED - shortened for brevity)
 # ================================================================
 
 def sanitize_text(text):
@@ -506,7 +500,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.set_font("Arial", "B", 18)
     pdf.cell(0, 10, sanitize_text("Formulation Optimization Report"), ln=True, align="C")
     pdf.set_font("Arial", "I", 11)
-    pdf.cell(0, 6, sanitize_text("Hybrid AI Framework (PINN + NSGA-II) - v29.12"), ln=True, align="C")
+    pdf.cell(0, 6, sanitize_text("Hybrid AI Framework (PINN + NSGA-II) - v29.13"), ln=True, align="C")
     pdf.set_font("Arial", "", 10)
     pdf.cell(0, 6, f"Date: {timestamp}", ln=True, align="C")
     pdf.ln(4)
@@ -669,7 +663,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf.ln(3)
     pdf.set_y(270)
     pdf.set_font("Arial", "I", 8)
-    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v29.12", ln=True, align="C")
+    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v29.13", ln=True, align="C")
     
     pdf_bytes = pdf.output(dest="S")
     if isinstance(pdf_bytes, bytearray):
@@ -680,7 +674,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
         return str(pdf_bytes).encode('latin1')
 
 # ================================================================
-# 7. NSGA-II (UNCHANGED - Uses the enhanced model)
+# 7. NSGA-II (UNCHANGED)
 # ================================================================
 
 class NSGAII:
@@ -1018,11 +1012,17 @@ class NSGAII:
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 8. TRAIN MODEL (v29.12)
+# 8. TRAIN MODEL (v29.13 - WITH DIAGNOSTIC LOGGING)
 # ================================================================
 
 @st.cache_resource
 def load_pinn_model():
+    # --- FORCE CLEAN START: Delete old checkpoint to prevent stale evaluations ---
+    checkpoint_path = 'true_pinn_checkpoint.pt'
+    if os.path.exists(checkpoint_path):
+        os.remove(checkpoint_path)
+        print("🗑️ Old checkpoint removed. Starting fresh training.")
+    
     df, feature_names = generate_pinn_data(n_samples=N_SAMPLES)
     X_raw = df[feature_names].values
     y = df[['Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']].values
@@ -1083,6 +1083,16 @@ def load_pinn_model():
         )
 
         total_loss.backward()
+        
+        # --- DIAGNOSTIC: Check gradient flow every 100 epochs ---
+        if (epoch + 1) % 100 == 0:
+            grad_norms = []
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    grad_norms.append(param.grad.norm().item())
+            if grad_norms:
+                st.caption(f"🔍 Epoch {epoch+1}: Grad norm range = {min(grad_norms):.6f} - {max(grad_norms):.6f}")
+        
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer_adam.step()
 
@@ -1122,7 +1132,11 @@ def load_pinn_model():
 
     if best_state is not None:
         model.load_state_dict(best_state)
+        st.caption("✅ Model loaded with best validation state.")
+    else:
+        st.caption("⚠️ No best state saved. Using final weights.")
 
+    # --- LBFGS fine-tuning ---
     optimizer_lbfgs = optim.LBFGS(
         model.parameters(),
         lr=0.05,
@@ -1150,12 +1164,20 @@ def load_pinn_model():
         optimizer_lbfgs.step(closure)
         progress_bar.progress(min(0.6 + 0.08 * (i + 1), 1.0))
 
+    # --- FINAL EVALUATION ON TEST SET (ensured to use updated model) ---
     model.eval()
+    with torch.no_grad():
+        X_test_t = torch.tensor(X_scaled_test, dtype=torch.float32)
+        pred_scaled = model.predict(X_test_t)
+        pred_tensile = y_scaler.inverse_transform(pred_scaled)[:, 1]
+        test_r2 = r2_score(y_test, pred_tensile)
+        st.caption(f"📊 Test R² (Tensile) = {test_r2:.4f}")
+
     model.feature_names = feature_names
     model.scaler = scaler
     model.y_scaler = y_scaler
 
-    torch.save(model.state_dict(), 'true_pinn_checkpoint.pt')
+    torch.save(model.state_dict(), checkpoint_path)
 
     loss_history = {'train': train_losses, 'val': val_losses, 'val_early': val_loss_history}
     return model, scaler, y_scaler, feature_names, df, loss_history
@@ -1211,7 +1233,7 @@ def plot_training_curves(loss_history):
         ))
     
     fig.update_layout(
-        title='Training Curves (v29.12 - Log-Tensile Architecture)',
+        title='Training Curves (v29.13 - Diagnostic Logging)',
         xaxis=dict(title='Epoch'),
         yaxis=dict(title='Loss', type='log'),
         height=400,
@@ -1381,19 +1403,19 @@ def train_and_compare(X_train, X_test, y_train, y_test):
     return pd.DataFrame(results)
 
 # ================================================================
-# 10. STREAMLIT UI (IDENTICAL TO v29.11 - WITH CACHE CLEAR COMMENTED)
+# 10. STREAMLIT UI (UNCHANGED - except version label)
 # ================================================================
 
-# REMOVED: st.cache_resource.clear()   # Commented to avoid re-training each time
+# REMOVED: st.cache_resource.clear()
 
-st.set_page_config(page_title="PINN Framework v29.12", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Framework v29.13", page_icon="🧬", layout="wide")
 clamp_session_state()
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); 
             padding: 2rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
     <h1 style="color: #ffffff; font-size: 2.5rem; margin: 0;">
-        🧬 Hybrid AI Framework v29.12
+        🧬 Hybrid AI Framework v29.13
     </h1>
     <p style="color: #a8b2d1; font-size: 1.2rem; margin: 0.5rem 0 0 0;">
         Physics-Informed Neural Network · Multi-Objective Optimization
@@ -1402,7 +1424,7 @@ st.markdown("""
         Nile Valley University · Postgraduate College · Sudan
     </p>
     <p style="color: #ffd700; font-size: 0.85rem; margin: 0.5rem 0 0 0;">
-        ⚡ v29.12 — Log-Tensile Architecture (R² ≥ 0.85)
+        ⚡ v29.13 — Diagnostic Logging + Evaluation Lock Fix
     </p>
 </div>
 """, unsafe_allow_html=True)
@@ -1410,30 +1432,30 @@ st.markdown("""
 st.markdown("---")
 
 with st.sidebar:
-    st.markdown("### 📚 Physics Constraints (v29.12)")
+    st.markdown("### 📚 Physics Constraints (v29.13)")
     st.markdown(f"""
     - ✅ **Heckel:** ln(1/(1-D)) = kP + A
     - ✅ **EFRF:** ER / σt < {EFRF_MAX:.2f}
     - ✅ **Monotonicity:** ∂D/∂P > 0 (every {MONOTONICITY_FREQUENCY} epochs)
     - ✅ **Density Preference:** Gentle push toward 0.93–0.96
     - ✅ **EFRF Preference:** Extra penalty for > 0.36
-    - ✅ **Tensile Physics:** Log-Tensile Architecture (Ryshkewitch-Duckworth linearized)
+    - ✅ **Tensile Physics:** Log-Tensile + Ryshkewitch (weight 0.05)
     - ✅ **Soft Scheduling:** Sigmoid transition completes during Adam
     - ✅ **MCC:** ≤ {MCC_MAX:.1f}%
     - ✅ **Density:** {D_MIN:.2f} ≤ D ≤ {D_MAX:.2f}
     
-    **Multi-Task PINN (v29.12):**
-    - 5 outputs (D, σt, ER, k, A) where σt = exp(log_tensile)
+    **Multi-Task PINN (v29.13):**
+    - 5 outputs (D, σt, ER, k, A) – σt = exp(log_tensile)
     - Adam ({ADAM_EPOCHS}) → LBFGS ({LBFGS_STEPS})
     - Enhanced Network: 384→384→192 neurons
-    - **Key Innovation:** Predict log(tensile) directly → Ryshkewitch is linear
+    - **Diagnostics:** Gradient norm logging + test R² display
     - NSGA-II: pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS}
     """)
-    st.info(f"🔬 **v29.12** — Log-Tensile Architecture (R² ≥ 0.85)")
+    st.info(f"🔬 **v29.13** — Evaluation Fix + Diagnostics")
 
-with st.spinner("🔄 Training Multi-Task PINN (v29.12 Log-Tensile)..."):
+with st.spinner("🔄 Training Multi-Task PINN (v29.13 Diagnostic)..."):
     model, scaler, y_scaler, feature_names, df, loss_history = load_pinn_model()
-st.success("✅ Multi-Task True PINN (v29.12) trained successfully")
+st.success("✅ Multi-Task True PINN (v29.13) trained successfully")
 
 st.markdown("### 🧪 Quick Experiments")
 exp_cols = st.columns(4)
@@ -1478,7 +1500,7 @@ with col_left:
         speed = st.slider("🔄 Speed (rpm)", 1.0, 50.0, get_safe_value('speed'), 0.5, key="speed")
         granule = st.slider("🔬 Granule Size (µm)", 30.0, 250.0, get_safe_value('granule'), 1.0, key="granule")
     
-    predict_btn = st.button("🔬 Predict & Optimize (v29.12)", use_container_width=True)
+    predict_btn = st.button("🔬 Predict & Optimize (v29.13)", use_container_width=True)
 
 # ================================================================
 # RESULTS & TABS (SAME AS v29.11)
@@ -1518,7 +1540,7 @@ with col_right:
             api_use, mcc_use, pvpp_use, mgst_use, binder_use = api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm
             
             # Run prediction
-            with st.spinner("🧠 Running prediction (v29.12)..."):
+            with st.spinner("🧠 Running prediction (v29.13)..."):
                 density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs_norm)
             
             # Display KPIs
@@ -1548,7 +1570,7 @@ with col_right:
             pass_cols[3].metric(f"MCC ≤ {MCC_MAX:.1f}%", "✅ PASS" if mcc_ok else "❌ FAIL")
             
             # Physics Verification
-            with st.expander("🔬 Physics Verification (v29.12 Log-Tensile)"):
+            with st.expander("🔬 Physics Verification (v29.13)"):
                 try:
                     inputs_with_features = add_interaction_features(np.array([inputs_norm]))[0]
                     inputs_scaled = scaler.transform([inputs_with_features])
@@ -1557,7 +1579,7 @@ with col_right:
                         full_output = model.forward(X_tensor).numpy()[0]
                     st.metric("k (Plasticity)", f"{full_output[3]:.4f}")
                     st.metric("A (Rearrangement)", f"{full_output[4]:.4f}")
-                    st.caption("v29.12: Log-Tensile Architecture - Ryshkewitch is now linear")
+                    st.caption("v29.13: Log-Tensile Architecture + Diagnostics")
                 except:
                     pass
             
@@ -1652,7 +1674,7 @@ with col_right:
         elif predict_btn and objectives is not None:
             st.info("Pareto front not available (no feasible solutions found).")
         else:
-            st.info("👆 Please click 'Predict & Optimize (v29.12)' with a valid formulation (total = 100%) to generate the Pareto Front.")
+            st.info("👆 Please click 'Predict & Optimize (v29.13)' with a valid formulation (total = 100%) to generate the Pareto Front.")
     
     # === TAB 2: Sensitivity ===
     with tab2:
@@ -1664,18 +1686,18 @@ with col_right:
             else:
                 st.info("Sensitivity analysis not available.")
         else:
-            st.info("👆 Please click 'Predict & Optimize (v29.12)' with a valid formulation to run Sensitivity Analysis.")
+            st.info("👆 Please click 'Predict & Optimize (v29.13)' with a valid formulation to run Sensitivity Analysis.")
     
     # === TAB 3: Model Comparison ===
     with tab3:
-        st.markdown("### 📊 Model Performance Comparison (v29.12)")
+        st.markdown("### 📊 Model Performance Comparison (v29.13)")
         st.caption("Hold-out test set (20% of data) — R², RMSE, MAE, and Physical Validity")
         
         if predict_btn and not comp_df.empty:
             pinn_r2_val = comp_df[comp_df['Model'] == 'PINN (Proposed)']['R²'].values[0] if not comp_df.empty else 0
             pinn_valid_val = comp_df[comp_df['Model'] == 'PINN (Proposed)']['Physical_Validity'].values[0] if not comp_df.empty else ""
             
-            st.metric("PINN R² (v29.12)", f"{pinn_r2_val:.4f}", delta="Target: ≥ 0.85")
+            st.metric("PINN R² (v29.13)", f"{pinn_r2_val:.4f}", delta="Target: ≥ 0.85")
             
             if pinn_r2_val < 0.8 and pinn_valid_val == "✅ Fully Valid":
                 st.warning("⚠️ **Trade-off Detected:** R² is moderate (<0.8) but physical validity is fully satisfied. The model prioritises physics constraints over pure data fit to avoid physically impossible solutions. This is expected in True PINN frameworks.")
@@ -1693,7 +1715,7 @@ with col_right:
                     )
                 ])
                 fig_r2.update_layout(
-                    title='<b>R² Score Comparison (v29.12 Log-Tensile)</b>',
+                    title='<b>R² Score Comparison (v29.13)</b>',
                     yaxis=dict(title='R² Score', range=[0, 1.05]),
                     height=350,
                     showlegend=False
@@ -1711,7 +1733,7 @@ with col_right:
                     )
                 ])
                 fig_rmse.update_layout(
-                    title='<b>RMSE Comparison (v29.12)</b>',
+                    title='<b>RMSE Comparison (v29.13)</b>',
                     yaxis=dict(title='RMSE (MPa)'),
                     height=350,
                     showlegend=False
@@ -1728,11 +1750,11 @@ with col_right:
             if predict_btn:
                 st.info("Formulation must sum to 100% to generate comparison data.")
             else:
-                st.info("👆 Please click 'Predict & Optimize (v29.12)' with a valid formulation to see model performance comparison.")
+                st.info("👆 Please click 'Predict & Optimize (v29.13)' with a valid formulation to see model performance comparison.")
     
     # === TAB 4: Training Curves ===
     with tab4:
-        st.markdown("### 📈 Training Curves (v29.12 Log-Tensile)")
+        st.markdown("### 📈 Training Curves (v29.13)")
         fig_loss = plot_training_curves(loss_history)
         if fig_loss:
             st.plotly_chart(fig_loss, use_container_width=True)
@@ -1766,8 +1788,8 @@ with col_right:
             if predict_btn:
                 st.info("Formulation must sum to 100% to generate the report.")
             else:
-                st.info("👆 Please click 'Predict & Optimize (v29.12)' with a valid formulation to generate the report.")
+                st.info("👆 Please click 'Predict & Optimize (v29.13)' with a valid formulation to generate the report.")
 
 st.markdown("---")
-st.caption(f"🔬 **Multi-Task True PINN — v29.12 (Log-Tensile Architecture - R² ≥ 0.85)**")
+st.caption(f"🔬 **Multi-Task True PINN — v29.13 (Diagnostic Logging + Evaluation Fix)**")
 st.caption(f"📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Postgraduate College, Sudan")
