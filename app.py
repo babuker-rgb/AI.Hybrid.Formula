@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 29.19 (Stable Log-Space Loss + Monotonicity Constraint)
+Version: 29.19 (Stable Log-Loss + Huber + Gradient Clipping)
 """
 
 import streamlit as st
@@ -29,7 +29,7 @@ import os
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. USER-CONFIGURABLE PARAMETERS (v29.19 - STABLE LOG-LOSS)
+# 0. USER-CONFIGURABLE PARAMETERS (v29.19)
 # ================================================================
 
 TENSILE_MIN = 1.90          # MPa
@@ -46,7 +46,7 @@ BINDER_MAX = 5.0
 # --- Hyperparameters ---
 N_SAMPLES = 6000
 ADAM_EPOCHS = 1000
-LBFGS_STEPS = 3
+LBFGS_STEPS = 0             # Disabled LBFGS due to instability, will skip
 MONOTONICITY_FREQUENCY = 10
 
 # --- NSGA-II Parameters ---
@@ -69,20 +69,14 @@ DENSITY_LOWER_CONSTRAINT = 0.90
 DENSITY_UPPER_CONSTRAINT = 0.97
 USE_SMART_SEEDING = True
 
-# --- Loss Weights (Stable Log-Space + Light Physics) ---
+# --- Loss Weights ---
 W_DENSITY = 1.5
-W_TENSILE_INIT = 5.0           # Moderate initial weight
-W_TENSILE_FINAL = 2.0           # Lower final weight
-W_PHYSICS_BASE = 0.5            # Light physics weight (monotonicity)
-W_PHYSICS_FINAL = 1.5           # Slightly higher towards end
+W_TENSILE_INIT = 5.0
+W_TENSILE_FINAL = 2.0
+W_PHYSICS_BASE = 0.5
+W_PHYSICS_FINAL = 1.5
 W_EFRF = 2.0
 W_DENSITY_PENALTY = 12.0
-
-# --- Physics / Data Balance (for backward compatibility) ---
-W_DATA_INIT = 1.0
-W_PHYSICS_INIT = 0.3
-W_DATA_FINAL = 1.0
-W_PHYSICS_FINAL = 0.5
 
 # --- Ryshkewitch (COMPLETELY REMOVED) ---
 RYSK_LOSS_WEIGHT = 0.0
@@ -266,7 +260,7 @@ def add_interaction_features(X_raw):
     ], axis=1)
 
 # ================================================================
-# 4. MULTI-TASK TRUE PINN MODEL (v29.19 - STABLE LOG-LOSS)
+# 4. MULTI-TASK TRUE PINN MODEL (v29.19 - SAFE ACTIVATIONS)
 # ================================================================
 
 def bounded_density(raw):
@@ -276,20 +270,37 @@ class MultiTaskTruePINN(nn.Module):
     def __init__(self, input_dim=13, output_dim=5):
         super(MultiTaskTruePINN, self).__init__()
         self.network = nn.Sequential(
-            nn.Linear(input_dim, 384), nn.LayerNorm(384), nn.Tanh(), nn.Dropout(0.05),
-            nn.Linear(384, 384), nn.LayerNorm(384), nn.Tanh(), nn.Dropout(0.05),
-            nn.Linear(384, 192), nn.LayerNorm(192), nn.Tanh(),
+            nn.Linear(input_dim, 384),
+            nn.BatchNorm1d(384),  # Added for stability
+            nn.SiLU(),            # Swish/SiLU for smoother gradients
+            nn.Dropout(0.05),
+            nn.Linear(384, 384),
+            nn.BatchNorm1d(384),
+            nn.SiLU(),
+            nn.Dropout(0.05),
+            nn.Linear(384, 192),
+            nn.BatchNorm1d(192),
+            nn.SiLU(),
             nn.Linear(192, output_dim)
         )
 
     def forward(self, X):
         raw = self.network(X)
+        
+        # --- SAFE OUTPUTS ---
         density = bounded_density(raw[:, 0:1])
-        log_tensile = raw[:, 1:2]
-        tensile = torch.exp(log_tensile)
+        
+        # SAFE: Use Softplus instead of exp, clamp to avoid explosion
+        tensile = torch.clamp(
+            torch.nn.functional.softplus(raw[:, 1:2]),
+            min=0.1,
+            max=20.0
+        )
+        
         er = torch.nn.functional.softplus(raw[:, 2:3]) + 1e-4
         k = torch.nn.functional.softplus(raw[:, 3:4]) + 1e-4
         A = raw[:, 4:5]
+        
         return torch.cat([density, tensile, er, k, A], dim=1)
 
     def predict(self, X_scaled):
@@ -312,7 +323,7 @@ class MultiTaskTruePINN(nn.Module):
 
         y_pred = self.forward(X_scaled)
         density_pred = y_pred[:, 0:1]
-        tensile_pred = y_pred[:, 1:2]   # exp(log_tensile)
+        tensile_pred = y_pred[:, 1:2]   # Now softplus, not exp
         er_pred = y_pred[:, 2:3]
         k_pred = y_pred[:, 3:4]
         A_pred = y_pred[:, 4:5]
@@ -331,10 +342,11 @@ class MultiTaskTruePINN(nn.Module):
         # 2. Data Loss (Log-Space for Tensile - Stable)
         # ------------------------------
         density_data_loss = nn.MSELoss()(density_pred, y_true[:, 0:1])
-        # Tensile loss in log-space to avoid gradient explosion
-        log_tensile_pred = torch.log(tensile_pred + 1e-6)
-        log_tensile_true = torch.log(y_true[:, 1:2] + 1e-6)
-        tensile_data_loss = nn.MSELoss()(log_tensile_pred, log_tensile_true)
+        
+        # Tensile loss: Huber loss to reduce impact of outliers
+        huber_criterion = nn.HuberLoss(delta=1.0)
+        tensile_data_loss = huber_criterion(tensile_pred, y_true[:, 1:2])
+        
         er_data_loss = nn.MSELoss()(er_pred, y_true[:, 2:3])
         data_loss = density_data_loss + w_tensile * tensile_data_loss + er_data_loss
 
@@ -354,7 +366,6 @@ class MultiTaskTruePINN(nn.Module):
 
         # ------------------------------
         # 5. Physics: Tensile-Density Monotonicity (Light Constraint)
-        #    Enforce that tensile increases with density.
         # ------------------------------
         if density_pred.numel() > 1:
             sorted_indices = torch.argsort(density_pred.squeeze())
@@ -1084,7 +1095,7 @@ class NSGAII:
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 8. TRAIN MODEL (v29.19 - STABLE LOG-LOSS)
+# 8. TRAIN MODEL (v29.19 - SAFE)
 # ================================================================
 
 @st.cache_resource
@@ -1156,8 +1167,7 @@ def load_pinn_model(version="v29.19"):
 
         total_loss.backward()
 
-        # Gradient clipping is already applied in compute_loss via clip_grad_norm_ later
-        # But we also apply it here to be safe
+        # --- SAFETY: Gradient Clipping ---
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
         if (epoch + 1) % 100 == 0:
@@ -1211,33 +1221,8 @@ def load_pinn_model(version="v29.19"):
     else:
         st.caption("⚠️ No best state saved. Using final weights.")
 
-    optimizer_lbfgs = optim.LBFGS(
-        model.parameters(),
-        lr=0.05,
-        max_iter=200,
-        line_search_fn='strong_wolfe'
-    )
-
-    def closure():
-        optimizer_lbfgs.zero_grad()
-        final_epoch = ADAM_EPOCHS
-        total_loss, _ = model.compute_loss(
-            X_scaled_train_t, X_raw_train_t, y_train_t,
-            epoch=final_epoch, max_epochs=ADAM_EPOCHS,
-            w_density=W_DENSITY,
-            w_tensile_init=W_TENSILE_INIT, w_tensile_final=W_TENSILE_FINAL,
-            w_physics_base=W_PHYSICS_BASE, w_physics_final=W_PHYSICS_FINAL,
-            w_mcc=0.5, w_density_penalty=W_DENSITY_PENALTY,
-            efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
-            compute_grad=True
-        )
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        return total_loss
-
-    for i in range(LBFGS_STEPS):
-        optimizer_lbfgs.step(closure)
-        progress_bar.progress(min(0.6 + 0.08 * (i + 1), 1.0))
+    # LBFGS disabled to avoid instability - we skip it
+    # optimizer_lbfgs = optim.LBFGS(...) # skipped
 
     model.eval()
     with torch.no_grad():
@@ -1312,7 +1297,7 @@ def plot_training_curves(loss_history):
         ))
 
     fig.update_layout(
-        title='Training Curves (v29.19 - Stable Log-Loss)',
+        title='Training Curves (v29.19 - Safe Activations)',
         xaxis=dict(title='Epoch'),
         yaxis=dict(title='Loss', type='log'),
         height=400,
@@ -1508,7 +1493,7 @@ st.markdown("""
         Nile Valley University · Postgraduate College · Sudan
     </p>
     <p style="color: #ffd700; font-size: 0.85rem; margin: 0.5rem 0 0 0;">
-        ⚡ v29.19 — Stable Log-Space Loss + Monotonicity
+        ⚡ v29.19 — Safe Activations + Gradient Clipping
     </p>
 </div>
 """, unsafe_allow_html=True)
@@ -1523,21 +1508,21 @@ with st.sidebar:
     - ✅ **Monotonicity:** ∂D/∂P > 0 (every {MONOTONICITY_FREQUENCY} epochs)
     - ✅ **Density Preference:** Safe zone 0.90–0.97 (expanded)
     - ✅ **EFRF Preference:** Extra penalty for > 0.36
-    - ✅ **Tensile Physics:** Log-space loss + monotonicity constraint
+    - ✅ **Tensile Physics:** Safe Softplus + Huber Loss + Clipping
     - ✅ **Dynamic Scheduling:** Sigmoid annealing of weights
     - ✅ **MCC:** ≤ {MCC_MAX:.1f}%
     - ✅ **Density:** {D_MIN:.2f} ≤ D ≤ {D_MAX:.2f}
 
     **Multi-Task PINN (v29.19):**
-    - 5 outputs (D, σt, ER, k, A) – σt = exp(log_tensile)
-    - Adam ({ADAM_EPOCHS}) → LBFGS ({LBFGS_STEPS})
-    - Enhanced Network: 384→384→192 neurons
-    - **Loss:** Log-space tensile MSE + monotonicity constraint
-    - **Scheduling:** W_tensile {W_TENSILE_INIT}→{W_TENSILE_FINAL}, W_phys {W_PHYSICS_BASE}→{W_PHYSICS_FINAL}
+    - 5 outputs (D, σt, ER, k, A) – σt = clamped Softplus
+    - Adam ({ADAM_EPOCHS}) → No LBFGS (for stability)
+    - Enhanced Network: 384→384→192 with BatchNorm & SiLU
+    - **Loss:** Huber loss + log-space for Tensile
+    - **Gradient Clipping:** max_norm = 1.0
     - NSGA-II: SBX ηc=40, Smart Seeding 30%
     - NSGA-II: pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS}
     """)
-    st.info(f"🔬 **v29.19** — Stable Log-Loss + Monotonicity")
+    st.info(f"🔬 **v29.19** — Safe Activations + Clipping")
 
 with st.spinner("🔄 Training Multi-Task PINN (v29.19)..."):
     model, scaler, y_scaler, feature_names, df, loss_history = load_pinn_model(version="v29.19")
@@ -1658,7 +1643,7 @@ with col_right:
                         full_output = model.forward(X_tensor).numpy()[0]
                     st.metric("k (Plasticity)", f"{full_output[3]:.4f}")
                     st.metric("A (Rearrangement)", f"{full_output[4]:.4f}")
-                    st.caption("v29.19: Stable Log-Loss + Monotonicity")
+                    st.caption("v29.19: Safe activations + clipping")
                 except:
                     pass
 
@@ -1864,5 +1849,5 @@ with col_right:
                 st.info("👆 Please click 'Predict & Optimize (v29.19)' with a valid formulation to generate the report.")
 
 st.markdown("---")
-st.caption(f"🔬 **Multi-Task True PINN — v29.19 (Stable Log-Space Loss + Monotonicity)**")
+st.caption(f"🔬 **Multi-Task True PINN — v29.19 (Safe Activations + Gradient Clipping)**")
 st.caption(f"📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Postgraduate College, Sudan")
