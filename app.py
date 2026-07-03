@@ -1375,7 +1375,15 @@ def train_and_compare(X_train, X_test, y_train, y_test):
 # 10. STREAMLIT UI (UNCHANGED - IDENTICAL TO v29.11)
 # ================================================================
 
-st.cache_resource.clear()
+# ================================================================
+# 10. STREAMLIT UI (UNCHANGED - IDENTICAL TO v29.11)
+# ================================================================
+
+# تم تعليق هذا السطر لمنع إعادة التدريب في كل مرة
+# st.cache_resource.clear()
+
+st.set_page_config(page_title="PINN Framework v29.11", page_icon="🧬", layout="wide")
+clamp_session_state()
 
 st.set_page_config(page_title="PINN Framework v29.11", page_icon="🧬", layout="wide")
 clamp_session_state()
