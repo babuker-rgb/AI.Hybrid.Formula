@@ -4,7 +4,7 @@ Multi-Objective Tablet Manufacturing Optimization with Full Analytics
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University, Postgraduate College, Sudan
-Version: 29.22 (Back to Basics: Real-space MSE + Light Tensile Physics)
+Version: 29.22 (Fixed Plotly Layout Bug)
 """
 
 import streamlit as st
@@ -68,7 +68,7 @@ DENSITY_LOWER_CONSTRAINT = 0.90
 DENSITY_UPPER_CONSTRAINT = 0.97
 USE_SMART_SEEDING = True
 
-# --- Loss Weights (Back to Real-space MSE) ---
+# --- Loss Weights ---
 W_DENSITY = 1.5
 W_TENSILE = 3.0              # Real-space MSE weight
 W_TENSILE_PHYSICS = 0.1      # Light physics: σt × D > 0.3
@@ -242,7 +242,7 @@ def add_interaction_features(X_raw):
     ], axis=1)
 
 # ================================================================
-# 3. PINN MODEL (v29.22 - Back to Basics)
+# 3. PINN MODEL (v29.22)
 # ================================================================
 
 def bounded_density(raw):
@@ -251,7 +251,6 @@ def bounded_density(raw):
 class MultiTaskTruePINN(nn.Module):
     def __init__(self, input_dim=13, output_dim=5):
         super(MultiTaskTruePINN, self).__init__()
-        # Use Tanh for stability (proven in earlier versions)
         self.network = nn.Sequential(
             nn.Linear(input_dim, 384),
             nn.Tanh(),
@@ -267,7 +266,6 @@ class MultiTaskTruePINN(nn.Module):
     def forward(self, X):
         raw = self.network(X)
         density = bounded_density(raw[:, 0:1])
-        # Tensile: softplus only (no bounding, let physics guide it)
         tensile = torch.nn.functional.softplus(raw[:, 1:2]) + 1e-4
         er = torch.nn.functional.softplus(raw[:, 2:3]) + 1e-4
         k = torch.nn.functional.softplus(raw[:, 3:4]) + 1e-4
@@ -300,40 +298,38 @@ class MultiTaskTruePINN(nn.Module):
         k_pred = y_pred[:, 3:4]
         A_pred = y_pred[:, 4:5]
 
-        # Scheduling
         progress = epoch / max_epochs
         schedule_factor = 1 / (1 + math.exp(-10 * (progress - 0.5)))
         w_physics = w_physics_base + (w_physics_final - w_physics_base) * schedule_factor
         w_physics = max(w_physics, 0.1)
 
-        # --- Data Loss (Real-space MSE for Tensile) ---
+        # --- Data Loss ---
         density_data_loss = nn.MSELoss()(density_pred, y_true[:, 0:1])
         tensile_data_loss = nn.MSELoss()(tensile_pred, y_true[:, 1:2])
         er_data_loss = nn.MSELoss()(er_pred, y_true[:, 2:3])
         data_loss = density_data_loss + w_tensile * tensile_data_loss + er_data_loss
 
-        # --- Physics: Tensile-Density relation (light constraint) ---
-        # Physical law: higher density should give higher tensile (σt * D > 0.3)
+        # --- Light Tensile Physics (σt × D > 0.3) ---
         tensile_physics_loss = torch.mean(torch.relu(0.3 - (tensile_pred * density_pred)) ** 2) * w_tensile_physics
 
-        # --- Physics: Heckel Equation ---
+        # --- Heckel Equation ---
         heckel_lhs = torch.log(1.0 / torch.clamp(1.0 - density_pred, min=1e-4))
         heckel_rhs = k_pred * pressure_real + A_pred
         heckel_loss = torch.mean((heckel_lhs - heckel_rhs) ** 2)
 
-        # --- Physics: EFRF Bound ---
+        # --- EFRF Bound ---
         efrf_pred = er_pred / torch.clamp(tensile_pred, min=1e-4)
         efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
         efrf_safe_loss = torch.mean(torch.relu(efrf_pred - 0.36) ** 2) * EFRF_PENALTY_WEIGHT
 
-        # --- Physics: Density Bounds ---
+        # --- Density Bounds ---
         mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
         density_penalty = torch.mean(
             torch.relu(density_pred - D_MAX) ** 2 + torch.relu(D_MIN - density_pred) ** 2
         )
         density_preference_loss = torch.mean(torch.relu(density_pred - DENSITY_PREFERENCE_LIMIT) ** 2) * DENSITY_PREFERENCE_WEIGHT
 
-        # --- Original Monotonicity (∂D/∂P > 0) ---
+        # --- Monotonicity (∂D/∂P > 0) ---
         if compute_grad:
             Xg = X_scaled.clone().detach().requires_grad_(True)
             yg = self.forward(Xg)
@@ -386,7 +382,7 @@ class MultiTaskTruePINN(nn.Module):
         return total_loss, loss_dict
 
 # ================================================================
-# 4. DATA GENERATION (UNCHANGED)
+# 4. DATA GENERATION
 # ================================================================
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
@@ -445,7 +441,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# 5. PDF GENERATION (UNCHANGED - shortened)
+# 5. PDF GENERATION (UNCHANGED)
 # ================================================================
 
 def sanitize_text(text):
@@ -536,6 +532,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
             pdf.cell(35, 6, sanitize_text(r[1]), 1, 0, "C")
             pdf.cell(45, 6, sanitize_text(r[2]), 1, 1, "C")
     pdf.ln(4)
+    # Overall Status
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, sanitize_text("4. Overall Status"), ln=True, fill=True)
@@ -548,6 +545,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
         pdf.cell(0, 8, sanitize_text("FAIL - Formulation Does NOT Satisfy All Constraints"), ln=True, align="C")
     pdf.set_text_color(0, 0, 0)
     pdf.ln(4)
+    # Model Comparison
     if model_comparison_df is not None and not model_comparison_df.empty:
         pdf.set_font("Arial", "B", 13)
         pdf.set_fill_color(230, 230, 230)
@@ -567,6 +565,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
             pdf.cell(30, 6, f"{row['MAE']:.4f}", 1, 0, "C")
             pdf.cell(40, 6, sanitize_text(str(row['Physical_Validity'])), 1, 1, "L")
         pdf.ln(4)
+    # Recommendations
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, sanitize_text("6. Recommendations"), ln=True, fill=True)
@@ -586,6 +585,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     for rec in recs:
         pdf.cell(0, 6, sanitize_text(rec), ln=True)
     pdf.ln(4)
+    # Contact
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, sanitize_text("7. Contact Information"), ln=True, fill=True)
@@ -607,7 +607,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
         return str(pdf_bytes).encode('latin1')
 
 # ================================================================
-# 6. NSGA-II (UNCHANGED - same as v29.21)
+# 6. NSGA-II (UNCHANGED)
 # ================================================================
 
 class NSGAII:
@@ -1051,7 +1051,6 @@ def load_pinn_model(version="v29.22"):
         pred_tensile = pred_original[:, 1]
         y_test_original = y_scaler.inverse_transform(y_test)
         y_tensile_true = y_test_original[:, 1]
-        # Filter out inf/nan if any
         valid_mask = np.isfinite(pred_tensile) & np.isfinite(y_tensile_true)
         if np.sum(valid_mask) > 0:
             test_r2 = r2_score(y_tensile_true[valid_mask], pred_tensile[valid_mask])
@@ -1066,7 +1065,7 @@ def load_pinn_model(version="v29.22"):
     return model, scaler, y_scaler, feature_names, df, loss_history
 
 # ================================================================
-# 8. PREDICTION & PLOTS (UNCHANGED from v29.21)
+# 8. PREDICTION & PLOTS
 # ================================================================
 
 def predict_pinn(model, scaler, y_scaler, inputs):
@@ -1181,10 +1180,10 @@ def train_and_compare(X_train, X_test, y_train, y_test):
     return pd.DataFrame(results)
 
 # ================================================================
-# 9. STREAMLIT UI (UNCHANGED - same as v29.21)
+# 9. STREAMLIT UI
 # ================================================================
 
-st.cache_resource.clear()  # Ensure fresh training
+st.cache_resource.clear()
 
 st.set_page_config(page_title="PINN Framework v29.22", page_icon="🧬", layout="wide")
 clamp_session_state()
@@ -1279,7 +1278,7 @@ with col_left:
     predict_btn = st.button("🔬 Predict & Optimize (v29.22)", use_container_width=True)
 
 # ================================================================
-# RESULTS & TABS (same as v29.21)
+# RESULTS & TABS (FIXED PLOTLY LAYOUT)
 # ================================================================
 with col_right:
     st.markdown("### 📈 Results")
@@ -1452,15 +1451,34 @@ with col_right:
             col1, col2 = st.columns(2)
             with col1:
                 colors_r2 = ['#2ecc71' if m == 'PINN (Proposed)' else '#3498db' for m in comp_df['Model']]
-                fig_r2 = go.Figure(data=[go.Bar(x=comp_df['Model'], y=comp_df['R²'], marker_color=colors_r2, text=[f"{v:.4f}" for v in comp_df['R²']], textposition='outside')])
-                fig_r2.update_layout(title='<b>R² Score Comparison (v29.22)</b>', yaxis_title='R² Score', range=[0, 1.05], height=350, showlegend=False)
+                fig_r2 = go.Figure(data=[
+                    go.Bar(x=comp_df['Model'], y=comp_df['R²'], marker_color=colors_r2, 
+                           text=[f"{v:.4f}" for v in comp_df['R²']], textposition='outside')
+                ])
+                # FIXED: Moved 'range' inside yaxis dict
+                fig_r2.update_layout(
+                    title='<b>R² Score Comparison (v29.22)</b>',
+                    yaxis=dict(title='R² Score', range=[0, 1.05]),
+                    height=350,
+                    showlegend=False
+                )
                 st.plotly_chart(fig_r2, use_container_width=True)
             with col2:
                 colors_rmse = ['#e74c3c' if m == 'PINN (Proposed)' else '#95a5a6' for m in comp_df['Model']]
-                fig_rmse = go.Figure(data=[go.Bar(x=comp_df['Model'], y=comp_df['RMSE'], marker_color=colors_rmse, text=[f"{v:.4f}" for v in comp_df['RMSE']], textposition='outside')])
-                fig_rmse.update_layout(title='<b>RMSE Comparison (v29.22)</b>', yaxis_title='RMSE (MPa)', height=350, showlegend=False)
+                fig_rmse = go.Figure(data=[
+                    go.Bar(x=comp_df['Model'], y=comp_df['RMSE'], marker_color=colors_rmse,
+                           text=[f"{v:.4f}" for v in comp_df['RMSE']], textposition='outside')
+                ])
+                fig_rmse.update_layout(
+                    title='<b>RMSE Comparison (v29.22)</b>',
+                    yaxis=dict(title='RMSE (MPa)'),
+                    height=350,
+                    showlegend=False
+                )
                 st.plotly_chart(fig_rmse, use_container_width=True)
-            st.dataframe(comp_df.style.highlight_max(subset=['R²'], color='lightgreen').highlight_min(subset=['RMSE', 'MAE'], color='lightcoral'), use_container_width=True, hide_index=True)
+            st.dataframe(comp_df.style.highlight_max(subset=['R²'], color='lightgreen')
+                        .highlight_min(subset=['RMSE', 'MAE'], color='lightcoral'), 
+                        use_container_width=True, hide_index=True)
         else:
             if predict_btn:
                 st.info("Formulation must sum to 100% to generate comparison data.")
