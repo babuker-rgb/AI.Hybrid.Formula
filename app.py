@@ -3,7 +3,7 @@ True Physics-Informed Neural Network (PINN) - Final Version v29.36
 Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
-Version: 29.36 (Both stars: Blue = User, Gold = Optimal)
+Version: 29.36 (Updated load & plot functions)
 """
 
 import streamlit as st
@@ -654,103 +654,97 @@ def plot_training_curves(loss_history):
     fig.update_layout(title='Training Curves (v29.36)', xaxis_title='Epoch', yaxis_title='Loss', height=400)
     return fig
 
-def plot_pareto_plotly(objectives, constraints, fronts, user_api=None, user_efrf=None,
-                       golden_api=None, golden_efrf=None):
+# --- NEW: Pareto plotting with two stars ---
+def plot_pareto_with_stars(objectives, fronts,
+                           user_api=None, user_efrf=None,
+                           golden_api=None, golden_efrf=None):
     """
-    Plot Pareto front with TWO stars:
+    Plot Pareto front with two stars:
     - Blue star: user's tested formulation
     - Gold star: optimal (golden) solution
     """
-    try:
-        if objectives is None or fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
-            return None
-
-        front0 = fronts[0]
-        pareto_api = -objectives[front0, 0]
-        pareto_efrf = objectives[front0, 1]
-
-        fig = go.Figure()
-
-        # All solutions (gray, transparent)
-        fig.add_trace(go.Scatter(
-            x=-objectives[:, 0],
-            y=objectives[:, 1],
-            mode='markers',
-            marker=dict(size=4, color='gray', opacity=0.3),
-            name='All Solutions'
-        ))
-
-        # Pareto front (red line + markers)
-        fig.add_trace(go.Scatter(
-            x=pareto_api,
-            y=pareto_efrf,
-            mode='lines+markers',
-            marker=dict(size=8, color='red'),
-            line=dict(color='red', width=2),
-            name='Pareto Front'
-        ))
-
-        # --- GOLDEN STAR (optimal solution) ---
-        if golden_api is not None and golden_efrf is not None:
-            fig.add_trace(go.Scatter(
-                x=[golden_api],
-                y=[golden_efrf],
-                mode='markers+text',
-                marker=dict(
-                    size=18,
-                    color='gold',
-                    symbol='star',
-                    line=dict(color='darkgoldenrod', width=2)
-                ),
-                text=['⭐ Golden'],
-                textposition='top center',
-                name='Golden Solution (Optimal)'
-            ))
-
-        # --- BLUE STAR (user's tested formulation) ---
-        if user_api is not None and user_efrf is not None:
-            fig.add_trace(go.Scatter(
-                x=[user_api],
-                y=[user_efrf],
-                mode='markers+text',
-                marker=dict(
-                    size=14,
-                    color='blue',
-                    symbol='star',
-                    line=dict(color='darkblue', width=2)
-                ),
-                text=['🔵 Your Formulation'],
-                textposition='top center',
-                name='Your Formulation'
-            ))
-
-        # EFRF threshold line
-        fig.add_hline(
-            y=EFRF_MAX,
-            line_dash='dash',
-            line_color='red',
-            annotation_text=f'EFRF Threshold: {EFRF_MAX:.2f}',
-            annotation_position='top right'
-        )
-
-        fig.update_layout(
-            title='Pareto Front: API vs EFRF (v29.36)',
-            xaxis_title='API (%)',
-            yaxis_title='EFRF',
-            height=500,
-            template='plotly_white',
-            legend=dict(
-                orientation='h',
-                yanchor='bottom',
-                y=1.02,
-                xanchor='right',
-                x=1
-            )
-        )
-        return fig
-    except Exception as e:
-        st.error(f"Pareto plot error: {e}")
+    if objectives is None or fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
+
+    # Pareto front (first front)
+    front0 = fronts[0]
+    pareto_api = -objectives[front0, 0]
+    pareto_efrf = objectives[front0, 1]
+
+    fig = go.Figure()
+
+    # All solutions (gray transparent)
+    fig.add_trace(go.Scatter(
+        x=-objectives[:, 0],
+        y=objectives[:, 1],
+        mode='markers',
+        marker=dict(size=4, color='gray', opacity=0.3),
+        name='All Solutions'
+    ))
+
+    # Pareto front (red line + markers)
+    fig.add_trace(go.Scatter(
+        x=pareto_api,
+        y=pareto_efrf,
+        mode='lines+markers',
+        marker=dict(size=8, color='red'),
+        line=dict(color='red', width=2),
+        name='Pareto Front'
+    ))
+
+    # ⭐ Golden Star (optimal solution)
+    if golden_api is not None and golden_efrf is not None:
+        fig.add_trace(go.Scatter(
+            x=[golden_api],
+            y=[golden_efrf],
+            mode='markers+text',
+            marker=dict(
+                size=18,
+                color='gold',
+                symbol='star',
+                line=dict(color='darkgoldenrod', width=2)
+            ),
+            text=['⭐ Golden'],
+            textposition='top center',
+            name='Golden Solution'
+        ))
+
+    # 🔵 Blue Star (user's tested formulation)
+    if user_api is not None and user_efrf is not None:
+        fig.add_trace(go.Scatter(
+            x=[user_api],
+            y=[user_efrf],
+            mode='markers+text',
+            marker=dict(
+                size=14,
+                color='blue',
+                symbol='star',
+                line=dict(color='darkblue', width=2)
+            ),
+            text=['🔵 Tested'],
+            textposition='top center',
+            name='Tested Solution'
+        ))
+
+    # EFRF threshold line
+    fig.add_hline(
+        y=EFRF_MAX,
+        line_dash='dash',
+        line_color='red',
+        annotation_text=f'EFRF Threshold: {EFRF_MAX:.2f}',
+        annotation_position='top right'
+    )
+
+    fig.update_layout(
+        title='Pareto Front with Two Stars (v29.36)',
+        xaxis_title='API (%)',
+        yaxis_title='EFRF',
+        height=500,
+        template='plotly_white',
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+    )
+
+    return fig
 
 def plot_sensitivity_plotly(inputs, model, scaler, y_scaler):
     try:
@@ -875,7 +869,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     return pdf_bytes
 
 # ================================================================
-# 6. MODEL LOADING / TRAINING
+# 6. MODEL LOADING / TRAINING (UPDATED with simple try/except)
 # ================================================================
 
 @st.cache_resource
@@ -898,12 +892,8 @@ def load_or_train_model():
             else:
                 st.warning("⚠️ Cached file is missing some keys. Re-training...")
                 os.remove(checkpoint_path)
-    except (EOFError, pickle.UnpicklingError, KeyError, RuntimeError) as e:
-        st.warning(f"⚠️ Cached model file is corrupted or incompatible. Re-training... (Error: {str(e)[:80]})")
-        if os.path.exists(checkpoint_path):
-            os.remove(checkpoint_path)
     except Exception as e:
-        st.warning(f"⚠️ Unexpected error loading model: {str(e)[:80]}. Re-training...")
+        st.warning(f"⚠️ Cached model file is corrupted or incompatible. Re-training... (Error: {str(e)[:80]})")
         if os.path.exists(checkpoint_path):
             os.remove(checkpoint_path)
 
@@ -1237,8 +1227,9 @@ with col_right:
             golden_api = golden_info['api'] if golden_info else None
             golden_efrf = golden_info['efrf'] if golden_info else None
 
-            fig = plot_pareto_plotly(
-                objectives, constraints, fronts,
+            fig = plot_pareto_with_stars(
+                objectives=objectives,
+                fronts=fronts,
                 user_api=api_norm,
                 user_efrf=efrf,
                 golden_api=golden_api,
