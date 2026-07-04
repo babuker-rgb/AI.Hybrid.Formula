@@ -3,7 +3,7 @@ True Physics-Informed Neural Network (PINN) - Fully Optimized for Streamlit Clou
 Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
-Version: 29.28 (GPU + Early Stopping + Simplified Loss)
+Version: 29.29 (Robust Cache Handling)
 """
 
 import streamlit as st
@@ -23,6 +23,7 @@ import plotly.express as px
 import time
 import math
 import os
+import pickle  # للتعامل مع UnpicklingError
 warnings.filterwarnings('ignore')
 
 # ================================================================
@@ -235,7 +236,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# 3. PINN MODEL (مع دالة الخسارة المُبسَّطة)
+# 3. PINN MODEL
 # ================================================================
 
 class Mish(nn.Module):
@@ -258,7 +259,6 @@ class ResidualBlock(nn.Module):
 class MultiTaskTruePINN(nn.Module):
     def __init__(self, input_dim=13, output_dim=5):
         super(MultiTaskTruePINN, self).__init__()
-        # شبكة متوسطة (256 عصبوناً)
         self.input_layer = nn.Sequential(
             nn.Linear(input_dim, 256),
             Mish()
@@ -295,9 +295,6 @@ class MultiTaskTruePINN(nn.Module):
             output = self.forward(X_scaled)
             return output[:, :3].cpu().numpy()
 
-    # ============================================================
-    # دالة الخسارة المُبسَّطة (المُحسَّنة لـ R²)
-    # ============================================================
     def compute_loss(self, X_scaled, X_raw, y_true, epoch=0, max_epochs=ADAM_EPOCHS,
                      w_density=2.0, w_tensile=4.0, w_tensile_physics=0.5,
                      w_physics_base=0.5, w_physics_final=1.5, w_mcc=0.5,
@@ -314,19 +311,16 @@ class MultiTaskTruePINN(nn.Module):
         k_pred = y_pred[:, 3:4]
         A_pred = y_pred[:, 4:5]
 
-        # --- جدولة وزن الفيزياء ---
         progress = epoch / max_epochs
         schedule_factor = 1 / (1 + math.exp(-10 * (progress - 0.5)))
         w_physics = w_physics_base + (w_physics_final - w_physics_base) * schedule_factor
         w_physics = max(w_physics, 0.1)
 
-        # --- خسارة البيانات (أوزان أعلى للكثافة و ER) ---
         density_data_loss = nn.MSELoss()(density_pred, y_true[:, 0:1])
         tensile_data_loss = nn.MSELoss()(tensile_pred, y_true[:, 1:2])
         er_data_loss = nn.MSELoss()(er_pred, y_true[:, 2:3])
         data_loss = (2.0 * density_data_loss) + (w_tensile * tensile_data_loss) + (2.0 * er_data_loss)
 
-        # --- القيود الفيزيائية ---
         tensile_physics_loss = torch.mean(torch.relu(0.3 - (tensile_pred * density_pred)) ** 2) * w_tensile_physics
         heckel_lhs = torch.log(1.0 / torch.clamp(1.0 - density_pred, min=1e-4))
         heckel_rhs = k_pred * pressure_real + A_pred
@@ -334,13 +328,11 @@ class MultiTaskTruePINN(nn.Module):
         efrf_pred = er_pred / torch.clamp(tensile_pred, min=1e-4)
         efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
 
-        # --- عقوبات إضافية ---
         mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
         density_penalty = torch.mean(
             torch.relu(density_pred - D_MAX) ** 2 + torch.relu(D_MIN - density_pred) ** 2
         )
 
-        # --- المجموع النهائي ---
         total_loss = (
             data_loss +
             (0.7 * w_density_penalty) * density_penalty +
@@ -351,7 +343,7 @@ class MultiTaskTruePINN(nn.Module):
         return total_loss, {'total_loss': total_loss.item()}
 
 # ================================================================
-# 4. NSGA-II (مختصر)
+# 4. NSGA-II
 # ================================================================
 
 class NSGAII:
@@ -698,27 +690,42 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     return pdf_bytes
 
 # ================================================================
-# 6. دالة تحميل أو تدريب النموذج (مع GPU و Early Stopping)
+# 6. دالة تحميل أو تدريب النموذج (مع معالجة الأخطاء)
 # ================================================================
 
 @st.cache_resource
 def load_or_train_model():
     checkpoint_path = '/tmp/pinn_best_model.pt'
     
-    # 1. محاولة تحميل النموذج المُدرَّب مسبقاً
-    if os.path.exists(checkpoint_path):
-        st.caption("📂 Loading cached model from /tmp...")
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
-        model = MultiTaskTruePINN(input_dim=13)
-        model.load_state_dict(checkpoint['model_state'])
-        scaler = checkpoint['scaler']
-        y_scaler = checkpoint['y_scaler']
-        feature_names = checkpoint['feature_names']
-        df = checkpoint['df']
-        loss_history = checkpoint['loss_history']
-        return model, scaler, y_scaler, feature_names, df, loss_history
-
-    # 2. إذا لم يكن موجوداً: التدريب من الصفر
+    # محاولة تحميل النموذج المخبأ مع معالجة الأخطاء
+    try:
+        if os.path.exists(checkpoint_path):
+            st.caption("📂 Loading cached model from /tmp...")
+            checkpoint = torch.load(checkpoint_path, map_location='cpu')
+            # التحقق من صحة المحتويات
+            required_keys = ['model_state', 'scaler', 'y_scaler', 'feature_names', 'df', 'loss_history']
+            if all(k in checkpoint for k in required_keys):
+                model = MultiTaskTruePINN(input_dim=13)
+                model.load_state_dict(checkpoint['model_state'])
+                scaler = checkpoint['scaler']
+                y_scaler = checkpoint['y_scaler']
+                feature_names = checkpoint['feature_names']
+                df = checkpoint['df']
+                loss_history = checkpoint['loss_history']
+                return model, scaler, y_scaler, feature_names, df, loss_history
+            else:
+                st.warning("⚠️ Cached file is missing some keys. Re-training...")
+                os.remove(checkpoint_path)
+    except (EOFError, pickle.UnpicklingError, KeyError, RuntimeError) as e:
+        st.warning(f"⚠️ Cached model file is corrupted or incompatible. Re-training... (Error: {str(e)[:80]})")
+        if os.path.exists(checkpoint_path):
+            os.remove(checkpoint_path)
+    except Exception as e:
+        st.warning(f"⚠️ Unexpected error loading model: {str(e)[:80]}. Re-training...")
+        if os.path.exists(checkpoint_path):
+            os.remove(checkpoint_path)
+    
+    # إذا وصلنا هنا، فهذا يعني أنه لا يوجد ملف صالح، لذا نبدأ التدريب من الصفر
     st.caption("🔄 Training model from scratch (GPU + Early Stopping)...")
     
     # توليد البيانات
@@ -807,7 +814,7 @@ def load_or_train_model():
         model.load_state_dict(torch.load("/tmp/best_model.pt", map_location=device))
         st.caption(f"✅ Best validation loss: {best_val_loss:.4f}")
     
-    # نقل النموذج إلى الـ CPU لحفظه (لتوفير الذاكرة عند التحميل لاحقاً)
+    # نقل النموذج إلى CPU للحفظ
     model.cpu()
     
     # حفظ النموذج والمحولات في الذاكرة المؤقتة
@@ -827,13 +834,13 @@ def load_or_train_model():
 # 7. واجهة المستخدم الرئيسية (Streamlit UI)
 # ================================================================
 
-st.set_page_config(page_title="PINN Cloud v29.28", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Cloud v29.29", page_icon="🧬", layout="wide")
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
             padding: 1.5rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
-    <h1 style="color: #ffffff; font-size: 2rem; margin: 0;">🧬 Hybrid AI Framework v29.28</h1>
-    <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">⚡ GPU + Early Stopping + Optimized Loss</p>
+    <h1 style="color: #ffffff; font-size: 2rem; margin: 0;">🧬 Hybrid AI Framework v29.29</h1>
+    <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">⚡ Robust Cache Handling · GPU + Early Stopping</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -850,8 +857,9 @@ with st.sidebar:
     - ✅ **Epochs:** {ADAM_EPOCHS} (with Early Stopping)
     - ✅ **Device:** GPU (if available)
     - ✅ **Loss:** Simplified & Optimized for R²
+    - ✅ **Cache:** Auto-repair if corrupted
     """)
-    st.info("🔬 **v29.28** — Final Optimized Version")
+    st.info("🔬 **v29.29** — Robust & Reliable")
 
 # تحميل أو تدريب النموذج
 with st.spinner("📂 Loading/Training model..."):
@@ -1008,4 +1016,4 @@ with col_right:
         else: st.info("👆 Click 'Predict & Optimize'")
 
 st.markdown("---")
-st.caption("🔬 **PINN v29.28** — GPU + Early Stopping + Optimized Loss | Nile Valley University")
+st.caption("🔬 **PINN v29.29** — Robust Cache Handling · GPU + Early Stopping | Nile Valley University")
