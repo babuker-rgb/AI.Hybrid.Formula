@@ -1,9 +1,9 @@
 """
-True Physics-Informed Neural Network (PINN) - Optimized for Streamlit Cloud
+True Physics-Informed Neural Network (PINN) - Fully Optimized for Streamlit Cloud
 Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
-Version: 29.27 (On-the-fly training with GPU + Early Stopping)
+Version: 29.28 (GPU + Early Stopping + Simplified Loss)
 """
 
 import streamlit as st
@@ -38,9 +38,9 @@ PRESSURE_MAX = 300.0
 BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
-# إعدادات خفيفة وسريعة (مع Early Stopping سيوقف التدريب مبكراً إن لم يتحسّن)
-N_SAMPLES = 3000           # يمكنك زيادتها إلى 6000 إن أردت دقة أعلى
-ADAM_EPOCHS = 200          # الحد الأقصى للحقبات (سيوقف مبكراً مع Early Stopping)
+# إعدادات خفيفة وسريعة (مع Early Stopping)
+N_SAMPLES = 3000
+ADAM_EPOCHS = 200
 MONOTONICITY_FREQUENCY = 10
 
 # NSGA-II
@@ -235,7 +235,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# 3. PINN MODEL
+# 3. PINN MODEL (مع دالة الخسارة المُبسَّطة)
 # ================================================================
 
 class Mish(nn.Module):
@@ -258,7 +258,7 @@ class ResidualBlock(nn.Module):
 class MultiTaskTruePINN(nn.Module):
     def __init__(self, input_dim=13, output_dim=5):
         super(MultiTaskTruePINN, self).__init__()
-        # شبكة متوسطة الحجم (متوازنة بين السرعة والدقة)
+        # شبكة متوسطة (256 عصبوناً)
         self.input_layer = nn.Sequential(
             nn.Linear(input_dim, 256),
             Mish()
@@ -290,17 +290,20 @@ class MultiTaskTruePINN(nn.Module):
         with torch.no_grad():
             if not isinstance(X_scaled, torch.Tensor):
                 X_scaled = torch.tensor(X_scaled, dtype=torch.float32)
-            # تأكد من نقل البيانات إلى نفس جهاز النموذج
             device = next(self.parameters()).device
             X_scaled = X_scaled.to(device)
             output = self.forward(X_scaled)
             return output[:, :3].cpu().numpy()
 
+    # ============================================================
+    # دالة الخسارة المُبسَّطة (المُحسَّنة لـ R²)
+    # ============================================================
     def compute_loss(self, X_scaled, X_raw, y_true, epoch=0, max_epochs=ADAM_EPOCHS,
                      w_density=2.0, w_tensile=4.0, w_tensile_physics=0.5,
                      w_physics_base=0.5, w_physics_final=1.5, w_mcc=0.5,
                      w_density_penalty=8.0, efrf_target=0.40, mcc_max=8.0,
                      compute_grad=True):
+
         pressure_real = X_raw[:, 5].view(-1, 1)
         mcc_real = X_raw[:, 1].view(-1, 1)
 
@@ -311,64 +314,40 @@ class MultiTaskTruePINN(nn.Module):
         k_pred = y_pred[:, 3:4]
         A_pred = y_pred[:, 4:5]
 
+        # --- جدولة وزن الفيزياء ---
         progress = epoch / max_epochs
         schedule_factor = 1 / (1 + math.exp(-10 * (progress - 0.5)))
         w_physics = w_physics_base + (w_physics_final - w_physics_base) * schedule_factor
         w_physics = max(w_physics, 0.1)
 
+        # --- خسارة البيانات (أوزان أعلى للكثافة و ER) ---
         density_data_loss = nn.MSELoss()(density_pred, y_true[:, 0:1])
         tensile_data_loss = nn.MSELoss()(tensile_pred, y_true[:, 1:2])
         er_data_loss = nn.MSELoss()(er_pred, y_true[:, 2:3])
-        data_loss = density_data_loss + w_tensile * tensile_data_loss + er_data_loss
+        data_loss = (2.0 * density_data_loss) + (w_tensile * tensile_data_loss) + (2.0 * er_data_loss)
 
+        # --- القيود الفيزيائية ---
         tensile_physics_loss = torch.mean(torch.relu(0.3 - (tensile_pred * density_pred)) ** 2) * w_tensile_physics
-
         heckel_lhs = torch.log(1.0 / torch.clamp(1.0 - density_pred, min=1e-4))
         heckel_rhs = k_pred * pressure_real + A_pred
         heckel_loss = torch.mean((heckel_lhs - heckel_rhs) ** 2)
-
         efrf_pred = er_pred / torch.clamp(tensile_pred, min=1e-4)
         efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
-        efrf_safe_loss = torch.mean(torch.relu(efrf_pred - 0.36) ** 2) * 2.0
 
+        # --- عقوبات إضافية ---
         mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
         density_penalty = torch.mean(
             torch.relu(density_pred - D_MAX) ** 2 + torch.relu(D_MIN - density_pred) ** 2
         )
-        density_preference_loss = torch.mean(torch.relu(density_pred - 0.95) ** 2) * 0.05
 
-        if compute_grad:
-            Xg = X_scaled.clone().detach().requires_grad_(True)
-            yg = self.forward(Xg)
-            dg = yg[:, 0:1]
-            grad = torch.autograd.grad(
-                outputs=dg,
-                inputs=Xg,
-                grad_outputs=torch.ones_like(dg),
-                create_graph=True,
-                retain_graph=True
-            )[0]
-            monotonic_original = torch.mean(torch.relu(-grad[:, 5:6]) ** 2)
-        else:
-            monotonic_original = torch.tensor(0.0, device=X_scaled.device)
-
-        boundary_loss = (
-            torch.mean(torch.relu((D_MIN + 0.1) - density_pred) ** 2) +
-            torch.mean(torch.relu(density_pred - D_MAX) ** 2)
-        )
-
-        k_reg = torch.mean(torch.relu(k_pred - 0.1) ** 2) + torch.mean(torch.relu(0.005 - k_pred) ** 2)
-        A_reg = torch.mean(torch.relu(A_pred - 2.0) ** 2) + torch.mean(torch.relu(0.5 - A_pred) ** 2)
-
+        # --- المجموع النهائي ---
         total_loss = (
             data_loss +
-            w_density_penalty * density_penalty +
-            w_physics * (heckel_loss + efrf_loss + monotonic_original + boundary_loss + tensile_physics_loss) +
-            w_mcc * mcc_loss +
-            2.0 * density_preference_loss +
-            efrf_safe_loss +
-            0.1 * k_reg + 0.1 * A_reg
+            (0.7 * w_density_penalty) * density_penalty +
+            w_physics * (heckel_loss + efrf_loss + tensile_physics_loss) +
+            w_mcc * mcc_loss
         )
+
         return total_loss, {'total_loss': total_loss.item()}
 
 # ================================================================
@@ -719,14 +698,11 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     return pdf_bytes
 
 # ================================================================
-# 6. دالة تحميل أو تدريب النموذج (مع الكود الجديد)
+# 6. دالة تحميل أو تدريب النموذج (مع GPU و Early Stopping)
 # ================================================================
 
 @st.cache_resource
 def load_or_train_model():
-    """
-    تحميل النموذج من الذاكرة المؤقتة إن وُجد، وإلا تدريبه باستخدام GPU و Early Stopping.
-    """
     checkpoint_path = '/tmp/pinn_best_model.pt'
     
     # 1. محاولة تحميل النموذج المُدرَّب مسبقاً
@@ -742,7 +718,7 @@ def load_or_train_model():
         loss_history = checkpoint['loss_history']
         return model, scaler, y_scaler, feature_names, df, loss_history
 
-    # 2. إذا لم يكن موجوداً: التدريب من الصفر باستخدام الكود المُقدَّم
+    # 2. إذا لم يكن موجوداً: التدريب من الصفر
     st.caption("🔄 Training model from scratch (GPU + Early Stopping)...")
     
     # توليد البيانات
@@ -765,9 +741,11 @@ def load_or_train_model():
     )
     
     # ============================================================
-    # 🔥 الكود الجديد الذي طلبت استبداله (مع دعم GPU و Early Stopping)
+    # التدريب باستخدام GPU و Early Stopping
     # ============================================================
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    st.caption(f"🖥️ Using device: {device}")
+    
     model = MultiTaskTruePINN(input_dim=13).to(device)
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     
@@ -779,7 +757,7 @@ def load_or_train_model():
     y_val_t = torch.tensor(y_val, dtype=torch.float32).to(device)
     
     best_val_loss = float("inf")
-    patience, patience_counter = 20, 0  # Early stopping
+    patience, patience_counter = 20, 0
     
     progress_bar = st.progress(0)
     train_losses = []
@@ -823,16 +801,13 @@ def load_or_train_model():
                 break
         
         progress_bar.progress((epoch + 1) / ADAM_EPOCHS)
-    # ============================================================
-    # نهاية الكود المُستبدَل
-    # ============================================================
     
     # تحميل أفضل الأوزان
     if os.path.exists("/tmp/best_model.pt"):
         model.load_state_dict(torch.load("/tmp/best_model.pt", map_location=device))
         st.caption(f"✅ Best validation loss: {best_val_loss:.4f}")
     
-    # نقل النموذج إلى الـ CPU لحفظه وللتشغيل لاحقاً (لتوفير الذاكرة)
+    # نقل النموذج إلى الـ CPU لحفظه (لتوفير الذاكرة عند التحميل لاحقاً)
     model.cpu()
     
     # حفظ النموذج والمحولات في الذاكرة المؤقتة
@@ -852,13 +827,13 @@ def load_or_train_model():
 # 7. واجهة المستخدم الرئيسية (Streamlit UI)
 # ================================================================
 
-st.set_page_config(page_title="PINN Cloud v29.27", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Cloud v29.28", page_icon="🧬", layout="wide")
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
             padding: 1.5rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
-    <h1 style="color: #ffffff; font-size: 2rem; margin: 0;">🧬 Hybrid AI Framework v29.27</h1>
-    <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">⚡ GPU + Early Stopping · On-the-fly Training</p>
+    <h1 style="color: #ffffff; font-size: 2rem; margin: 0;">🧬 Hybrid AI Framework v29.28</h1>
+    <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">⚡ GPU + Early Stopping + Optimized Loss</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -874,8 +849,9 @@ with st.sidebar:
     - ✅ **Samples:** {N_SAMPLES}
     - ✅ **Epochs:** {ADAM_EPOCHS} (with Early Stopping)
     - ✅ **Device:** GPU (if available)
+    - ✅ **Loss:** Simplified & Optimized for R²
     """)
-    st.info("🔬 **v29.27** — Optimized Training")
+    st.info("🔬 **v29.28** — Final Optimized Version")
 
 # تحميل أو تدريب النموذج
 with st.spinner("📂 Loading/Training model..."):
@@ -1032,4 +1008,4 @@ with col_right:
         else: st.info("👆 Click 'Predict & Optimize'")
 
 st.markdown("---")
-st.caption("🔬 **PINN v29.27** — GPU + Early Stopping | Nile Valley University")
+st.caption("🔬 **PINN v29.28** — GPU + Early Stopping + Optimized Loss | Nile Valley University")
