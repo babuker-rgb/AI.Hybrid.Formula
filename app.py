@@ -3,7 +3,7 @@ True Physics-Informed Neural Network (PINN) - Final Version v29.37
 Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
-Version: 29.37 (Improved R², Pareto & Comparison)
+Version: 29.37 (Two‑Star Pareto + Improved R² & Visuals)
 """
 
 import streamlit as st
@@ -658,52 +658,7 @@ def plot_training_curves(loss_history):
     fig.update_layout(title='Training Curves (v29.37)', xaxis_title='Epoch', yaxis_title='Loss', height=400)
     return fig
 
-# --- CLEAN PARETO (no stars) ---
-def plot_pareto(objectives, fronts):
-    """
-    Plot Pareto front without any stars - clean visualization.
-    """
-    if objectives is None or fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
-        return None
-
-    front0 = fronts[0]
-    pareto_api = -objectives[front0, 0]
-    pareto_efrf = objectives[front0, 1]
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=-objectives[:, 0],
-        y=objectives[:, 1],
-        mode='markers',
-        marker=dict(size=4, color='gray', opacity=0.3),
-        name='All Solutions'
-    ))
-    fig.add_trace(go.Scatter(
-        x=pareto_api,
-        y=pareto_efrf,
-        mode='lines+markers',
-        marker=dict(size=8, color='red'),
-        line=dict(color='red', width=2),
-        name='Pareto Front'
-    ))
-    fig.add_hline(
-        y=EFRF_MAX,
-        line_dash='dash',
-        line_color='red',
-        annotation_text=f'EFRF Threshold: {EFRF_MAX:.2f}',
-        annotation_position='top right'
-    )
-    fig.update_layout(
-        title='Pareto Front (v29.37)',
-        xaxis_title='API (%)',
-        yaxis_title='EFRF',
-        height=500,
-        template='plotly_white',
-        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
-    )
-    return fig
-
-# --- TWO-STAR PARETO (optional) ---
+# --- TWO-STAR PARETO (active) ---
 def plot_pareto_with_stars(objectives, fronts,
                            user_api=None, user_efrf=None,
                            golden_api=None, golden_efrf=None):
@@ -773,6 +728,27 @@ def plot_pareto_with_stars(objectives, fronts,
         template='plotly_white',
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
     )
+    return fig
+
+# --- CLEAN PARETO (without stars, kept for reference) ---
+def plot_pareto(objectives, fronts):
+    if objectives is None or fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
+        return None
+    front0 = fronts[0]
+    pareto_api = -objectives[front0, 0]
+    pareto_efrf = objectives[front0, 1]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=-objectives[:, 0], y=objectives[:, 1],
+                             mode='markers', marker=dict(size=4, color='gray', opacity=0.3),
+                             name='All Solutions'))
+    fig.add_trace(go.Scatter(x=pareto_api, y=pareto_efrf,
+                             mode='lines+markers', marker=dict(size=8, color='red'),
+                             line=dict(color='red', width=2), name='Pareto Front'))
+    fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='red',
+                  annotation_text=f'EFRF Threshold: {EFRF_MAX:.2f}', annotation_position='top right')
+    fig.update_layout(title='Pareto Front (v29.37)', xaxis_title='API (%)', yaxis_title='EFRF',
+                      height=500, template='plotly_white',
+                      legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1))
     return fig
 
 def plot_sensitivity_plotly(inputs, model, scaler, y_scaler):
@@ -1049,7 +1025,7 @@ st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
             padding: 1.5rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
     <h1 style="color: #ffffff; font-size: 2rem; margin: 0;">🧬 Hybrid AI Framework v29.37</h1>
-    <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">⚡ Improved R² · Better Pareto · Enhanced Comparison</p>
+    <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">⚡ Two‑Star Pareto · Improved Accuracy</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1070,7 +1046,7 @@ with st.sidebar:
     - ✅ **Cache:** Auto-repair if corrupted (with verification)
     - ✅ **NSGA-II:** Pop={NSGA_POP_SIZE}, Gen={NSGA_GENERATIONS}
     """)
-    st.info("🔬 **v29.37** — Improved Accuracy & Visuals")
+    st.info("🔬 **v29.37** — Two‑Star Pareto Active")
 
 # Load or train model
 with st.spinner("📂 Loading/Training model (v29.37)..."):
@@ -1265,25 +1241,21 @@ with col_right:
 
     with tab1:
         if predict_btn and objectives is not None:
-            # --- Choose which plot to show: clean or with stars ---
-            # For clean Pareto (no stars), call plot_pareto(objectives, fronts)
-            # For two stars, call plot_pareto_with_stars(...)
-            # We'll default to clean, but you can uncomment the star version.
+            # --- Use the two‑star version ---
+            golden_api = golden_info['api'] if golden_info else None
+            golden_efrf = golden_info['efrf'] if golden_info else None
 
-            fig = plot_pareto(objectives, fronts)  # <-- CLEAN VERSION
-
-            # To show stars instead, uncomment these lines:
-            # golden_api = golden_info['api'] if golden_info else None
-            # golden_efrf = golden_info['efrf'] if golden_info else None
-            # fig = plot_pareto_with_stars(objectives, fronts,
-            #                              user_api=api_norm,
-            #                              user_efrf=efrf,
-            #                              golden_api=golden_api,
-            #                              golden_efrf=golden_efrf)
-
+            fig = plot_pareto_with_stars(
+                objectives=objectives,
+                fronts=fronts,
+                user_api=api_norm,
+                user_efrf=efrf,
+                golden_api=golden_api,
+                golden_efrf=golden_efrf
+            )
             if fig:
                 st.plotly_chart(fig, use_container_width=True)
-                st.caption("🔴 Red curve = Pareto front · Gray dots = all solutions · Dashed red line = EFRF threshold")
+                st.caption("🔵 Blue star = Your formulation · ⭐ Gold star = Optimal (golden) solution · Red dashed line = EFRF threshold")
             else:
                 st.info("No Pareto front data available.")
         else:
@@ -1305,8 +1277,7 @@ with col_right:
             # Improved horizontal bar chart with R² values
             df_plot = comp_df.copy()
             df_plot['R²'] = df_plot['R²'].astype(float)
-            # Sort by R² descending
-            df_plot = df_plot.sort_values('R²', ascending=True)  # for horizontal orientation
+            df_plot = df_plot.sort_values('R²', ascending=True)
             fig = go.Figure()
             colors = ['#2ecc71' if m == 'PINN (Proposed)' else '#3498db' for m in df_plot['Model']]
             fig.add_trace(go.Bar(
@@ -1327,7 +1298,6 @@ with col_right:
             )
             st.plotly_chart(fig, use_container_width=True)
 
-            # Display the full table
             st.dataframe(
                 comp_df.style
                 .apply(lambda x: ['background-color: #e6f7e6' if i == 0 else '' for i in range(len(x))], axis=0)
@@ -1363,4 +1333,4 @@ with col_right:
             st.info("👆 Click 'Predict & Optimize' to generate the report.")
 
 st.markdown("---")
-st.caption("🔬 **PINN v29.37** — Improved Accuracy & Visuals | Nile Valley University")
+st.caption("🔬 **PINN v29.37** — Two‑Star Pareto · Improved Accuracy & Visuals | Nile Valley University")
