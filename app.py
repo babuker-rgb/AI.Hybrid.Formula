@@ -5,12 +5,12 @@ Multi-Objective Tablet Manufacturing Optimization
 Author: Babuker A. Abdalla
 Version: 29.31 (GPU + Early Stopping + Noise Reduction + Optimized Loss + Robust Cache)
 
-تحسينات هذا الإصدار:
-- تفعيل GPU تلقائيًا
+Improvements in this version:
+- Automatic GPU activation
 - Early Stopping (patience=20)
-- تقليل الضوضاء في توليد البيانات (noise_d: 0.03 → 0.005)
-- تحسين دالة الخسارة (مضاعفة MSE للكثافة والانحلال)
-- كاش محسن مع إصلاح تلقائي
+- Reduced noise in data generation (noise_d: 0.03 → 0.005)
+- Optimized loss function (3× MSE for Density & ER)
+- Robust cache with auto-repair
 """
 
 import streamlit as st
@@ -34,7 +34,7 @@ import pickle
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. PARAMETERS (تعريف جميع المتغيرات العامة أولاً)
+# 0. PARAMETERS (Define all global variables first)
 # ================================================================
 
 TENSILE_MIN = 1.90
@@ -46,12 +46,12 @@ PRESSURE_MAX = 300.0
 BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
-# --- تحسين 1: خفض الضوضاء في توليد البيانات (من 0.03 إلى 0.005) ---
-NOISE_DENSITY = 0.005          # كانت 0.03
-NOISE_STRENGTH = 0.01          # كانت 0.03
-NOISE_ER = 0.01                # كانت 0.03
+# --- Improvement 1: Reduced noise in data generation (from 0.03 to 0.005) ---
+NOISE_DENSITY = 0.005          # Was 0.03
+NOISE_STRENGTH = 0.01          # Was 0.03
+NOISE_ER = 0.01                # Was 0.03
 
-# --- إعدادات التدريب ---
+# --- Training settings ---
 N_SAMPLES = 3000
 ADAM_EPOCHS = 200
 MONOTONICITY_FREQUENCY = 10
@@ -186,7 +186,7 @@ def add_interaction_features(X_raw):
     ], axis=1)
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
-    """توليد بيانات مع ضوضاء منخفضة لتحسين R²"""
+    """Generate data with reduced noise for improved R²"""
     np.random.seed(random_state)
     X = np.zeros((n_samples, 8))
     y = np.zeros((n_samples, 3))
@@ -219,7 +219,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         x_new = k * pressure + A
         D_target = 1 - np.exp(-x_new)
         D_target = np.clip(D_target, D_MIN, D_MAX)
-        # --- تحسين 2: خفض ضوضاء الكثافة ---
+        # --- Improvement 2: Reduced density noise ---
         noise_d = np.random.normal(0, NOISE_DENSITY)
         D = np.clip(D_target + noise_d, D_MIN, D_MAX)
 
@@ -235,13 +235,13 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         speed_effect = 1.0 - 0.002 * (speed - 10)
 
         strength = tensile_base * api_effect * binder_effect * mgst_effect * pvpp_effect * speed_effect
-        # --- تحسين 2: خفض ضوضاء الصلابة ---
+        # --- Improvement 2: Reduced strength noise ---
         strength = strength * np.random.normal(1.0, NOISE_STRENGTH)
         strength = np.clip(strength, 0.5, 6.0)
 
         er_base = 1.8 + 0.3 * (api - 85)/10 + 0.08 * (speed - 10)/30 - 0.1 * (pressure - 100)/150
         er_base = er_base * (1.0 - 0.15 * (D - 0.4))
-        # --- تحسين 2: خفض ضوضاء الانحلال المرن ---
+        # --- Improvement 2: Reduced elastic recovery noise ---
         er = np.clip(er_base + np.random.normal(0, NOISE_ER), 0.5, 4.0)
 
         y[i] = [D, strength, er]
@@ -255,7 +255,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# 3. PINN MODEL (مع دالة خسارة محسَّنة)
+# 3. PINN MODEL (with optimized loss function)
 # ================================================================
 
 class Mish(nn.Module):
@@ -315,7 +315,7 @@ class MultiTaskTruePINN(nn.Module):
             return output[:, :3].cpu().numpy()
 
     # ============================================================
-    # تحسين 4: دالة خسارة محسَّنة (مضاعفة MSE للكثافة والانحلال)
+    # Improvement 4: Optimized loss function (3× MSE for Density & ER)
     # ============================================================
     def compute_loss(self, X_scaled, X_raw, y_true, epoch=0, max_epochs=ADAM_EPOCHS,
                      w_density=2.0, w_tensile=4.0, w_tensile_physics=0.5,
@@ -333,19 +333,19 @@ class MultiTaskTruePINN(nn.Module):
         k_pred = y_pred[:, 3:4]
         A_pred = y_pred[:, 4:5]
 
-        # --- جدولة وزن الفيزياء ---
+        # --- Physics weight scheduling ---
         progress = epoch / max_epochs
         schedule_factor = 1 / (1 + math.exp(-10 * (progress - 0.5)))
         w_physics = w_physics_base + (w_physics_final - w_physics_base) * schedule_factor
         w_physics = max(w_physics, 0.1)
 
-        # --- تحسين 4: مضاعفة MSE للكثافة والانحلال ---
+        # --- Improvement 4: 3× MSE for Density and ER ---
         density_data_loss = nn.MSELoss()(density_pred, y_true[:, 0:1])
         tensile_data_loss = nn.MSELoss()(tensile_pred, y_true[:, 1:2])
         er_data_loss = nn.MSELoss()(er_pred, y_true[:, 2:3])
         data_loss = (3.0 * density_data_loss) + (w_tensile * tensile_data_loss) + (3.0 * er_data_loss)
 
-        # --- القيود الفيزيائية ---
+        # --- Physics constraints ---
         tensile_physics_loss = torch.mean(torch.relu(0.3 - (tensile_pred * density_pred)) ** 2) * w_tensile_physics
         heckel_lhs = torch.log(1.0 / torch.clamp(1.0 - density_pred, min=1e-4))
         heckel_rhs = k_pred * pressure_real + A_pred
@@ -353,13 +353,13 @@ class MultiTaskTruePINN(nn.Module):
         efrf_pred = er_pred / torch.clamp(tensile_pred, min=1e-4)
         efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
 
-        # --- عقوبات إضافية ---
+        # --- Additional penalties ---
         mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
         density_penalty = torch.mean(
             torch.relu(density_pred - D_MAX) ** 2 + torch.relu(D_MIN - density_pred) ** 2
         )
 
-        # --- المجموع النهائي ---
+        # --- Final total ---
         total_loss = (
             data_loss +
             (0.7 * w_density_penalty) * density_penalty +
@@ -582,7 +582,7 @@ class NSGAII:
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 5. دوال التنبؤ والرسوم البيانية
+# 5. PREDICTION & PLOTTING FUNCTIONS
 # ================================================================
 
 def predict_pinn(model, scaler, y_scaler, inputs):
@@ -717,14 +717,14 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     return pdf_bytes
 
 # ================================================================
-# 6. دالة تحميل أو تدريب النموذج (مع كاش محسن وإصلاح تلقائي)
+# 6. MODEL LOADING / TRAINING (with robust cache & auto-repair)
 # ================================================================
 
 @st.cache_resource
 def load_or_train_model():
     checkpoint_path = '/tmp/pinn_best_model.pt'
     
-    # --- تحسين 5: محاولة تحميل النموذج المخبأ مع إصلاح تلقائي ---
+    # --- Improvement 5: Try loading cached model with auto-repair ---
     try:
         if os.path.exists(checkpoint_path):
             st.caption("📂 Loading cached model from /tmp...")
@@ -751,10 +751,10 @@ def load_or_train_model():
         if os.path.exists(checkpoint_path):
             os.remove(checkpoint_path)
     
-    # إذا وصلنا هنا، نبدأ التدريب من الصفر
+    # If we reach here, start training from scratch
     st.caption("🔄 Training model from scratch (GPU + Early Stopping)...")
     
-    # توليد البيانات (مع ضوضاء منخفضة)
+    # Generate data (with reduced noise)
     df, feature_names = generate_pinn_data(n_samples=N_SAMPLES)
     X_raw = df[feature_names].values
     y = df[['Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']].values
@@ -765,7 +765,7 @@ def load_or_train_model():
     y_scaler = StandardScaler()
     y_scaled = y_scaler.fit_transform(y)
     
-    # تقسيم البيانات
+    # Split data
     X_train, X_temp, X_raw_train, X_raw_temp, y_train, y_temp = train_test_split(
         X_scaled, X_raw, y_scaled, test_size=0.3, random_state=42
     )
@@ -774,7 +774,7 @@ def load_or_train_model():
     )
     
     # ============================================================
-    # تحسين 1: تفعيل GPU تلقائيًا
+    # Improvement 1: Automatic GPU activation
     # ============================================================
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     st.caption(f"🖥️ Using device: {device}")
@@ -782,7 +782,7 @@ def load_or_train_model():
     model = MultiTaskTruePINN(input_dim=13).to(device)
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     
-    # نقل البيانات إلى الجهاز المحدد
+    # Move data to the specified device
     X_train_t = torch.tensor(X_train, dtype=torch.float32).to(device)
     X_raw_train_t = torch.tensor(X_raw_train, dtype=torch.float32).to(device)
     y_train_t = torch.tensor(y_train, dtype=torch.float32).to(device)
@@ -812,7 +812,7 @@ def load_or_train_model():
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         
-        # تقييم بدون تدرجات
+        # Evaluation without gradients
         model.eval()
         with torch.no_grad():
             val_loss, _ = model.compute_loss(
@@ -824,11 +824,11 @@ def load_or_train_model():
         train_losses.append(loss.item())
         val_losses.append(val_loss.item())
         
-        # --- تحسين 3: Early Stopping ---
+        # --- Improvement 3: Early Stopping ---
         if val_loss.item() < best_val_loss:
             best_val_loss = val_loss.item()
             patience_counter = 0
-            # حفظ أفضل نموذج
+            # Save best model
             torch.save(model.state_dict(), "/tmp/best_model.pt")
         else:
             patience_counter += 1
@@ -838,15 +838,15 @@ def load_or_train_model():
         
         progress_bar.progress((epoch + 1) / ADAM_EPOCHS)
     
-    # تحميل أفضل الأوزان
+    # Load best weights
     if os.path.exists("/tmp/best_model.pt"):
         model.load_state_dict(torch.load("/tmp/best_model.pt", map_location=device))
         st.caption(f"✅ Best validation loss: {best_val_loss:.4f}")
     
-    # نقل النموذج إلى CPU للحفظ (لتوفير الذاكرة عند التحميل لاحقاً)
+    # Move model to CPU for saving (save memory for future loading)
     model.cpu()
     
-    # حفظ النموذج والمحولات في الذاكرة المؤقتة
+    # Save model and transformers to cache
     torch.save({
         'model_state': model.state_dict(),
         'scaler': scaler,
@@ -860,7 +860,7 @@ def load_or_train_model():
     return model, scaler, y_scaler, feature_names, df, {'train': train_losses, 'val': val_losses}
 
 # ================================================================
-# 7. واجهة المستخدم الرئيسية (Streamlit UI)
+# 7. MAIN USER INTERFACE (Streamlit UI)
 # ================================================================
 
 st.set_page_config(page_title="PINN Cloud v29.31", page_icon="🧬", layout="wide")
@@ -891,12 +891,12 @@ with st.sidebar:
     """)
     st.info("🔬 **v29.31** — Unified Optimized Version")
 
-# تحميل أو تدريب النموذج
+# Load or train model
 with st.spinner("📂 Loading/Training model..."):
     model, scaler, y_scaler, feature_names, df, loss_history = load_or_train_model()
 st.success("✅ Model ready!")
 
-# تجارب سريعة
+# Quick experiments
 st.markdown("### 🧪 Quick Experiments")
 exp_cols = st.columns(4)
 experiments = {
