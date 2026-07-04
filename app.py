@@ -3,7 +3,7 @@ True Physics-Informed Neural Network (PINN) - Final Version v29.36
 Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
-Version: 29.36 (Complete & Correct - Two Stars on Pareto)
+Version: 29.36 (No stars on Pareto - Clean plot)
 """
 
 import streamlit as st
@@ -29,7 +29,7 @@ import re
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. ENHANCED PARAMETERS
+# 0. PARAMETERS
 # ================================================================
 
 TENSILE_MIN = 1.90
@@ -654,14 +654,9 @@ def plot_training_curves(loss_history):
     fig.update_layout(title='Training Curves (v29.36)', xaxis_title='Epoch', yaxis_title='Loss', height=400)
     return fig
 
-def plot_pareto_with_stars(objectives, fronts,
-                           user_api=None, user_efrf=None,
-                           golden_api=None, golden_efrf=None):
+def plot_pareto(objectives, fronts):
     """
-    Plot Pareto front with exactly two stars:
-    - Blue star: user's tested formulation
-    - Gold star: optimal (golden) solution
-    No duplicates, no circles, only stars.
+    Plot Pareto front without any stars - clean visualization.
     """
     if objectives is None or fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
@@ -671,7 +666,7 @@ def plot_pareto_with_stars(objectives, fronts,
     pareto_api = -objectives[front0, 0]
     pareto_efrf = objectives[front0, 1]
 
-    # Create fresh figure (ensures no leftover traces from previous calls)
+    # Create fresh figure
     fig = go.Figure()
 
     # All solutions (gray transparent)
@@ -693,40 +688,6 @@ def plot_pareto_with_stars(objectives, fronts,
         name='Pareto Front'
     ))
 
-    # ⭐ Golden Star (optimal solution) - ONLY ONE
-    if golden_api is not None and golden_efrf is not None:
-        fig.add_trace(go.Scatter(
-            x=[golden_api],
-            y=[golden_efrf],
-            mode='markers+text',
-            marker=dict(
-                size=18,
-                color='gold',
-                symbol='star',
-                line=dict(color='darkgoldenrod', width=2)
-            ),
-            text=['⭐ Golden'],
-            textposition='top center',
-            name='Golden Solution'
-        ))
-
-    # 🔵 Blue Star (user's tested formulation) - ONLY ONE
-    if user_api is not None and user_efrf is not None:
-        fig.add_trace(go.Scatter(
-            x=[user_api],
-            y=[user_efrf],
-            mode='markers+text',
-            marker=dict(
-                size=14,
-                color='blue',
-                symbol='star',
-                line=dict(color='darkblue', width=2)
-            ),
-            text=['🔵 Tested'],
-            textposition='top center',
-            name='Tested Solution'
-        ))
-
     # EFRF threshold line
     fig.add_hline(
         y=EFRF_MAX,
@@ -737,7 +698,7 @@ def plot_pareto_with_stars(objectives, fronts,
     )
 
     fig.update_layout(
-        title='Pareto Front with Two Stars (v29.36)',
+        title='Pareto Front (v29.36)',
         xaxis_title='API (%)',
         yaxis_title='EFRF',
         height=500,
@@ -876,16 +837,18 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     return pdf_bytes
 
 # ================================================================
-# 6. MODEL LOADING / TRAINING (AUTO-REPAIR)
+# 6. MODEL LOADING / TRAINING (FIXED CACHE)
 # ================================================================
 
 @st.cache_resource
 def load_or_train_model():
     checkpoint_path = '/tmp/pinn_best_model.pt'
+    
+    # -------------------- LOADING --------------------
     try:
         if os.path.exists(checkpoint_path):
             st.caption("📂 Loading cached model from /tmp...")
-            checkpoint = torch.load(checkpoint_path, map_location='cpu')
+            checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
             required_keys = ['model_state', 'scaler', 'y_scaler', 'feature_names', 'df', 'loss_history']
             if all(k in checkpoint for k in required_keys):
                 model = MultiTaskTruePINN(input_dim=13)
@@ -904,6 +867,7 @@ def load_or_train_model():
         if os.path.exists(checkpoint_path):
             os.remove(checkpoint_path)
 
+    # -------------------- TRAINING --------------------
     st.caption("🔄 Training model from scratch (v29.36 enhanced settings)...")
 
     df, feature_names = generate_pinn_data(n_samples=N_SAMPLES)
@@ -989,16 +953,27 @@ def load_or_train_model():
 
     model.cpu()
 
-    torch.save({
+    # -------------------- SAVE with verification --------------------
+    checkpoint_data = {
         'model_state': model.state_dict(),
         'scaler': scaler,
         'y_scaler': y_scaler,
         'feature_names': feature_names,
         'df': df,
         'loss_history': {'train': train_losses, 'val': val_losses}
-    }, checkpoint_path)
+    }
 
-    st.success("✅ Model trained and cached successfully!")
+    temp_path = checkpoint_path + ".tmp"
+    torch.save(checkpoint_data, temp_path)
+
+    try:
+        test_load = torch.load(temp_path, map_location='cpu', weights_only=False)
+        os.rename(temp_path, checkpoint_path)
+        st.success("✅ Model trained and cached successfully (verified).")
+    except Exception as e:
+        st.error(f"❌ Failed to verify saved checkpoint: {e}. The model will not be cached for this session.")
+        pass
+
     return model, scaler, y_scaler, feature_names, df, {'train': train_losses, 'val': val_losses}
 
 # ================================================================
@@ -1011,7 +986,7 @@ st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
             padding: 1.5rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
     <h1 style="color: #ffffff; font-size: 2rem; margin: 0;">🧬 Hybrid AI Framework v29.36</h1>
-    <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">⚡ Two Stars: Blue = User · Gold = Optimal</p>
+    <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">⚡ Clean Pareto · No Stars</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1029,17 +1004,17 @@ with st.sidebar:
     - ✅ **Device:** GPU (if available)
     - ✅ **Loss:** 3.5× MSE for Density & ER
     - ✅ **Noise:** Ultra-low (σ = 0.003, 0.008, 0.008)
-    - ✅ **Cache:** Auto-repair if corrupted
+    - ✅ **Cache:** Auto-repair if corrupted (with verification)
     - ✅ **NSGA-II:** Pop={NSGA_POP_SIZE}, Gen={NSGA_GENERATIONS}
     """)
-    st.info("🔬 **v29.36** — Two stars on Pareto")
+    st.info("🔬 **v29.36** — Clean Pareto plot (no stars)")
 
 # Load or train model
 with st.spinner("📂 Loading/Training model (v29.36)..."):
     model, scaler, y_scaler, feature_names, df, loss_history = load_or_train_model()
 st.success("✅ Model ready!")
 
-# Quick experiments (adjusted to sum exactly 100%)
+# Quick experiments
 st.markdown("### 🧪 Quick Experiments")
 exp_cols = st.columns(4)
 experiments = {
@@ -1118,7 +1093,7 @@ with col_right:
             pass_cols[2].metric("EFRF", "✅" if efrf_ok else "❌")
             pass_cols[3].metric("MCC", "✅" if mcc_ok else "❌")
 
-            # --- ENHANCED NSGA‑II ---
+            # --- NSGA‑II ---
             st.markdown("### ⚙️ NSGA‑II (v29.36)")
             bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],[80,PRESSURE_MAX],[1,50],[30,250]])
             with st.spinner(f"🔄 NSGA‑II (pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS})..."):
@@ -1133,7 +1108,7 @@ with col_right:
                     st.warning("No feasible Pareto solutions found. Try relaxing constraints.")
                     pareto_count = 0
 
-                # --- Extract the golden solution ---
+                # --- Extract the golden solution (for report only) ---
                 if pareto_count > 0:
                     front0 = fronts[0]
                     golden_candidates = []
@@ -1149,7 +1124,6 @@ with col_right:
                                 'efrf': ef
                             })
                     if golden_candidates:
-                        # Golden: minimize EFRF, maximize Tensile
                         best = min(golden_candidates, key=lambda x: (x['efrf'], -x['tensile']))
                         golden_info = {
                             'api': best['formulation'][0],
@@ -1231,20 +1205,9 @@ with col_right:
 
     with tab1:
         if predict_btn and objectives is not None:
-            golden_api = golden_info['api'] if golden_info else None
-            golden_efrf = golden_info['efrf'] if golden_info else None
-
-            fig = plot_pareto_with_stars(
-                objectives=objectives,
-                fronts=fronts,
-                user_api=api_norm,
-                user_efrf=efrf,
-                golden_api=golden_api,
-                golden_efrf=golden_efrf
-            )
+            fig = plot_pareto(objectives=objectives, fronts=fronts)
             if fig:
                 st.plotly_chart(fig, use_container_width=True)
-                st.caption("🔵 Blue star = Your formulation · ⭐ Gold star = Optimal (golden) solution")
             else:
                 st.info("No Pareto front data available.")
         else:
@@ -1315,4 +1278,4 @@ with col_right:
             st.info("👆 Click 'Predict & Optimize' to generate the report.")
 
 st.markdown("---")
-st.caption("🔬 **PINN v29.36** — Both Stars: Blue (User) + Gold (Optimal) | Nile Valley University")
+st.caption("🔬 **PINN v29.36** — Clean Pareto Plot (No Stars) | Nile Valley University")
