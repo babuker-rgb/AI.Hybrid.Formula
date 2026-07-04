@@ -3,7 +3,7 @@ True Physics-Informed Neural Network (PINN) - Final Version v29.36
 Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
-Version: 29.36 (Auto-repair + Two stars on Pareto)
+Version: 29.36 (Complete & Correct - Two Stars on Pareto)
 """
 
 import streamlit as st
@@ -59,7 +59,7 @@ NSGA_GENERATIONS = 25
 
 DEFAULTS = {
     'api': 90.5, 'binder': 2.7, 'pvpp': 3.0, 'mgst': 0.20,
-    'mcc': 3.6,  # adjusted to sum 100
+    'mcc': 3.6,
     'pressure': 230.0, 'speed': 12.0, 'granule': 125.0
 }
 
@@ -658,9 +658,10 @@ def plot_pareto_with_stars(objectives, fronts,
                            user_api=None, user_efrf=None,
                            golden_api=None, golden_efrf=None):
     """
-    Plot Pareto front with two stars:
+    Plot Pareto front with exactly two stars:
     - Blue star: user's tested formulation
     - Gold star: optimal (golden) solution
+    No duplicates, no circles, only stars.
     """
     if objectives is None or fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
@@ -670,7 +671,7 @@ def plot_pareto_with_stars(objectives, fronts,
     pareto_api = -objectives[front0, 0]
     pareto_efrf = objectives[front0, 1]
 
-    # Create fresh figure
+    # Create fresh figure (ensures no leftover traces from previous calls)
     fig = go.Figure()
 
     # All solutions (gray transparent)
@@ -692,7 +693,7 @@ def plot_pareto_with_stars(objectives, fronts,
         name='Pareto Front'
     ))
 
-    # ⭐ Golden Star (optimal solution)
+    # ⭐ Golden Star (optimal solution) - ONLY ONE
     if golden_api is not None and golden_efrf is not None:
         fig.add_trace(go.Scatter(
             x=[golden_api],
@@ -709,7 +710,7 @@ def plot_pareto_with_stars(objectives, fronts,
             name='Golden Solution'
         ))
 
-    # 🔵 Blue Star (user's tested formulation)
+    # 🔵 Blue Star (user's tested formulation) - ONLY ONE
     if user_api is not None and user_efrf is not None:
         fig.add_trace(go.Scatter(
             x=[user_api],
@@ -875,7 +876,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     return pdf_bytes
 
 # ================================================================
-# 6. MODEL LOADING / TRAINING (UPDATED WITH AUTO-REPAIR)
+# 6. MODEL LOADING / TRAINING (AUTO-REPAIR)
 # ================================================================
 
 @st.cache_resource
