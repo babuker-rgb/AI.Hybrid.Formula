@@ -3,12 +3,13 @@ True Physics-Informed Neural Network (PINN) - Final Unified Version v29.33
 Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
-Version: 29.33 (Golden Solution Display + Pareto Count)
+Version: 29.33 (Golden Solution + Pareto Count + PDF Encoding Fix)
 
-Enhancements:
+Improvements:
 - Displays number of Pareto‑optimal solutions found by NSGA‑II.
 - Automatically suggests the 'golden' solution (lowest EFRF, highest Tensile).
-- All previous optimisations: 5000 samples, ultra‑low noise, 3.5× loss weights, GPU, Early Stopping.
+- PDF generation now sanitises all text to avoid UnicodeEncodeError.
+- All prior optimisations: 5000 samples, ultra‑low noise, 3.5× loss weights, GPU, Early Stopping.
 """
 
 import streamlit as st
@@ -29,6 +30,8 @@ import time
 import math
 import os
 import pickle
+import re
+
 warnings.filterwarnings('ignore')
 
 # ================================================================
@@ -44,7 +47,6 @@ PRESSURE_MAX = 300.0
 BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
-# Ultra‑low noise for high R²
 NOISE_DENSITY = 0.003
 NOISE_STRENGTH = 0.008
 NOISE_ER = 0.008
@@ -109,6 +111,26 @@ clamp_session_state()
 # ================================================================
 # 2. HELPER FUNCTIONS (Data Generation & Feature Engineering)
 # ================================================================
+
+def sanitize_text(text):
+    """Replace problematic characters for PDF (latin1 compatibility)."""
+    replacements = {
+        '🌟': '[GOLDEN]',
+        '✅': '[PASS]',
+        '❌': '[FAIL]',
+        '⚠️': '[WARNING]',
+        'σ': 'sigma',
+        'µ': 'um',
+        '≥': '>=',
+        '≤': '<=',
+        '•': '-',
+        '—': '-',
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    # Remove any other non-ASCII characters (keep basic Latin)
+    text = re.sub(r'[^\x00-\x7F]+', '', text)
+    return text
 
 def normalize_components(api, binder, pvpp, mgst, mcc):
     api = max(api, 0.1); binder = max(binder, 0.1)
@@ -701,63 +723,68 @@ def train_and_compare(X_train, X_test, y_train, y_test):
 def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
                              density, tensile, er, efrf, status, timestamp,
                              model_comparison_df=None, golden_info=None):
+    """Generate PDF report with sanitised text to avoid encoding errors."""
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, "Formulation Optimization Report (v29.33)", ln=True, align="C")
+    pdf.cell(0, 10, sanitize_text("Formulation Optimization Report (v29.33)"), ln=True, align="C")
     pdf.set_font("Arial", "", 10)
-    pdf.cell(0, 6, f"Date: {timestamp}", ln=True, align="C")
+    pdf.cell(0, 6, sanitize_text(f"Date: {timestamp}"), ln=True, align="C")
     pdf.ln(5)
+    
     pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 8, "Formulation Summary", ln=True)
+    pdf.cell(0, 8, sanitize_text("Formulation Summary"), ln=True)
     pdf.set_font("Arial", "", 10)
-    pdf.cell(50, 6, "API", 1, 0); pdf.cell(30, 6, f"{api:.1f}%", 1, 1)
-    pdf.cell(50, 6, "MCC", 1, 0); pdf.cell(30, 6, f"{mcc:.1f}%", 1, 1)
-    pdf.cell(50, 6, "PVPP", 1, 0); pdf.cell(30, 6, f"{pvpp:.1f}%", 1, 1)
-    pdf.cell(50, 6, "Mg-St", 1, 0); pdf.cell(30, 6, f"{mgst:.2f}%", 1, 1)
-    pdf.cell(50, 6, "Binder", 1, 0); pdf.cell(30, 6, f"{binder:.1f}%", 1, 1)
+    pdf.cell(50, 6, sanitize_text("API"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{api:.1f}%"), 1, 1)
+    pdf.cell(50, 6, sanitize_text("MCC"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{mcc:.1f}%"), 1, 1)
+    pdf.cell(50, 6, sanitize_text("PVPP"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{pvpp:.1f}%"), 1, 1)
+    pdf.cell(50, 6, sanitize_text("Mg-St"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{mgst:.2f}%"), 1, 1)
+    pdf.cell(50, 6, sanitize_text("Binder"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{binder:.1f}%"), 1, 1)
     pdf.ln(5)
+    
     pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 8, "Predicted Quality Attributes", ln=True)
+    pdf.cell(0, 8, sanitize_text("Predicted Quality Attributes"), ln=True)
     pdf.set_font("Arial", "", 10)
-    pdf.cell(50, 6, "Density", 1, 0); pdf.cell(30, 6, f"{density:.3f}", 1, 1)
-    pdf.cell(50, 6, "Tensile Strength", 1, 0); pdf.cell(30, 6, f"{tensile:.3f} MPa", 1, 1)
-    pdf.cell(50, 6, "Elastic Recovery", 1, 0); pdf.cell(30, 6, f"{er:.3f} %", 1, 1)
-    pdf.cell(50, 6, "EFRF", 1, 0); pdf.cell(30, 6, f"{efrf:.4f}", 1, 1)
+    pdf.cell(50, 6, sanitize_text("Density"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{density:.3f}"), 1, 1)
+    pdf.cell(50, 6, sanitize_text("Tensile Strength"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{tensile:.3f} MPa"), 1, 1)
+    pdf.cell(50, 6, sanitize_text("Elastic Recovery"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{er:.3f} %"), 1, 1)
+    pdf.cell(50, 6, sanitize_text("EFRF"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{efrf:.4f}"), 1, 1)
     pdf.ln(5)
+    
     pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 8, f"Status: {status}", ln=True)
+    pdf.cell(0, 8, sanitize_text(f"Status: {status}"), ln=True)
 
     if golden_info is not None:
         pdf.ln(5)
         pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 8, "🌟 Golden Solution (Optimal Trade‑off)", ln=True)
+        pdf.cell(0, 8, sanitize_text("Golden Solution (Optimal Trade-off)"), ln=True)
         pdf.set_font("Arial", "", 10)
-        pdf.cell(50, 6, "API", 1, 0); pdf.cell(30, 6, f"{golden_info['api']:.1f}%", 1, 1)
-        pdf.cell(50, 6, "Binder", 1, 0); pdf.cell(30, 6, f"{golden_info['binder']:.1f}%", 1, 1)
-        pdf.cell(50, 6, "PVPP", 1, 0); pdf.cell(30, 6, f"{golden_info['pvpp']:.1f}%", 1, 1)
-        pdf.cell(50, 6, "Mg-St", 1, 0); pdf.cell(30, 6, f"{golden_info['mgst']:.2f}%", 1, 1)
-        pdf.cell(50, 6, "MCC", 1, 0); pdf.cell(30, 6, f"{golden_info['mcc']:.1f}%", 1, 1)
-        pdf.cell(50, 6, "Pressure", 1, 0); pdf.cell(30, 6, f"{golden_info['pressure']:.1f} MPa", 1, 1)
-        pdf.cell(50, 6, "Speed", 1, 0); pdf.cell(30, 6, f"{golden_info['speed']:.1f} rpm", 1, 1)
-        pdf.cell(50, 6, "Granule", 1, 0); pdf.cell(30, 6, f"{golden_info['granule']:.0f} µm", 1, 1)
+        pdf.cell(50, 6, sanitize_text("API"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{golden_info['api']:.1f}%"), 1, 1)
+        pdf.cell(50, 6, sanitize_text("Binder"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{golden_info['binder']:.1f}%"), 1, 1)
+        pdf.cell(50, 6, sanitize_text("PVPP"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{golden_info['pvpp']:.1f}%"), 1, 1)
+        pdf.cell(50, 6, sanitize_text("Mg-St"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{golden_info['mgst']:.2f}%"), 1, 1)
+        pdf.cell(50, 6, sanitize_text("MCC"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{golden_info['mcc']:.1f}%"), 1, 1)
+        pdf.cell(50, 6, sanitize_text("Pressure"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{golden_info['pressure']:.1f} MPa"), 1, 1)
+        pdf.cell(50, 6, sanitize_text("Speed"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{golden_info['speed']:.1f} rpm"), 1, 1)
+        pdf.cell(50, 6, sanitize_text("Granule"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{golden_info['granule']:.0f} um"), 1, 1)
         pdf.set_font("Arial", "", 10)
-        pdf.cell(50, 6, "Density", 1, 0); pdf.cell(30, 6, f"{golden_info['density']:.3f}", 1, 1)
-        pdf.cell(50, 6, "Tensile", 1, 0); pdf.cell(30, 6, f"{golden_info['tensile']:.3f} MPa", 1, 1)
-        pdf.cell(50, 6, "EFRF", 1, 0); pdf.cell(30, 6, f"{golden_info['efrf']:.4f}", 1, 1)
+        pdf.cell(50, 6, sanitize_text("Density"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{golden_info['density']:.3f}"), 1, 1)
+        pdf.cell(50, 6, sanitize_text("Tensile"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{golden_info['tensile']:.3f} MPa"), 1, 1)
+        pdf.cell(50, 6, sanitize_text("EFRF"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{golden_info['efrf']:.4f}"), 1, 1)
 
     if model_comparison_df is not None:
         pdf.ln(5)
         pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 8, "Model Comparison", ln=True)
+        pdf.cell(0, 8, sanitize_text("Model Comparison"), ln=True)
         pdf.set_font("Arial", "", 8)
-        pdf.cell(40, 6, "Model", 1, 0); pdf.cell(30, 6, "R2", 1, 0)
-        pdf.cell(30, 6, "RMSE", 1, 0); pdf.cell(30, 6, "MAE", 1, 1)
+        pdf.cell(40, 6, sanitize_text("Model"), 1, 0); pdf.cell(30, 6, sanitize_text("R2"), 1, 0)
+        pdf.cell(30, 6, sanitize_text("RMSE"), 1, 0); pdf.cell(30, 6, sanitize_text("MAE"), 1, 1)
         for _, row in model_comparison_df.iterrows():
-            pdf.cell(40, 6, str(row['Model'])[:10], 1, 0)
-            pdf.cell(30, 6, f"{row['R²']:.3f}", 1, 0)
-            pdf.cell(30, 6, f"{row['RMSE']:.3f}", 1, 0)
-            pdf.cell(30, 6, f"{row['MAE']:.3f}", 1, 1)
+            pdf.cell(40, 6, sanitize_text(str(row['Model'])[:10]), 1, 0)
+            pdf.cell(30, 6, sanitize_text(f"{row['R²']:.3f}"), 1, 0)
+            pdf.cell(30, 6, sanitize_text(f"{row['RMSE']:.3f}"), 1, 0)
+            pdf.cell(30, 6, sanitize_text(f"{row['MAE']:.3f}"), 1, 1)
+    
     pdf_bytes = pdf.output(dest="S")
     if isinstance(pdf_bytes, bytearray):
         return bytes(pdf_bytes)
@@ -1028,11 +1055,9 @@ with col_right:
                 # --- Extract the golden solution from the Pareto front ---
                 if pareto_count > 0:
                     front0 = fronts[0]
-                    # Evaluate each solution in the front to get actual metrics
                     golden_candidates = []
                     for idx in front0:
                         formulation = nsga.population[idx]  # already repaired
-                        # Predict using the model
                         d, t, e, ef = predict_pinn(model, scaler, y_scaler, formulation)
                         if D_MIN <= d <= D_MAX and t >= TENSILE_MIN and ef < EFRF_MAX:
                             golden_candidates.append({
