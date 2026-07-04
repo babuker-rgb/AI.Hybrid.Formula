@@ -3,7 +3,7 @@ True Physics-Informed Neural Network (PINN) - Final Version v29.36
 Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
-Version: 29.36 (Updated load & plot functions)
+Version: 29.36 (Auto-repair + Two stars on Pareto)
 """
 
 import streamlit as st
@@ -654,7 +654,6 @@ def plot_training_curves(loss_history):
     fig.update_layout(title='Training Curves (v29.36)', xaxis_title='Epoch', yaxis_title='Loss', height=400)
     return fig
 
-# --- NEW: Pareto plotting with two stars ---
 def plot_pareto_with_stars(objectives, fronts,
                            user_api=None, user_efrf=None,
                            golden_api=None, golden_efrf=None):
@@ -671,6 +670,7 @@ def plot_pareto_with_stars(objectives, fronts,
     pareto_api = -objectives[front0, 0]
     pareto_efrf = objectives[front0, 1]
 
+    # Create fresh figure
     fig = go.Figure()
 
     # All solutions (gray transparent)
@@ -741,7 +741,13 @@ def plot_pareto_with_stars(objectives, fronts,
         yaxis_title='EFRF',
         height=500,
         template='plotly_white',
-        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+        legend=dict(
+            orientation='h',
+            yanchor='bottom',
+            y=1.02,
+            xanchor='right',
+            x=1
+        )
     )
 
     return fig
@@ -869,7 +875,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     return pdf_bytes
 
 # ================================================================
-# 6. MODEL LOADING / TRAINING (UPDATED with simple try/except)
+# 6. MODEL LOADING / TRAINING (UPDATED WITH AUTO-REPAIR)
 # ================================================================
 
 @st.cache_resource
