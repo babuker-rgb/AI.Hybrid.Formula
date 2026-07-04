@@ -1,9 +1,9 @@
 """
-True Physics-Informed Neural Network (PINN) - Final Unified Version v29.34
+True Physics-Informed Neural Network (PINN) - Final Version v29.35
 Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
-Version: 29.34 (Two Stars on Pareto: Blue = User, Gold = Optimal)
+Version: 29.35 (Pareto: Golden star only; Quick experiments sum to 100%)
 """
 
 import streamlit as st
@@ -59,7 +59,8 @@ NSGA_GENERATIONS = 25
 
 DEFAULTS = {
     'api': 90.5, 'binder': 2.7, 'pvpp': 3.0, 'mgst': 0.20,
-    'mcc': 5.0, 'pressure': 230.0, 'speed': 12.0, 'granule': 125.0
+    'mcc': 3.6,  # adjusted to sum 100
+    'pressure': 230.0, 'speed': 12.0, 'granule': 125.0
 }
 
 RANGES = {
@@ -650,14 +651,12 @@ def plot_training_curves(loss_history):
     fig.add_trace(go.Scatter(x=epochs, y=loss_history['train'], mode='lines', name='Training Loss'))
     if len(loss_history['val']) > 0:
         fig.add_trace(go.Scatter(x=epochs[:len(loss_history['val'])], y=loss_history['val'], mode='lines', name='Validation Loss'))
-    fig.update_layout(title='Training Curves (v29.34)', xaxis_title='Epoch', yaxis_title='Loss', height=400)
+    fig.update_layout(title='Training Curves (v29.35)', xaxis_title='Epoch', yaxis_title='Loss', height=400)
     return fig
 
-def plot_pareto_plotly(objectives, constraints, fronts, user_api, user_efrf, golden_api=None, golden_efrf=None):
+def plot_pareto_plotly(objectives, constraints, fronts, golden_api=None, golden_efrf=None):
     """
-    Plot Pareto front with TWO stars:
-    - Blue star: User's tested formulation
-    - Gold star: Optimal (golden) solution
+    Plot Pareto front with GOLDEN star only (user point removed).
     """
     try:
         if objectives is None or fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
@@ -688,14 +687,14 @@ def plot_pareto_plotly(objectives, constraints, fronts, user_api, user_efrf, gol
             name='Pareto Front'
         ))
 
-        # --- GOLDEN STAR (optimal solution, middle of the curve) ---
+        # --- GOLDEN STAR (optimal solution) ---
         if golden_api is not None and golden_efrf is not None:
             fig.add_trace(go.Scatter(
                 x=[golden_api],
                 y=[golden_efrf],
                 mode='markers+text',
                 marker=dict(
-                    size=16,
+                    size=18,
                     color='gold',
                     symbol='star',
                     line=dict(color='darkgoldenrod', width=2)
@@ -703,23 +702,6 @@ def plot_pareto_plotly(objectives, constraints, fronts, user_api, user_efrf, gol
                 text=['⭐ Golden'],
                 textposition='top center',
                 name='Golden Solution (Optimal)'
-            ))
-
-        # --- BLUE STAR (user's tested formulation) ---
-        if user_api is not None and user_efrf is not None:
-            fig.add_trace(go.Scatter(
-                x=[user_api],
-                y=[user_efrf],
-                mode='markers+text',
-                marker=dict(
-                    size=14,
-                    color='blue',
-                    symbol='star',
-                    line=dict(color='darkblue', width=2)
-                ),
-                text=['🔵 Your Formulation'],
-                textposition='top center',
-                name='Your Formulation'
             ))
 
         # EFRF threshold line
@@ -732,7 +714,7 @@ def plot_pareto_plotly(objectives, constraints, fronts, user_api, user_efrf, gol
         )
 
         fig.update_layout(
-            title='Pareto Front: API vs EFRF (v29.34)',
+            title='Pareto Front: API vs EFRF (v29.35)',
             xaxis_title='API (%)',
             yaxis_title='EFRF',
             height=500,
@@ -805,7 +787,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, sanitize_text("Formulation Optimization Report (v29.34)"), ln=True, align="C")
+    pdf.cell(0, 10, sanitize_text("Formulation Optimization Report (v29.35)"), ln=True, align="C")
     pdf.set_font("Arial", "", 10)
     pdf.cell(0, 6, sanitize_text(f"Date: {timestamp}"), ln=True, align="C")
     pdf.ln(5)
@@ -905,7 +887,7 @@ def load_or_train_model():
         if os.path.exists(checkpoint_path):
             os.remove(checkpoint_path)
 
-    st.caption("🔄 Training model from scratch (v29.34 enhanced settings)...")
+    st.caption("🔄 Training model from scratch (v29.35 enhanced settings)...")
 
     df, feature_names = generate_pinn_data(n_samples=N_SAMPLES)
     X_raw = df[feature_names].values
@@ -1006,20 +988,20 @@ def load_or_train_model():
 # 7. MAIN USER INTERFACE (Streamlit UI)
 # ================================================================
 
-st.set_page_config(page_title="PINN Cloud v29.34", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Cloud v29.35", page_icon="🧬", layout="wide")
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
             padding: 1.5rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
-    <h1 style="color: #ffffff; font-size: 2rem; margin: 0;">🧬 Hybrid AI Framework v29.34</h1>
-    <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">⚡ Two Stars · Golden Solution · Enhanced Comparison Table</p>
+    <h1 style="color: #ffffff; font-size: 2rem; margin: 0;">🧬 Hybrid AI Framework v29.35</h1>
+    <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">⚡ Golden Star Only · Sum=100% Experiments</p>
 </div>
 """, unsafe_allow_html=True)
 
 st.markdown("---")
 
 with st.sidebar:
-    st.markdown("### 📚 Physics Constraints (v29.34)")
+    st.markdown("### 📚 Physics Constraints (v29.35)")
     st.markdown(f"""
     - ✅ **Heckel:** ln(1/(1-D)) = kP + A
     - ✅ **EFRF:** ER / σt < {EFRF_MAX:.2f}
@@ -1033,21 +1015,21 @@ with st.sidebar:
     - ✅ **Cache:** Auto-repair if corrupted
     - ✅ **NSGA-II:** Pop={NSGA_POP_SIZE}, Gen={NSGA_GENERATIONS}
     """)
-    st.info("🔬 **v29.34** — Two Stars on Pareto")
+    st.info("🔬 **v29.35** — Golden star only, quick experiments sum to 100%")
 
 # Load or train model
-with st.spinner("📂 Loading/Training model (v29.34)..."):
+with st.spinner("📂 Loading/Training model (v29.35)..."):
     model, scaler, y_scaler, feature_names, df, loss_history = load_or_train_model()
 st.success("✅ Model ready!")
 
-# Quick experiments
+# Quick experiments (adjusted to sum exactly 100%)
 st.markdown("### 🧪 Quick Experiments")
 exp_cols = st.columns(4)
 experiments = {
-    "Baseline": {'api': 90.5, 'binder': 2.7, 'pvpp': 3.0, 'mgst': 0.20, 'mcc': 5.0, 'pressure': 230, 'speed': 12, 'granule': 125},
-    "High Binder": {'api': 90.5, 'binder': 3.0, 'pvpp': 3.0, 'mgst': 0.15, 'mcc': 5.0, 'pressure': 235, 'speed': 10, 'granule': 125},
-    "High Pressure": {'api': 90.5, 'binder': 2.8, 'pvpp': 3.0, 'mgst': 0.12, 'mcc': 5.0, 'pressure': 250, 'speed': 9, 'granule': 125},
-    "Low Mg-St": {'api': 90.5, 'binder': 3.0, 'pvpp': 3.0, 'mgst': 0.10, 'mcc': 5.0, 'pressure': 245, 'speed': 8, 'granule': 125}
+    "Baseline": {'api': 90.5, 'binder': 2.7, 'pvpp': 3.0, 'mgst': 0.20, 'mcc': 3.6, 'pressure': 230, 'speed': 12, 'granule': 125},
+    "High Binder": {'api': 90.5, 'binder': 3.0, 'pvpp': 3.0, 'mgst': 0.15, 'mcc': 3.35, 'pressure': 235, 'speed': 10, 'granule': 125},
+    "High Pressure": {'api': 90.5, 'binder': 2.8, 'pvpp': 3.0, 'mgst': 0.12, 'mcc': 3.58, 'pressure': 250, 'speed': 9, 'granule': 125},
+    "Low Mg-St": {'api': 90.5, 'binder': 3.0, 'pvpp': 3.0, 'mgst': 0.10, 'mcc': 3.4, 'pressure': 245, 'speed': 8, 'granule': 125}
 }
 for i, (name, params) in enumerate(experiments.items()):
     with exp_cols[i]:
@@ -1079,7 +1061,7 @@ with col_left:
         pressure = st.slider("⚙️ Pressure (MPa)", 80.0, PRESSURE_MAX, get_safe_value('pressure'), 1.0, key="pressure")
         speed = st.slider("🔄 Speed (rpm)", 1.0, 50.0, get_safe_value('speed'), 0.5, key="speed")
         granule = st.slider("🔬 Granule Size (µm)", 30.0, 250.0, get_safe_value('granule'), 1.0, key="granule")
-    predict_btn = st.button("🔬 Predict & Optimize (v29.34)", use_container_width=True)
+    predict_btn = st.button("🔬 Predict & Optimize (v29.35)", use_container_width=True)
 
 with col_right:
     st.markdown("### 📈 Results")
@@ -1097,7 +1079,7 @@ with col_right:
             api_norm, binder_norm, pvpp_norm, mgst_norm, mcc_norm = normalize_components(api, binder, pvpp, mgst, mcc)
             inputs_norm = [api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm, pressure, speed, granule]
             api_use, mcc_use, pvpp_use, mgst_use, binder_use = api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm
-            with st.spinner("🧠 Predicting (v29.34)..."):
+            with st.spinner("🧠 Predicting (v29.35)..."):
                 density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs_norm)
             kpi_cols = st.columns(3)
             kpi_cols[0].metric("Density", f"{density:.3f}", delta=f"Target: {D_MIN:.2f}–{D_MAX:.2f}")
@@ -1120,7 +1102,7 @@ with col_right:
             pass_cols[3].metric("MCC", "✅" if mcc_ok else "❌")
 
             # --- ENHANCED NSGA‑II ---
-            st.markdown("### ⚙️ NSGA‑II (v29.34)")
+            st.markdown("### ⚙️ NSGA‑II (v29.35)")
             bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],[80,PRESSURE_MAX],[1,50],[30,250]])
             with st.spinner(f"🔄 NSGA‑II (pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS})..."):
                 nsga = NSGAII(model, scaler, y_scaler, bounds)
@@ -1195,7 +1177,7 @@ with col_right:
                 else:
                     st.info("Pareto front empty. No golden solution available.")
 
-            # --- Model Comparison (formatted like CSV) ---
+            # --- Model Comparison ---
             X_train, X_test, y_train, y_test = train_test_split(
                 df[feature_names].values, df['Tensile_Strength_MPa'].values,
                 test_size=0.2, random_state=42
@@ -1205,17 +1187,13 @@ with col_right:
             X_train_scaled = scaler.transform(X_train_aug)
             X_test_scaled = scaler.transform(X_test_aug)
 
-            # PINN predictions
             pinn_pred_scaled = model.predict(torch.tensor(X_test_scaled, dtype=torch.float32))
             pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
             pinn_r2 = r2_score(y_test, pinn_pred)
             pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
             pinn_mae = mean_absolute_error(y_test, pinn_pred)
 
-            # Other models
             comp_df = train_and_compare(X_train_scaled, X_test_scaled, y_train, y_test)
-
-            # Build PINN row
             pinn_row = pd.DataFrame([{
                 'Model': 'PINN (Proposed)',
                 'R²': pinn_r2,
@@ -1223,16 +1201,12 @@ with col_right:
                 'MAE': pinn_mae,
                 'Physics': '✅ Enforced'
             }])
-
-            # Combine
             comp_df = pd.concat([pinn_row, comp_df], ignore_index=True)
 
-            # Format numeric columns to 4 decimal places
+            # Format numeric columns
             comp_df_display = comp_df.copy()
             for col in ['R²', 'RMSE', 'MAE']:
                 comp_df_display[col] = comp_df_display[col].map(lambda x: f"{x:.4f}")
-
-            # Store for display
             comp_df = comp_df_display
 
     # Tabs
@@ -1240,20 +1214,18 @@ with col_right:
 
     with tab1:
         if predict_btn and objectives is not None:
-            # Get golden API and EFRF for the plot
             golden_api = golden_info['api'] if golden_info else None
             golden_efrf = golden_info['efrf'] if golden_info else None
 
             fig = plot_pareto_plotly(
                 objectives, constraints, fronts,
-                user_api=api_norm,
-                user_efrf=efrf,
                 golden_api=golden_api,
                 golden_efrf=golden_efrf
+                # user point omitted
             )
             if fig:
                 st.plotly_chart(fig, use_container_width=True)
-                st.caption("🔵 Blue star = Your formulation   |   ⭐ Gold star = Optimal (golden) solution")
+                st.caption("⭐ Gold star = Optimal (golden) solution — your formulation is not shown on this plot.")
             else:
                 st.info("No Pareto front data available.")
         else:
@@ -1272,8 +1244,6 @@ with col_right:
     with tab3:
         if predict_btn and not comp_df.empty:
             st.markdown("### Model Performance Comparison")
-
-            # Display with styling
             st.dataframe(
                 comp_df.style
                 .apply(lambda x: ['background-color: #e6f7e6' if i == 0 else '' for i in range(len(x))], axis=0)
@@ -1283,7 +1253,6 @@ with col_right:
                 hide_index=True
             )
 
-            # Bar chart
             fig = go.Figure()
             colors = ['#2ecc71' if m == 'PINN (Proposed)' else '#3498db' for m in comp_df['Model']]
             fig.add_trace(go.Bar(
@@ -1294,7 +1263,7 @@ with col_right:
                 textposition='outside'
             ))
             fig.update_layout(
-                title='R² Comparison (v29.34)',
+                title='R² Comparison (v29.35)',
                 yaxis=dict(title='R² Score', range=[0, 1.05]),
                 height=350,
                 showlegend=False
@@ -1308,7 +1277,6 @@ with col_right:
             status = "PASS" if (density_ok and tensile_ok and efrf_ok and mcc_ok) else "FAIL"
             timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-            # Convert comp_df back to numeric for PDF
             pdf_comp_df = comp_df.copy()
             for col in ['R²', 'RMSE', 'MAE']:
                 pdf_comp_df[col] = pdf_comp_df[col].astype(float)
@@ -1319,13 +1287,13 @@ with col_right:
                 status, timestamp, pdf_comp_df, golden_info
             )
             st.download_button(
-                "📥 Download PDF Report (v29.34)",
+                "📥 Download PDF Report (v29.35)",
                 data=pdf_data,
-                file_name=f"report_v29.34_{timestamp[:10]}.pdf",
+                file_name=f"report_v29.35_{timestamp[:10]}.pdf",
                 mime="application/pdf"
             )
         else:
             st.info("👆 Click 'Predict & Optimize' to generate the report.")
 
 st.markdown("---")
-st.caption("🔬 **PINN v29.34** — Two Stars · Golden Solution · Enhanced Comparison Table | Nile Valley University")
+st.caption("🔬 **PINN v29.35** — Golden Star Only · Sum=100% Experiments | Nile Valley University")
