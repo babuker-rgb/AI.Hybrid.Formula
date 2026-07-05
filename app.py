@@ -3,7 +3,7 @@ True Physics-Informed Neural Network (PINN) - Version v29.43
 Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
-Version: 29.43 (Custom NSGA-II + simplified adaptive loss + granule analysis)
+Version: 29.43 (Custom NSGA-II + adaptive loss + fixed granule support)
 """
 
 import streamlit as st
@@ -427,12 +427,14 @@ class MultiTaskTruePINN(nn.Module):
         return total_loss, {'total_loss': total_loss.item()}
 
 # ================================================================
-# 4. CUSTOM NSGA-II (working)
+# 4. CUSTOM NSGA-II (UPDATED with fixed granule support)
 # ================================================================
 
 class NSGAII:
     def __init__(self, model, scaler, y_scaler, bounds,
-                 pop_size=NSGA_POP_SIZE, n_generations=NSGA_GENERATIONS, w_tensile=0.0):
+                 pop_size=NSGA_POP_SIZE, n_generations=NSGA_GENERATIONS,
+                 w_tensile=0.0,
+                 granule_mode='Variable', fixed_granule=125.0):
         self.model = model
         self.scaler = scaler
         self.y_scaler = y_scaler
@@ -440,6 +442,8 @@ class NSGAII:
         self.pop_size = pop_size
         self.n_generations = n_generations
         self.w_tensile = w_tensile
+        self.granule_mode = granule_mode      # NEW
+        self.fixed_granule = fixed_granule    # NEW
         self.population = None
         self.objectives = None
         self.constraints = None
@@ -450,7 +454,11 @@ class NSGAII:
         api, binder, pvpp, mgst, mcc = normalize_components(api, binder, pvpp, mgst, mcc)
         pressure = np.clip(pressure, 80, PRESSURE_MAX)
         speed = np.clip(speed, 1.0, 50.0)
-        granule = np.clip(granule, 30.0, 250.0)
+        # --- Fixed granule support ---
+        if self.granule_mode == "Fixed":
+            granule = self.fixed_granule
+        else:
+            granule = np.clip(granule, 30.0, 250.0)
         return np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule], dtype=float)
 
     def _evaluate(self, population):
@@ -1171,11 +1179,12 @@ with st.spinner("📂 Loading/Training model (v29.43)..."):
 st.success("✅ Model ready!")
 
 # ================================================================
-# Granule Analysis Section
+# Granule Analysis Section (UI widgets for mode and fixed value)
 # ================================================================
 st.markdown("---")
 st.markdown("### 🔬 Granule Size Analysis")
 with st.expander("Granule Size Toggle & Plots", expanded=True):
+    # استخدام مفاتيح ثابتة لتخزين القيم في session_state لتسهيل الوصول إليها من NSGA-II
     granule_mode_ui = st.radio(
         "Granule Size Mode:",
         ["Variable", "Fixed"],
@@ -1301,11 +1310,20 @@ with col_right:
             pass_cols[2].metric("EFRF", "✅" if efrf_ok else "❌")
             pass_cols[3].metric("MCC", "✅" if mcc_ok else "❌")
 
-            # --- NSGA‑II ---
+            # --- NSGA‑II (with fixed granule support) ---
             st.markdown("### ⚙️ NSGA‑II (v29.43)")
             bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],[80,PRESSURE_MAX],[1,50],[30,250]])
             with st.spinner(f"🔄 NSGA‑II (pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS})..."):
-                nsga = NSGAII(model, scaler, y_scaler, bounds)
+                # تمرير وضع الحبيبات الثابتة من واجهة المستخدم
+                # نستخدم granule_mode_ui و fixed_granule_ui من session_state
+                # (يتم تحديثهما بواسطة widgets في قسم تحليل الحبيبات)
+                nsga_granule_mode = st.session_state.get('granule_mode_ui', 'Variable')
+                nsga_fixed_granule = st.session_state.get('fixed_granule_ui', 125.0)
+                nsga = NSGAII(
+                    model, scaler, y_scaler, bounds,
+                    granule_mode=nsga_granule_mode,
+                    fixed_granule=nsga_fixed_granule
+                )
                 pop, objectives, constraints, fronts = nsga.run()
 
                 if len(fronts) > 0 and len(fronts[0]) > 0:
