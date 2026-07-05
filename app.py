@@ -3,7 +3,7 @@ True Physics-Informed Neural Network (PINN) - Version v29.42
 Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
-Version: 29.42 (Fixed PyMOO bounds issue - final)
+Version: 29.42 (Fixed PyMOO bounds method)
 """
 
 import streamlit as st
@@ -125,7 +125,7 @@ safe_initialize()
 clamp_session_state()
 
 # ================================================================
-# 2. HELPER FUNCTIONS (with granule mode support)
+# 2. HELPER FUNCTIONS
 # ================================================================
 
 def sanitize_text(text):
@@ -433,7 +433,7 @@ class MultiTaskTruePINN(nn.Module):
         return total_loss, {'total_loss': total_loss.item()}
 
 # ================================================================
-# 4. FIXED PyMOO NSGA-II (bounds fixed)
+# 4. FIXED PyMOO NSGA-II (bounds method added)
 # ================================================================
 
 class TabletProblem(Problem):
@@ -458,11 +458,14 @@ class TabletProblem(Problem):
         self.fixed_granule = fixed_granule
         self.w_tensile = w_tensile
         self.bounds = bounds
-        # DO NOT pass xl/xu to super; set them as attributes after.
-        super().__init__(n_var=8, n_obj=2, n_constr=4)
-        # Now set the bounds attributes
+        # Set bounds as attributes for PyMOO
         self.xl = bounds[:, 0]
         self.xu = bounds[:, 1]
+        super().__init__(n_var=8, n_obj=2, n_constr=4)
+
+    # === FIX: define bounds() method for PyMOO sampling ===
+    def bounds(self):
+        return self.xl, self.xu
 
     def _evaluate(self, x, out, *args, **kwargs):
         n = x.shape[0]
@@ -1129,15 +1132,12 @@ with col_right:
             st.markdown("### ⚙️ NSGA‑II (v29.42, PyMOO)")
             bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],[80,PRESSURE_MAX],[1,50],[30,250]])
             with st.spinner(f"🔄 PyMOO NSGA‑II (pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS})..."):
-                # Use Variable granule mode by default; the UI is only for analysis plots, not for NSGA-II
-                granule_mode_nsga = 'Variable'
-                fixed_granule_nsga = 125.0
                 X_all, F_all, _, pareto_X, pareto_F = run_pymoo_nsga2(
                     model, scaler, y_scaler, bounds,
                     pop_size=NSGA_POP_SIZE,
                     generations=NSGA_GENERATIONS,
-                    granule_mode=granule_mode_nsga,
-                    fixed_granule=fixed_granule_nsga,
+                    granule_mode='Variable',  # using variable mode in optimization
+                    fixed_granule=125.0,
                     w_tensile=0.0
                 )
 
@@ -1223,7 +1223,7 @@ with col_right:
 
                 # Store for plotting
                 objectives = F_all
-                fronts = None  # not used if we pass pareto_api_arr
+                fronts = None
 
             # --- Model Comparison ---
             X_train, X_test, y_train, y_test = train_test_split(
