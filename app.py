@@ -1,9 +1,9 @@
 """
-True Physics-Informed Neural Network (PINN) - Version v29.43
+True Physics-Informed Neural Network (PINN) - Version v29.44
 Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
-Version: 29.43 (Custom NSGA-II + adaptive loss + fixed granule support)
+Version: 29.44 (3D Pareto Surface + Fixed Granule Support)
 """
 
 import streamlit as st
@@ -35,7 +35,7 @@ except ImportError:
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. ENHANCED PARAMETERS (v29.43)
+# 0. ENHANCED PARAMETERS (v29.44)
 # ================================================================
 
 TENSILE_MIN = 1.90
@@ -427,7 +427,7 @@ class MultiTaskTruePINN(nn.Module):
         return total_loss, {'total_loss': total_loss.item()}
 
 # ================================================================
-# 4. CUSTOM NSGA-II (UPDATED with fixed granule support)
+# 4. CUSTOM NSGA-II (with fixed granule support)
 # ================================================================
 
 class NSGAII:
@@ -442,8 +442,8 @@ class NSGAII:
         self.pop_size = pop_size
         self.n_generations = n_generations
         self.w_tensile = w_tensile
-        self.granule_mode = granule_mode      # NEW
-        self.fixed_granule = fixed_granule    # NEW
+        self.granule_mode = granule_mode
+        self.fixed_granule = fixed_granule
         self.population = None
         self.objectives = None
         self.constraints = None
@@ -454,7 +454,6 @@ class NSGAII:
         api, binder, pvpp, mgst, mcc = normalize_components(api, binder, pvpp, mgst, mcc)
         pressure = np.clip(pressure, 80, PRESSURE_MAX)
         speed = np.clip(speed, 1.0, 50.0)
-        # --- Fixed granule support ---
         if self.granule_mode == "Fixed":
             granule = self.fixed_granule
         else:
@@ -721,7 +720,7 @@ def plot_training_curves(loss_history):
     fig.add_trace(go.Scatter(x=epochs, y=loss_history['train'], mode='lines', name='Training Loss'))
     if len(loss_history['val']) > 0:
         fig.add_trace(go.Scatter(x=epochs[:len(loss_history['val'])], y=loss_history['val'], mode='lines', name='Validation Loss'))
-    fig.update_layout(title='Training Curves (v29.43)', xaxis_title='Epoch', yaxis_title='Loss', height=400)
+    fig.update_layout(title='Training Curves (v29.44)', xaxis_title='Epoch', yaxis_title='Loss', height=400)
     return fig
 
 def smooth_pareto_curve(api_points, efrf_points, num_points=200):
@@ -789,6 +788,7 @@ def plot_pareto_with_stars(objectives, fronts,
             name='Pareto Front (line)'
         ))
 
+    # ⭐ Gold star (only once)
     if golden_api is not None and golden_efrf is not None:
         fig.add_trace(go.Scatter(
             x=[golden_api], y=[golden_efrf],
@@ -799,6 +799,7 @@ def plot_pareto_with_stars(objectives, fronts,
             name='Golden Solution'
         ))
 
+    # 🔵 Blue star (only once)
     if user_api is not None and user_efrf is not None:
         fig.add_trace(go.Scatter(
             x=[user_api], y=[user_efrf],
@@ -813,11 +814,79 @@ def plot_pareto_with_stars(objectives, fronts,
                   annotation_text=f'EFRF Threshold: {EFRF_MAX:.2f}',
                   annotation_position='top right')
     fig.update_layout(
-        title='Pareto Front with Two Stars (v29.43)',
+        title='Pareto Front with Two Stars (v29.44)',
         xaxis_title='API (%)',
         yaxis_title='EFRF',
         height=500,
         template='plotly_white',
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+    )
+    return fig
+
+# --- 3D Pareto plotting functions ---
+def compute_cost(mcc, binder):
+    # يمكن تعديل الأوزان حسب الرؤية الاقتصادية
+    return 2.0 * mcc + 1.5 * binder
+
+def compute_efficacy(tensile, efrf):
+    return tensile / (efrf + 1e-6)
+
+def plot_pareto_3d(pareto_solutions, user_solution, golden_solution):
+    """
+    رسم جبهة باريتو ثلاثية الأبعاد مع نجمتين فقط (زرقاء وذهبية)
+    """
+    import plotly.graph_objects as go
+    if not pareto_solutions:
+        return None
+    cost_vals = [compute_cost(sol['mcc'], sol['binder']) for sol in pareto_solutions]
+    efficacy_vals = [compute_efficacy(sol['tensile'], sol['efrf']) for sol in pareto_solutions]
+    density_vals = [sol['density'] for sol in pareto_solutions]
+    efrf_vals = [sol['efrf'] for sol in pareto_solutions]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter3d(
+        x=cost_vals, y=efficacy_vals, z=density_vals,
+        mode='markers',
+        marker=dict(size=6, color=efrf_vals, colorscale='Viridis', showscale=True,
+                    colorbar=dict(title="EFRF")),
+        name='Pareto Solutions'
+    ))
+
+    # ⭐ Gold star (only once)
+    if golden_solution:
+        golden_cost = compute_cost(golden_solution['mcc'], golden_solution['binder'])
+        golden_efficacy = compute_efficacy(golden_solution['tensile'], golden_solution['efrf'])
+        fig.add_trace(go.Scatter3d(
+            x=[golden_cost], y=[golden_efficacy], z=[golden_solution['density']],
+            mode='markers+text',
+            marker=dict(size=14, color='gold', symbol='diamond'),
+            text=['⭐ Golden'], textposition='top center',
+            name='Golden Solution'
+        ))
+
+    # 🔵 Blue star (only once)
+    if user_solution:
+        user_cost = compute_cost(user_solution['mcc'], user_solution['binder'])
+        user_efficacy = compute_efficacy(user_solution['tensile'], user_solution['efrf'])
+        fig.add_trace(go.Scatter3d(
+            x=[user_cost], y=[user_efficacy], z=[user_solution['density']],
+            mode='markers+text',
+            marker=dict(size=14, color='blue', symbol='circle'),
+            text=['🔵 Your Formulation'], textposition='top center',
+            name='Your Formulation'
+        ))
+
+    fig.update_layout(
+        title='3D Pareto Surface (v29.44)',
+        scene=dict(
+            xaxis_title='Cost (MCC + Binder)',
+            yaxis_title='Efficacy (Tensile / EFRF)',
+            zaxis_title='Density',
+            xaxis=dict(range=[0, 25]),
+            yaxis=dict(range=[0, 60]),
+            zaxis=dict(range=[0.4, 1.0])
+        ),
+        height=600,
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
     )
     return fig
@@ -882,7 +951,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, sanitize_text("Formulation Optimization Report (v29.43)"), ln=True, align="C")
+    pdf.cell(0, 10, sanitize_text("Formulation Optimization Report (v29.44)"), ln=True, align="C")
     pdf.set_font("Arial", "", 10)
     pdf.cell(0, 6, sanitize_text(f"Date: {timestamp}"), ln=True, align="C")
     pdf.ln(5)
@@ -980,7 +1049,7 @@ def load_or_train_model():
         if os.path.exists(checkpoint_path):
             os.remove(checkpoint_path)
 
-    st.caption("🔄 Training model from scratch (v29.43 improved settings)...")
+    st.caption("🔄 Training model from scratch (v29.44 improved settings)...")
 
     df, feature_names = generate_pinn_data(n_samples=N_SAMPLES)
     X_raw = df[feature_names].values
@@ -1102,20 +1171,20 @@ def load_or_train_model():
 # 7. MAIN USER INTERFACE (Streamlit UI)
 # ================================================================
 
-st.set_page_config(page_title="PINN Cloud v29.43", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Cloud v29.44", page_icon="🧬", layout="wide")
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
             padding: 1.5rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
-    <h1 style="color: #ffffff; font-size: 2rem; margin: 0;">🧬 Hybrid AI Framework v29.43</h1>
-    <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">⚡ Custom NSGA-II · Adaptive Loss · Granule Analysis</p>
+    <h1 style="color: #ffffff; font-size: 2rem; margin: 0;">🧬 Hybrid AI Framework v29.44</h1>
+    <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">⚡ 3D Pareto · Custom NSGA-II · Adaptive Loss</p>
 </div>
 """, unsafe_allow_html=True)
 
 st.markdown("---")
 
 with st.sidebar:
-    st.markdown("### 📚 Physics Constraints (v29.43)")
+    st.markdown("### 📚 Physics Constraints (v29.44)")
     st.markdown(f"""
     - ✅ **Heckel:** ln(1/(1-D)) = kP + A
     - ✅ **EFRF:** ER / σt < {EFRF_MAX:.2f}
@@ -1130,61 +1199,39 @@ with st.sidebar:
     - ✅ **NSGA-II:** Custom, Pop={NSGA_POP_SIZE}, Gen={NSGA_GENERATIONS}
     - ✅ **Network:** BatchNorm + Dropout (0.1)
     - ✅ **Granule Analysis:** Toggle Fixed/Variable
+    - ✅ **3D Pareto:** Cost vs Efficacy vs Density
     """)
     show_smooth = st.checkbox("Show smooth Pareto curve", value=True)
-    st.info("🔬 **v29.43** — Stable Custom NSGA-II")
+    st.info("🔬 **v29.44** — 3D Pareto Surface Added")
 
-    # ================================================================
-    # 📑 Edge Tabs Display (Demo)
-    # ================================================================
+    # Edge Tabs Demo (sidebar)
     st.markdown("---")
     st.markdown("### 📑 Open Tabs (Demo)")
-
-    # بيانات تجريبية (يمكن استبدالها بقراءة فعلية لاحقاً)
     edge_all_open_tabs = [
-        {
-            "pageTitle": "What's new in Microsoft Edge",
-            "pageUrl": "https://explore.microsoft.com/en-us/edge/update/150...",
-            "tabId": 2081417533,
-            "isCurrent": True
-        },
-        {
-            "pageTitle": "Python Documentation",
-            "pageUrl": "https://docs.python.org/3/",
-            "tabId": 2081417534,
-            "isCurrent": False
-        },
-        {
-            "pageTitle": "Streamlit Cloud",
-            "pageUrl": "https://streamlit.io/cloud",
-            "tabId": 2081417535,
-            "isCurrent": False
-        }
+        {"pageTitle": "What's new in Microsoft Edge", "pageUrl": "https://...", "tabId": 1, "isCurrent": True},
+        {"pageTitle": "Python Documentation", "pageUrl": "https://docs.python.org/3/", "tabId": 2, "isCurrent": False},
+        {"pageTitle": "Streamlit Cloud", "pageUrl": "https://streamlit.io/cloud", "tabId": 3, "isCurrent": False}
     ]
-
     st.caption(f"Total: {len(edge_all_open_tabs)} tabs")
-    titles = [tab["pageTitle"] for tab in edge_all_open_tabs]
-    for title in titles:
-        st.write(f"- {title}")
-
-    current_tab = next(tab for tab in edge_all_open_tabs if tab["isCurrent"])
-    st.markdown(f"**Active:** {current_tab['pageTitle']}")
+    for tab in edge_all_open_tabs:
+        st.write(f"- {tab['pageTitle']}")
+    current = next(tab for tab in edge_all_open_tabs if tab["isCurrent"])
+    st.markdown(f"**Active:** {current['pageTitle']}")
 
 # ================================================================
 # تحميل النموذج (AUTO-REPAIR)
 # ================================================================
 
-with st.spinner("📂 Loading/Training model (v29.43)..."):
+with st.spinner("📂 Loading/Training model (v29.44)..."):
     model, scaler, y_scaler, feature_names, df, loss_history = load_or_train_model()
 st.success("✅ Model ready!")
 
 # ================================================================
-# Granule Analysis Section (UI widgets for mode and fixed value)
+# Granule Analysis Section (UI widgets)
 # ================================================================
 st.markdown("---")
 st.markdown("### 🔬 Granule Size Analysis")
 with st.expander("Granule Size Toggle & Plots", expanded=True):
-    # استخدام مفاتيح ثابتة لتخزين القيم في session_state لتسهيل الوصول إليها من NSGA-II
     granule_mode_ui = st.radio(
         "Granule Size Mode:",
         ["Variable", "Fixed"],
@@ -1270,7 +1317,7 @@ with col_left:
         pressure = st.slider("⚙️ Pressure (MPa)", 80.0, PRESSURE_MAX, get_safe_value('pressure'), 1.0, key="pressure")
         speed = st.slider("🔄 Speed (rpm)", 1.0, 50.0, get_safe_value('speed'), 0.5, key="speed")
         granule = st.slider("🔬 Granule Size (µm)", 30.0, 250.0, get_safe_value('granule'), 1.0, key="granule")
-    predict_btn = st.button("🔬 Predict & Optimize (v29.43)", use_container_width=True)
+    predict_btn = st.button("🔬 Predict & Optimize (v29.44)", use_container_width=True)
 
 with col_right:
     st.markdown("### 📈 Results")
@@ -1280,6 +1327,7 @@ with col_right:
     density_ok = False; tensile_ok = False; efrf_ok = False; mcc_ok = False
     api_use = 0.0; mcc_use = 0.0; pvpp_use = 0.0; mgst_use = 0.0; binder_use = 0.0
     golden_info = None
+    pareto_solutions_list = []  # for 3D plot
 
     if predict_btn:
         if abs(total - 100) > 0.1:
@@ -1288,7 +1336,7 @@ with col_right:
             api_norm, binder_norm, pvpp_norm, mgst_norm, mcc_norm = normalize_components(api, binder, pvpp, mgst, mcc)
             inputs_norm = [api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm, pressure, speed, granule]
             api_use, mcc_use, pvpp_use, mgst_use, binder_use = api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm
-            with st.spinner("🧠 Predicting (v29.43)..."):
+            with st.spinner("🧠 Predicting (v29.44)..."):
                 density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs_norm)
             kpi_cols = st.columns(3)
             kpi_cols[0].metric("Density", f"{density:.3f}", delta=f"Target: {D_MIN:.2f}–{D_MAX:.2f}")
@@ -1311,12 +1359,9 @@ with col_right:
             pass_cols[3].metric("MCC", "✅" if mcc_ok else "❌")
 
             # --- NSGA‑II (with fixed granule support) ---
-            st.markdown("### ⚙️ NSGA‑II (v29.43)")
+            st.markdown("### ⚙️ NSGA‑II (v29.44)")
             bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],[80,PRESSURE_MAX],[1,50],[30,250]])
             with st.spinner(f"🔄 NSGA‑II (pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS})..."):
-                # تمرير وضع الحبيبات الثابتة من واجهة المستخدم
-                # نستخدم granule_mode_ui و fixed_granule_ui من session_state
-                # (يتم تحديثهما بواسطة widgets في قسم تحليل الحبيبات)
                 nsga_granule_mode = st.session_state.get('granule_mode_ui', 'Variable')
                 nsga_fixed_granule = st.session_state.get('fixed_granule_ui', 125.0)
                 nsga = NSGAII(
@@ -1330,39 +1375,37 @@ with col_right:
                     pareto_count = len(fronts[0])
                     st.success(f"📊 Pareto front found: **{pareto_count}** optimal solutions")
                 else:
-                    st.warning("No feasible Pareto solutions found. Try relaxing constraints.")
+                    st.warning("No feasible Pareto solutions found.")
                     pareto_count = 0
 
                 if pareto_count > 0:
                     front0 = fronts[0]
                     golden_candidates = []
+                    # Build list of all pareto solutions for 3D plot
+                    pareto_solutions_list = []
                     for idx in front0:
                         formulation = nsga.population[idx]
                         d, t, e, ef = predict_pinn(model, scaler, y_scaler, formulation)
+                        sol_dict = {
+                            'api': formulation[0],
+                            'mcc': formulation[1],
+                            'pvpp': formulation[2],
+                            'mgst': formulation[3],
+                            'binder': formulation[4],
+                            'pressure': formulation[5],
+                            'speed': formulation[6],
+                            'granule': formulation[7],
+                            'density': d,
+                            'tensile': t,
+                            'er': e,
+                            'efrf': ef
+                        }
+                        pareto_solutions_list.append(sol_dict)
                         if D_MIN <= d <= D_MAX and t >= TENSILE_MIN and ef < EFRF_MAX:
-                            golden_candidates.append({
-                                'formulation': formulation,
-                                'density': d,
-                                'tensile': t,
-                                'er': e,
-                                'efrf': ef
-                            })
+                            golden_candidates.append(sol_dict)
                     if golden_candidates:
                         best = min(golden_candidates, key=lambda x: (x['efrf'], -x['tensile']))
-                        golden_info = {
-                            'api': best['formulation'][0],
-                            'mcc': best['formulation'][1],
-                            'pvpp': best['formulation'][2],
-                            'mgst': best['formulation'][3],
-                            'binder': best['formulation'][4],
-                            'pressure': best['formulation'][5],
-                            'speed': best['formulation'][6],
-                            'granule': best['formulation'][7],
-                            'density': best['density'],
-                            'tensile': best['tensile'],
-                            'er': best['er'],
-                            'efrf': best['efrf']
-                        }
+                        golden_info = best
                         st.markdown("---")
                         st.markdown("### ⭐ Golden Solution (Suggested)")
                         col1, col2 = st.columns(2)
@@ -1389,8 +1432,6 @@ with col_right:
                             """)
                     else:
                         st.info("No fully feasible solution found in Pareto front.")
-                else:
-                    st.info("Pareto front empty. No golden solution available.")
 
             # --- Model Comparison ---
             X_train, X_test, y_train, y_test = train_test_split(
@@ -1424,9 +1465,11 @@ with col_right:
             comp_df = comp_df_display
 
     # ================================================================
-    # Tabs
+    # Tabs (6 tabs)
     # ================================================================
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📉 Pareto", "🔍 Sensitivity", "📊 Comparison", "📄 Report", "🔬 Granule"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+        ["📉 Pareto", "🔍 Sensitivity", "📊 Comparison", "📄 Report", "🔬 Granule", "🌐 3D Pareto"]
+    )
 
     with tab1:
         if predict_btn and objectives is not None:
@@ -1480,7 +1523,7 @@ with col_right:
                 hovertemplate='%{y}<br>R² = %{x:.4f}<extra></extra>'
             ))
             fig.update_layout(
-                title='R² Score Comparison (v29.43)',
+                title='R² Score Comparison (v29.44)',
                 xaxis=dict(title='R² Score', range=[-0.2, 1.05]),
                 yaxis=dict(title='Model'),
                 height=300,
@@ -1514,9 +1557,9 @@ with col_right:
                 status, timestamp, pdf_comp_df, golden_info
             )
             st.download_button(
-                "📥 Download PDF Report (v29.43)",
+                "📥 Download PDF Report (v29.44)",
                 data=pdf_data,
-                file_name=f"report_v29.43_{timestamp[:10]}.pdf",
+                file_name=f"report_v29.44_{timestamp[:10]}.pdf",
                 mime="application/pdf"
             )
         else:
@@ -1527,5 +1570,29 @@ with col_right:
         st.info("Use the toggle at the top of the page to switch between Fixed and Variable granule modes.")
         st.markdown("The plots are shown in the expander at the top of the page.")
 
+    with tab6:
+        st.markdown("### 🌐 3D Pareto Surface")
+        if predict_btn and pareto_solutions_list:
+            # User solution dictionary
+            user_dict = {
+                'api': api_norm,
+                'mcc': mcc_norm,
+                'binder': binder_norm,
+                'density': density,
+                'tensile': tensile,
+                'efrf': efrf,
+                'er': er
+            } if api_norm is not None else None
+            golden_dict = golden_info  # already a dict
+
+            fig3d = plot_pareto_3d(pareto_solutions_list, user_dict, golden_dict)
+            if fig3d:
+                st.plotly_chart(fig3d, use_container_width=True)
+                st.caption("🔵 Blue = Your formulation · ⭐ Gold = Optimal solution · Color = EFRF")
+            else:
+                st.info("Could not generate 3D plot.")
+        else:
+            st.info("👆 Click 'Predict & Optimize' to see the 3D Pareto surface.")
+
 st.markdown("---")
-st.caption("🔬 **PINN v29.43** — Custom NSGA-II · Adaptive Loss · Granule Analysis | Nile Valley University")
+st.caption("🔬 **PINN v29.44** — 3D Pareto · Custom NSGA-II · Adaptive Loss | Nile Valley University")
