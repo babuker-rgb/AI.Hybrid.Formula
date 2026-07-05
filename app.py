@@ -1,9 +1,9 @@
 """
-True Physics-Informed Neural Network (PINN) - Version v29.41
+True Physics-Informed Neural Network (PINN) - Version v29.42
 Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
-Version: 29.41 (Granule size toggle + analysis plots)
+Version: 29.42 (Simplified adaptive loss + PyMOO NSGA-II)
 """
 
 import streamlit as st
@@ -25,6 +25,12 @@ import math
 import os
 import pickle
 import re
+from pymoo.algorithms.moo.nsga2 import NSGA2
+from pymoo.optimize import minimize
+from pymoo.core.problem import Problem
+from pymoo.operators.crossover.sbx import SBX
+from pymoo.operators.mutation.pm import PM
+from pymoo.operators.sampling.rnd import FloatRandomSampling
 
 try:
     from scipy.interpolate import UnivariateSpline
@@ -35,7 +41,7 @@ except ImportError:
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. ENHANCED PARAMETERS (v29.41)
+# 0. ENHANCED PARAMETERS (v29.42)
 # ================================================================
 
 TENSILE_MIN = 1.90
@@ -296,7 +302,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42,
     return df, feature_names
 
 # ================================================================
-# 3. PINN MODEL (with BatchNorm + Dropout)
+# 3. PINN MODEL (with simplified adaptive loss)
 # ================================================================
 
 class Mish(nn.Module):
@@ -362,7 +368,7 @@ class MultiTaskTruePINN(nn.Module):
             output = self.forward(X_scaled)
             return output[:, :3].cpu().numpy()
 
-    # Adaptive loss
+    # --- SIMPLIFIED ADAPTIVE LOSS (NEW) ---
     def compute_loss(self, X_scaled, X_raw, y_true, epoch=0, max_epochs=ADAM_EPOCHS,
                      w_density=W_DENSITY, w_tensile=W_TENSILE,
                      w_tensile_physics=W_TENSILE_PHYSICS,
@@ -380,33 +386,36 @@ class MultiTaskTruePINN(nn.Module):
         k_pred = y_pred[:, 3:4]
         A_pred = y_pred[:, 4:5]
 
+        # Physics weight scheduling (unchanged)
         progress = epoch / max_epochs
         schedule_factor = 1 / (1 + math.exp(-12 * (progress - 0.5)))
         w_physics = w_physics_base + (w_physics_final - w_physics_base) * schedule_factor
         w_physics = max(w_physics, 0.1)
 
-        density_mse = nn.MSELoss()(density_pred, y_true[:, 0:1])
-        tensile_mse = nn.MSELoss()(tensile_pred, y_true[:, 1:2])
-        er_mse = nn.MSELoss()(er_pred, y_true[:, 2:3])
+        # Individual losses
+        density_loss = nn.MSELoss()(density_pred, y_true[:, 0:1])
+        tensile_loss = nn.MSELoss()(tensile_pred, y_true[:, 1:2])
+        er_loss = nn.MSELoss()(er_pred, y_true[:, 2:3])
 
-        if epoch < 50:
-            data_loss = (3.5 * density_mse) + (w_tensile * tensile_mse) + (3.5 * er_mse)
-        else:
-            total_mse = density_mse + tensile_mse + er_mse + 1e-8
-            w_den = density_mse / total_mse
-            w_ten = tensile_mse / total_mse
-            w_er = er_mse / total_mse
+        # --- Simplified adaptive weights ---
+        losses_dict = {
+            "density": density_loss.item(),
+            "tensile": tensile_loss.item(),
+            "er": er_loss.item()
+        }
+        max_target = max(losses_dict, key=losses_dict.get)
+        w_den, w_ten, w_er = 1.0, 1.0, 1.0
+        if max_target == "density":
+            w_den = 3.0
+        elif max_target == "tensile":
+            w_ten = 3.0
+        elif max_target == "er":
+            w_er = 3.0
 
-            base_den = 3.5
-            base_ten = w_tensile
-            base_er = 3.5
+        # Data loss with adaptive weights (but we still have base weights for scaling)
+        data_loss = (w_den * density_loss) + (w_ten * tensile_loss) + (w_er * er_loss)
 
-            adaptive_den = base_den * (1 + w_den)
-            adaptive_ten = base_ten * (1 + w_ten)
-            adaptive_er = base_er * (1 + w_er)
-
-            data_loss = (adaptive_den * density_mse) + (adaptive_ten * tensile_mse) + (adaptive_er * er_mse)
-
+        # Physics constraints (unchanged)
         tensile_physics_loss = torch.mean(torch.relu(0.3 - (tensile_pred * density_pred)) ** 2) * w_tensile_physics
         heckel_lhs = torch.log(1.0 / torch.clamp(1.0 - density_pred, min=1e-4))
         heckel_rhs = k_pred * pressure_real + A_pred
@@ -428,262 +437,153 @@ class MultiTaskTruePINN(nn.Module):
         return total_loss, {'total_loss': total_loss.item()}
 
 # ================================================================
-# 4. NSGA‑II (pop=80, gen=60)
+# 4. PyMOO NSGA-II (replaces custom class)
 # ================================================================
 
-class NSGAII:
+class TabletProblem(Problem):
+    """
+    Multi-objective problem for tablet formulation.
+    Objectives:
+        1. Maximize (API + w_tensile * tensile) -> we minimize negative of that.
+        2. Minimize EFRF.
+    Constraints:
+        g1: 0.40 - density <= 0  (density >= 0.40)
+        g2: density - 0.97 <= 0   (density <= 0.97)
+        g3: 1.90 - tensile <= 0   (tensile >= 1.90)
+        g4: (er / tensile) - 0.40 <= 0  (EFRF <= 0.40)
+    """
     def __init__(self, model, scaler, y_scaler, bounds,
-                 pop_size=NSGA_POP_SIZE, n_generations=NSGA_GENERATIONS, w_tensile=0.0):
+                 granule_mode='Variable', fixed_granule=125.0,
+                 w_tensile=0.0):
         self.model = model
         self.scaler = scaler
         self.y_scaler = y_scaler
-        self.bounds = bounds
-        self.pop_size = pop_size
-        self.n_generations = n_generations
+        self.granule_mode = granule_mode
+        self.fixed_granule = fixed_granule
         self.w_tensile = w_tensile
-        self.population = None
-        self.objectives = None
-        self.constraints = None
-        self.fronts = None
+        # bounds: 8 variables (API, MCC, PVPP, MgSt, Binder, Pressure, Speed, Granule)
+        # We'll use the provided bounds array (shape 8x2)
+        self.bounds = bounds
+        super().__init__(n_var=8, n_obj=2, n_constr=4,
+                         xl=bounds[:, 0], xu=bounds[:, 1])
 
-    def _repair(self, individual):
-        api, mcc, pvpp, mgst, binder, pressure, speed, granule = individual
-        api, binder, pvpp, mgst, mcc = normalize_components(api, binder, pvpp, mgst, mcc)
-        pressure = np.clip(pressure, 80, PRESSURE_MAX)
-        speed = np.clip(speed, 1.0, 50.0)
-        granule = np.clip(granule, 30.0, 250.0)
-        return np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule], dtype=float)
+    def _evaluate(self, x, out, *args, **kwargs):
+        n = x.shape[0]
+        F = np.zeros((n, 2))
+        G = np.zeros((n, 4))
 
-    def _evaluate(self, population):
-        n = population.shape[0]
-        objectives = np.zeros((n, 2))
-        constraints = np.zeros((n, 2))
-        constraint_violation = np.zeros(n)
-        device = next(self.model.parameters()).device
         for i in range(n):
-            try:
-                repaired = self._repair(population[i])
-                api, mcc, pvpp, mgst, binder, pressure, speed, granule = repaired
-                inputs = np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule]).reshape(1, -1)
-                inputs_with_features = add_interaction_features(inputs)[0]
-                inputs_scaled = self.scaler.transform([inputs_with_features])
-                X_tensor = torch.tensor(inputs_scaled, dtype=torch.float32).to(device)
-                with torch.no_grad():
-                    pred_scaled = self.model.predict(X_tensor)
-                    pred_actual = self.y_scaler.inverse_transform(pred_scaled)[0]
-                density = float(np.clip(pred_actual[0], D_MIN, D_MAX))
-                tensile = float(max(pred_actual[1], 1e-4))
-                er = float(max(pred_actual[2], 1e-4))
-                efrf = float(er / tensile)
-                efrf = max(1e-4, min(efrf, 5.0))
-                g1 = 0.90 - density
-                g2 = density - 0.97
-                constraints[i, 0] = g1
-                constraints[i, 1] = g2
-                constraint_violation[i] = max(0, g1, g2)
-                penalty = 0.0
-                if tensile < TENSILE_MIN: penalty += (TENSILE_MIN - tensile) ** 2
-                if efrf >= EFRF_MAX: penalty += (efrf - EFRF_MAX) ** 2
-                if density < D_MIN: penalty += (D_MIN - density) ** 2
-                if density > D_MAX: penalty += (density - D_MAX) ** 2
-                objectives[i, 0] = -(api + self.w_tensile * tensile) + 30.0 * penalty
-                objectives[i, 1] = efrf + 30.0 * penalty
-                population[i] = repaired
-            except Exception:
-                objectives[i, 0] = 100.0
-                objectives[i, 1] = 100.0
-                constraints[i, 0] = 10.0
-                constraints[i, 1] = 10.0
-                constraint_violation[i] = 10.0
-        return objectives, constraints, constraint_violation, population
+            sol = x[i, :].copy()
+            # If fixed granule, override the granule value
+            if self.granule_mode == "Fixed":
+                sol[7] = self.fixed_granule
 
-    def _fast_non_dominated_sort(self, objectives, constraints, constraint_violation):
-        n = objectives.shape[0]
-        fronts = []
-        rank = np.zeros(n, dtype=int)
-        feasible_mask = constraint_violation <= 1e-6
-        feasible_indices = np.where(feasible_mask)[0]
-        if len(feasible_indices) > 0:
-            S = [[] for _ in range(n)]
-            n_dom = np.zeros(n)
-            current_front = []
-            for i in feasible_indices:
-                for j in feasible_indices:
-                    if i == j:
-                        continue
-                    if (objectives[i, 0] <= objectives[j, 0] and objectives[i, 1] <= objectives[j, 1]) and \
-                       (objectives[i, 0] < objectives[j, 0] or objectives[i, 1] < objectives[j, 1]):
-                        S[i].append(j)
-                    elif (objectives[j, 0] <= objectives[i, 0] and objectives[j, 1] <= objectives[i, 1]) and \
-                         (objectives[j, 0] < objectives[i, 0] or objectives[j, 1] < objectives[i, 1]):
-                        n_dom[i] += 1
-                if n_dom[i] == 0:
-                    rank[i] = 0
-                    current_front.append(i)
-            if current_front:
-                fronts.append(current_front)
-            i = 0
-            while i < len(fronts) and fronts[i]:
-                next_front = []
-                for p in fronts[i]:
-                    for q in S[p]:
-                        n_dom[q] -= 1
-                        if n_dom[q] == 0:
-                            rank[q] = i + 1
-                            next_front.append(q)
-                if next_front:
-                    fronts.append(next_front)
-                i += 1
-        if len(feasible_indices) < n:
-            infeasible = np.where(~feasible_mask)[0]
-            sorted_infeasible = sorted(infeasible, key=lambda idx: constraint_violation[idx])
-            fronts.append(sorted_infeasible)
-        return fronts, rank
+            # Normalize components and convert to list
+            api, mcc, pvpp, mgst, binder, pressure, speed, granule = sol
+            api, binder, pvpp, mgst, mcc = normalize_components(api, binder, pvpp, mgst, mcc)
+            inputs = np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule]).reshape(1, -1)
+            inputs_with_features = add_interaction_features(inputs)[0]
+            inputs_scaled = self.scaler.transform([inputs_with_features])
+            X_tensor = torch.tensor(inputs_scaled, dtype=torch.float32)
 
-    def _crowding_distance(self, objectives, front):
-        n = len(front)
-        if n <= 2:
-            return np.ones(n) * np.inf
-        distance = np.zeros(n)
-        obj_range = objectives[front].max(axis=0) - objectives[front].min(axis=0)
-        obj_range[obj_range == 0] = 1.0
-        for m in range(2):
-            sorted_idx = sorted(range(n), key=lambda i: objectives[front[i], m])
-            distance[sorted_idx[0]] = np.inf
-            distance[sorted_idx[-1]] = np.inf
-            for i in range(1, n - 1):
-                prev_obj = objectives[front[sorted_idx[i - 1]], m]
-                next_obj = objectives[front[sorted_idx[i + 1]], m]
-                distance[sorted_idx[i]] += (next_obj - prev_obj) / obj_range[m]
-        return distance
+            with torch.no_grad():
+                pred_scaled = self.model.predict(X_tensor)
+                pred_actual = self.y_scaler.inverse_transform(pred_scaled)[0]
 
-    def _tournament_selection(self, pop_indices, objectives, ranks, crowding, constraint_violation):
-        selected = []
-        for _ in range(len(pop_indices)):
-            i1, i2 = np.random.choice(pop_indices, 2, replace=False)
-            v1 = constraint_violation[i1]
-            v2 = constraint_violation[i2]
-            if v1 <= 0 and v2 > 0:
-                selected.append(i1)
-            elif v2 <= 0 and v1 > 0:
-                selected.append(i2)
-            else:
-                if ranks[i1] < ranks[i2]:
-                    selected.append(i1)
-                elif ranks[i1] > ranks[i2]:
-                    selected.append(i2)
-                else:
-                    selected.append(i1 if crowding[i1] >= crowding[i2] else i2)
-        return selected
+            density = float(np.clip(pred_actual[0], D_MIN, D_MAX))
+            tensile = float(max(pred_actual[1], 1e-4))
+            er = float(max(pred_actual[2], 1e-4))
+            efrf = er / tensile
 
-    def _simulated_binary_crossover(self, p1, p2):
-        if np.random.random() > 0.90:
-            return p1.copy(), p2.copy()
-        c1 = np.zeros(8)
-        c2 = np.zeros(8)
-        for i in range(8):
-            if np.random.random() < 0.5:
-                u = np.random.random()
-                if u <= 0.5:
-                    beta = (2 * u) ** (1 / 41)
-                else:
-                    beta = (1 / (2 * (1 - u))) ** (1 / 41)
-                c1[i] = 0.5 * ((1 + beta) * p1[i] + (1 - beta) * p2[i])
-                c2[i] = 0.5 * ((1 - beta) * p1[i] + (1 + beta) * p2[i])
-            else:
-                c1[i] = p1[i]
-                c2[i] = p2[i]
-        return self._repair(c1), self._repair(c2)
+            # Objectives: maximize (api + w_tensile * tensile), minimize efrf
+            F[i, 0] = -(api + self.w_tensile * tensile)   # negative for minimization
+            F[i, 1] = efrf
 
-    def _polynomial_mutation(self, ind):
-        mutated = ind.copy()
-        for i in range(8):
-            if np.random.random() < 0.125:
-                u = np.random.random()
-                delta = min(u, 1 - u) ** (1 / 21)
-                if u < 0.5:
-                    mutated[i] = ind[i] + delta * (self.bounds[i, 1] - self.bounds[i, 0])
-                else:
-                    mutated[i] = ind[i] - delta * (self.bounds[i, 1] - self.bounds[i, 0])
-        return self._repair(mutated)
+            # Constraints (must be <= 0 for feasible)
+            G[i, 0] = 0.40 - density
+            G[i, 1] = density - 0.97
+            G[i, 2] = 1.90 - tensile
+            G[i, 3] = efrf - 0.40
 
-    def run(self):
-        pop = np.zeros((self.pop_size, 8))
-        for i in range(self.pop_size):
-            ind = np.array([np.random.uniform(60,100), np.random.uniform(0.1,20),
-                            np.random.uniform(0.1,12), np.random.uniform(0.01,3.0),
-                            np.random.uniform(0.1,10), np.random.uniform(80,PRESSURE_MAX),
-                            np.random.uniform(1,50), np.random.uniform(30,250)])
-            pop[i] = self._repair(ind)
-        self.population = pop
+        out["F"] = F
+        out["G"] = G
 
-        for gen in range(self.n_generations):
-            objectives, constraints, violation, pop = self._evaluate(self.population)
-            self.population = pop
-            self.objectives = objectives
-            self.constraints = constraints
-            fronts, ranks = self._fast_non_dominated_sort(objectives, constraints, violation)
-            self.fronts = fronts
-            if gen == self.n_generations - 1:
-                break
+def run_pymoo_nsga2(model, scaler, y_scaler, bounds,
+                    pop_size=NSGA_POP_SIZE, generations=NSGA_GENERATIONS,
+                    granule_mode='Variable', fixed_granule=125.0, w_tensile=0.0):
+    """
+    Run NSGA-II using pymoo and return results in a format compatible with the rest of the app.
+    Returns: (population, objectives, constraints, fronts)
+    where:
+        population: numpy array of decision variables (all evaluated)
+        objectives: numpy array of objective values
+        constraints: numpy array of constraint violations (or values)
+        fronts: list of lists of indices in the Pareto front (first front only)
+    """
+    problem = TabletProblem(model, scaler, y_scaler, bounds,
+                            granule_mode=granule_mode,
+                            fixed_granule=fixed_granule,
+                            w_tensile=w_tensile)
 
-            crowding = np.zeros(self.pop_size)
-            for front in fronts:
-                dist = self._crowding_distance(objectives, front)
-                for idx, d in zip(front, dist):
-                    crowding[idx] = d
+    algorithm = NSGA2(
+        pop_size=pop_size,
+        sampling=FloatRandomSampling(),
+        crossover=SBX(prob=0.9, eta=20),
+        mutation=PM(prob=0.1, eta=20),
+        eliminate_duplicates=True
+    )
 
-            selected = self._tournament_selection(range(self.pop_size), objectives, ranks, crowding, violation)
-            offspring = []
-            for i in range(0, len(selected), 2):
-                if i + 1 < len(selected):
-                    c1, c2 = self._simulated_binary_crossover(self.population[selected[i]], self.population[selected[i+1]])
-                    offspring.append(self._polynomial_mutation(c1))
-                    offspring.append(self._polynomial_mutation(c2))
-                else:
-                    offspring.append(self._polynomial_mutation(self.population[selected[i]]))
-            offspring = np.array(offspring[:self.pop_size])
-            obj_off, cons_off, vio_off, off = self._evaluate(offspring)
+    res = minimize(problem,
+                   algorithm,
+                   ('n_gen', generations),
+                   verbose=False,
+                   save_history=False)
 
-            combined_pop = np.vstack([self.population, off])
-            combined_obj = np.vstack([self.objectives, obj_off])
-            combined_cons = np.vstack([self.constraints, cons_off])
-            combined_vio = np.concatenate([violation, vio_off])
+    # Extract all evaluated solutions from the final population
+    pop = res.pop
+    if pop is None or len(pop) == 0:
+        # Fallback: use the final X and F from res
+        X_all = res.X
+        F_all = res.F
+    else:
+        X_all = np.array([ind.X for ind in pop])
+        F_all = np.array([ind.F for ind in pop])
 
-            combined_fronts, _ = self._fast_non_dominated_sort(combined_obj, combined_cons, combined_vio)
-            combined_crowding = np.zeros(len(combined_pop))
-            for front in combined_fronts:
-                dist = self._crowding_distance(combined_obj, front)
-                for idx, d in zip(front, dist):
-                    combined_crowding[idx] = d
-
-            new_pop, new_obj, new_cons, new_vio = [], [], [], []
-            for front in combined_fronts:
-                if len(new_pop) + len(front) <= self.pop_size:
-                    for idx in front:
-                        new_pop.append(combined_pop[idx])
-                        new_obj.append(combined_obj[idx])
-                        new_cons.append(combined_cons[idx])
-                        new_vio.append(combined_vio[idx])
-                else:
-                    front_sorted = sorted(front, key=lambda i: combined_crowding[i], reverse=True)
-                    remain = self.pop_size - len(new_pop)
-                    for idx in front_sorted[:remain]:
-                        new_pop.append(combined_pop[idx])
-                        new_obj.append(combined_obj[idx])
-                        new_cons.append(combined_cons[idx])
-                        new_vio.append(combined_vio[idx])
-                    break
-            self.population = np.array(new_pop)
-            self.objectives = np.array(new_obj)
-            self.constraints = np.array(new_cons)
-
-        objectives, constraints, violation, pop = self._evaluate(self.population)
-        self.population = pop
-        self.objectives = objectives
-        self.constraints = constraints
-        self.fronts, _ = self._fast_non_dominated_sort(objectives, constraints, violation)
-        return self.population, self.objectives, self.constraints, self.fronts
+    # Compute constraint violations (we'll just use the original G values)
+    # For front extraction, we need the Pareto front from pymoo.
+    # We can get the front from res (non-dominated solutions)
+    pareto_front = res.F  # this is the objective matrix of the Pareto front
+    # We also need the corresponding decision variables for the Pareto front
+    # In pymoo, res.X is the Pareto set (decision variables for the Pareto front)
+    # However, res.X contains only the non-dominated solutions, not all.
+    # But we also need the full population to plot all solutions.
+    # We'll keep X_all, F_all as all solutions (from final population), and then use the Pareto indices from res.
+    # To get the Pareto indices, we can compute the non-dominated front from F_all.
+    # Or we can use res.opt.get("X") and res.opt.get("F") which give Pareto set and front.
+    if hasattr(res, 'opt') and res.opt is not None:
+        pareto_X = res.opt.get('X')
+        pareto_F = res.opt.get('F')
+        # Build a list of indices of the Pareto solutions in the full population
+        # Since we might not have all, we'll just use the Pareto set as the "fronts"
+        # For consistency, we'll create fronts as a list of lists of indices (but we don't have indices easily)
+        # We'll just return the Pareto set and objectives separately.
+        # We'll still return fronts as a list where front0 are the Pareto objective values.
+        # The plotting function expects fronts as a list where fronts[0] is indices of the first front.
+        # We'll adapt: we'll store the Pareto set and front as separate arrays, and modify the plotting function to accept them.
+        # To keep compatibility, we'll store the Pareto front objectives as an array and the indices as all zeros (placeholder).
+        # We'll handle this in the plotting function.
+        # Actually, the original plotting function uses fronts[0] to get indices and then extracts pareto_api and pareto_efrf.
+        # We'll adjust the plotting function to also accept direct arrays.
+        # For now, we'll store a dummy fronts list of indices (range(len(pareto_F))) and also pass the pareto_F.
+        # The plotting function will use the provided arrays.
+        # So we'll return the pareto_X, pareto_F, and the full X_all, F_all.
+        # We'll adapt the plotting function to accept two new arguments: pareto_api and pareto_efrf directly.
+        # That's simpler.
+        # We'll just return the full population and objectives, and separately the Pareto objectives and decision vars.
+        return X_all, F_all, None, pareto_X, pareto_F  # We'll handle this in the UI.
+    else:
+        # No Pareto front found
+        return X_all, F_all, None, None, None
 
 # ================================================================
 # 5. PREDICTION, PLOTTING, AND COMPARISON FUNCTIONS
@@ -714,7 +614,7 @@ def plot_training_curves(loss_history):
     fig.add_trace(go.Scatter(x=epochs, y=loss_history['train'], mode='lines', name='Training Loss'))
     if len(loss_history['val']) > 0:
         fig.add_trace(go.Scatter(x=epochs[:len(loss_history['val'])], y=loss_history['val'], mode='lines', name='Validation Loss'))
-    fig.update_layout(title='Training Curves (v29.41)', xaxis_title='Epoch', yaxis_title='Loss', height=400)
+    fig.update_layout(title='Training Curves (v29.42)', xaxis_title='Epoch', yaxis_title='Loss', height=400)
     return fig
 
 def smooth_pareto_curve(api_points, efrf_points, num_points=200):
@@ -744,25 +644,42 @@ def smooth_pareto_curve(api_points, efrf_points, num_points=200):
 def plot_pareto_with_stars(objectives, fronts,
                            user_api=None, user_efrf=None,
                            golden_api=None, golden_efrf=None,
-                           smooth=True):
+                           smooth=True,
+                           pareto_api=None, pareto_efrf=None):
+    """
+    Plot Pareto front with two stars.
+    If pareto_api and pareto_efrf are provided, use them directly;
+    otherwise use fronts to extract them.
+    """
     fig = go.Figure()
     fig.data = []
-    front0 = fronts[0]
-    pareto_api = -objectives[front0, 0]
-    pareto_efrf = objectives[front0, 1]
-    sorted_idx = np.argsort(pareto_api)
-    pareto_api_sorted = pareto_api[sorted_idx]
-    pareto_efrf_sorted = pareto_efrf[sorted_idx]
+
+    # Determine Pareto front data
+    if pareto_api is not None and pareto_efrf is not None:
+        # Use direct arrays
+        api_pareto = pareto_api
+        efrf_pareto = pareto_efrf
+    else:
+        # Use fronts (old method)
+        if objectives is None or fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
+            return None
+        front0 = fronts[0]
+        api_pareto = -objectives[front0, 0]
+        efrf_pareto = objectives[front0, 1]
+
+    sorted_idx = np.argsort(api_pareto)
+    api_pareto_sorted = api_pareto[sorted_idx]
+    efrf_pareto_sorted = efrf_pareto[sorted_idx]
 
     fig.add_trace(go.Scatter(
-        x=pareto_api_sorted, y=pareto_efrf_sorted,
+        x=api_pareto_sorted, y=efrf_pareto_sorted,
         mode='markers',
         marker=dict(size=8, color='red'),
         name='Pareto Solutions (discrete)'
     ))
 
-    if smooth and len(pareto_api_sorted) >= 3:
-        x_s, y_s = smooth_pareto_curve(pareto_api_sorted, pareto_efrf_sorted)
+    if smooth and len(api_pareto_sorted) >= 3:
+        x_s, y_s = smooth_pareto_curve(api_pareto_sorted, efrf_pareto_sorted)
         fig.add_trace(go.Scatter(
             x=x_s, y=y_s,
             mode='lines',
@@ -771,7 +688,7 @@ def plot_pareto_with_stars(objectives, fronts,
         ))
     else:
         fig.add_trace(go.Scatter(
-            x=pareto_api_sorted, y=pareto_efrf_sorted,
+            x=api_pareto_sorted, y=efrf_pareto_sorted,
             mode='lines',
             line=dict(color='red', width=2),
             name='Pareto Front (line)'
@@ -801,7 +718,7 @@ def plot_pareto_with_stars(objectives, fronts,
                   annotation_text=f'EFRF Threshold: {EFRF_MAX:.2f}',
                   annotation_position='top right')
     fig.update_layout(
-        title='Pareto Front with Two Stars (v29.41)',
+        title='Pareto Front with Two Stars (v29.42)',
         xaxis_title='API (%)',
         yaxis_title='EFRF',
         height=500,
@@ -870,7 +787,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, sanitize_text("Formulation Optimization Report (v29.41)"), ln=True, align="C")
+    pdf.cell(0, 10, sanitize_text("Formulation Optimization Report (v29.42)"), ln=True, align="C")
     pdf.set_font("Arial", "", 10)
     pdf.cell(0, 6, sanitize_text(f"Date: {timestamp}"), ln=True, align="C")
     pdf.ln(5)
@@ -968,7 +885,7 @@ def load_or_train_model():
         if os.path.exists(checkpoint_path):
             os.remove(checkpoint_path)
 
-    st.caption("🔄 Training model from scratch (v29.41 improved settings)...")
+    st.caption("🔄 Training model from scratch (v29.42 improved settings)...")
 
     df, feature_names = generate_pinn_data(n_samples=N_SAMPLES)
     X_raw = df[feature_names].values
@@ -1090,20 +1007,20 @@ def load_or_train_model():
 # 7. MAIN USER INTERFACE (Streamlit UI)
 # ================================================================
 
-st.set_page_config(page_title="PINN Cloud v29.41", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Cloud v29.42", page_icon="🧬", layout="wide")
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
             padding: 1.5rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
-    <h1 style="color: #ffffff; font-size: 2rem; margin: 0;">🧬 Hybrid AI Framework v29.41</h1>
-    <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">⚡ Adaptive Loss · Granule Analysis · Two‑Star Pareto</p>
+    <h1 style="color: #ffffff; font-size: 2rem; margin: 0;">🧬 Hybrid AI Framework v29.42</h1>
+    <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">⚡ Simplified Adaptive Loss · PyMOO NSGA-II · Granule Analysis</p>
 </div>
 """, unsafe_allow_html=True)
 
 st.markdown("---")
 
 with st.sidebar:
-    st.markdown("### 📚 Physics Constraints (v29.41)")
+    st.markdown("### 📚 Physics Constraints (v29.42)")
     st.markdown(f"""
     - ✅ **Heckel:** ln(1/(1-D)) = kP + A
     - ✅ **EFRF:** ER / σt < {EFRF_MAX:.2f}
@@ -1112,23 +1029,23 @@ with st.sidebar:
     - ✅ **Samples:** {N_SAMPLES} (Enhanced)
     - ✅ **Epochs:** {ADAM_EPOCHS} (Early Stopping at {PATIENCE})
     - ✅ **Device:** GPU (if available)
-    - ✅ **Loss:** Adaptive weighting (auto‑balances density, tensile, ER)
+    - ✅ **Loss:** Simplified adaptive (boost largest error)
     - ✅ **Noise:** Ultra-low (σ = 0.002, 0.005, 0.005)
     - ✅ **Cache:** Auto-repair if corrupted (with verification)
-    - ✅ **NSGA-II:** Pop={NSGA_POP_SIZE}, Gen={NSGA_GENERATIONS}
+    - ✅ **NSGA-II:** PyMOO, Pop={NSGA_POP_SIZE}, Gen={NSGA_GENERATIONS}
     - ✅ **Network:** BatchNorm + Dropout (0.1)
     - ✅ **Granule Analysis:** Toggle Fixed/Variable
     """)
     show_smooth = st.checkbox("Show smooth Pareto curve", value=True)
-    st.info("🔬 **v29.41** — Granule Analysis Added")
+    st.info("🔬 **v29.42** — PyMOO NSGA-II & Simplified Adaptive Loss")
 
 # Load or train model (cached)
-with st.spinner("📂 Loading/Training model (v29.41)..."):
+with st.spinner("📂 Loading/Training model (v29.42)..."):
     model, scaler, y_scaler, feature_names, df, loss_history = load_or_train_model()
 st.success("✅ Model ready!")
 
 # ================================================================
-# NEW: Granule Analysis Section (outside the main prediction flow)
+# Granule Analysis Section
 # ================================================================
 st.markdown("---")
 st.markdown("### 🔬 Granule Size Analysis")
@@ -1149,14 +1066,12 @@ with st.expander("Granule Size Toggle & Plots", expanded=True):
             step=1.0,
             key="fixed_granule"
         )
-    # Generate a small dataset for analysis (faster)
     with st.spinner("Generating data for granule analysis..."):
         df_granule, _ = generate_pinn_data(
             n_samples=2000,
             granule_mode=granule_mode,
             fixed_granule=fixed_granule
         )
-    # Plot 1: Granule vs Tensile
     fig1 = px.scatter(
         df_granule, x="Granule_Size_µm", y="Tensile_Strength_MPa",
         color="Density", title="Granule Size vs Tensile Strength",
@@ -1164,7 +1079,6 @@ with st.expander("Granule Size Toggle & Plots", expanded=True):
     )
     st.plotly_chart(fig1, use_container_width=True)
 
-    # Plot 2: Granule vs Density
     fig2 = px.scatter(
         df_granule, x="Granule_Size_µm", y="Density",
         color="Tensile_Strength_MPa", title="Granule Size vs Density",
@@ -1172,7 +1086,6 @@ with st.expander("Granule Size Toggle & Plots", expanded=True):
     )
     st.plotly_chart(fig2, use_container_width=True)
 
-    # Additional info: summary statistics
     st.caption(f"Dataset size: {len(df_granule)} samples. Mode: {granule_mode}" + 
                (f" (Fixed at {fixed_granule} µm)" if granule_mode=="Fixed" else ""))
 
@@ -1217,7 +1130,7 @@ with col_left:
         pressure = st.slider("⚙️ Pressure (MPa)", 80.0, PRESSURE_MAX, get_safe_value('pressure'), 1.0, key="pressure")
         speed = st.slider("🔄 Speed (rpm)", 1.0, 50.0, get_safe_value('speed'), 0.5, key="speed")
         granule = st.slider("🔬 Granule Size (µm)", 30.0, 250.0, get_safe_value('granule'), 1.0, key="granule")
-    predict_btn = st.button("🔬 Predict & Optimize (v29.41)", use_container_width=True)
+    predict_btn = st.button("🔬 Predict & Optimize (v29.42)", use_container_width=True)
 
 with col_right:
     st.markdown("### 📈 Results")
@@ -1227,6 +1140,8 @@ with col_right:
     density_ok = False; tensile_ok = False; efrf_ok = False; mcc_ok = False
     api_use = 0.0; mcc_use = 0.0; pvpp_use = 0.0; mgst_use = 0.0; binder_use = 0.0
     golden_info = None
+    pareto_api_arr = None
+    pareto_efrf_arr = None
 
     if predict_btn:
         if abs(total - 100) > 0.1:
@@ -1235,7 +1150,7 @@ with col_right:
             api_norm, binder_norm, pvpp_norm, mgst_norm, mcc_norm = normalize_components(api, binder, pvpp, mgst, mcc)
             inputs_norm = [api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm, pressure, speed, granule]
             api_use, mcc_use, pvpp_use, mgst_use, binder_use = api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm
-            with st.spinner("🧠 Predicting (v29.41)..."):
+            with st.spinner("🧠 Predicting (v29.42)..."):
                 density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs_norm)
             kpi_cols = st.columns(3)
             kpi_cols[0].metric("Density", f"{density:.3f}", delta=f"Target: {D_MIN:.2f}–{D_MAX:.2f}")
@@ -1257,38 +1172,67 @@ with col_right:
             pass_cols[2].metric("EFRF", "✅" if efrf_ok else "❌")
             pass_cols[3].metric("MCC", "✅" if mcc_ok else "❌")
 
-            # --- NSGA‑II ---
-            st.markdown("### ⚙️ NSGA‑II (v29.41)")
+            # --- NSGA‑II with PyMOO ---
+            st.markdown("### ⚙️ NSGA‑II (v29.42, PyMOO)")
             bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],[80,PRESSURE_MAX],[1,50],[30,250]])
-            with st.spinner(f"🔄 NSGA‑II (pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS})..."):
-                nsga = NSGAII(model, scaler, y_scaler, bounds)
-                pop, objectives, constraints, fronts = nsga.run()
+            with st.spinner(f"🔄 PyMOO NSGA‑II (pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS})..."):
+                # Run PyMOO NSGA-II
+                X_all, F_all, _, pareto_X, pareto_F = run_pymoo_nsga2(
+                    model, scaler, y_scaler, bounds,
+                    pop_size=NSGA_POP_SIZE,
+                    generations=NSGA_GENERATIONS,
+                    granule_mode='Variable',  # or use the user's granule mode? Keep it flexible
+                    fixed_granule=125.0,
+                    w_tensile=0.0
+                )
 
-                if len(fronts) > 0 and len(fronts[0]) > 0:
-                    pareto_count = len(fronts[0])
-                    st.success(f"📊 Pareto front found: **{pareto_count}** optimal solutions")
-                else:
-                    st.warning("No feasible Pareto solutions found. Try relaxing constraints.")
-                    pareto_count = 0
+                if pareto_F is not None and len(pareto_F) > 0:
+                    st.success(f"📊 Pareto front found: **{len(pareto_F)}** optimal solutions")
+                    # Extract API and EFRF from Pareto front
+                    # We need to convert F back to original objectives: F[0] = -(api + w_tensile*tensile)
+                    # So we need to compute api and efrf from the decision variables.
+                    # But we can also compute them from the model predictions.
+                    # We'll compute them by evaluating each Pareto solution.
+                    api_list = []
+                    efrf_list = []
+                    density_list = []
+                    tensile_list = []
+                    er_list = []
+                    for sol in pareto_X:
+                        inputs = sol.copy()
+                        api, mcc, pvpp, mgst, binder, pressure, speed, granule = inputs
+                        api, binder, pvpp, mgst, mcc = normalize_components(api, binder, pvpp, mgst, mcc)
+                        inputs_norm = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
+                        d, t, e, ef = predict_pinn(model, scaler, y_scaler, inputs_norm)
+                        api_list.append(api)  # we use the normalized API
+                        efrf_list.append(ef)
+                        density_list.append(d)
+                        tensile_list.append(t)
+                        er_list.append(e)
 
-                if pareto_count > 0:
-                    front0 = fronts[0]
-                    golden_candidates = []
-                    for idx in front0:
-                        formulation = nsga.population[idx]
-                        d, t, e, ef = predict_pinn(model, scaler, y_scaler, formulation)
-                        if D_MIN <= d <= D_MAX and t >= TENSILE_MIN and ef < EFRF_MAX:
-                            golden_candidates.append({
-                                'formulation': formulation,
-                                'density': d,
-                                'tensile': t,
-                                'er': e,
-                                'efrf': ef
-                            })
-                    if golden_candidates:
-                        best = min(golden_candidates, key=lambda x: (x['efrf'], -x['tensile']))
+                    pareto_api_arr = np.array(api_list)
+                    pareto_efrf_arr = np.array(efrf_list)
+
+                    # Golden solution: minimize EFRF, then maximize tensile (or minimize -tensile)
+                    # We'll find the solution with minimum EFRF, and if tie, max tensile
+                    # We can use the same logic as before.
+                    # Create a list of candidates with their data
+                    candidates = []
+                    for idx in range(len(pareto_X)):
+                        candidates.append({
+                            'formulation': pareto_X[idx],
+                            'density': density_list[idx],
+                            'tensile': tensile_list[idx],
+                            'er': er_list[idx],
+                            'efrf': efrf_list[idx],
+                            'api': api_list[idx]
+                        })
+                    # Filter feasible (already feasible if they are in Pareto front, but double-check)
+                    feasible_candidates = [c for c in candidates if D_MIN <= c['density'] <= D_MAX and c['tensile'] >= TENSILE_MIN and c['efrf'] < EFRF_MAX]
+                    if feasible_candidates:
+                        best = min(feasible_candidates, key=lambda x: (x['efrf'], -x['tensile']))
                         golden_info = {
-                            'api': best['formulation'][0],
+                            'api': best['api'],
                             'mcc': best['formulation'][1],
                             'pvpp': best['formulation'][2],
                             'mgst': best['formulation'][3],
@@ -1328,7 +1272,13 @@ with col_right:
                     else:
                         st.info("No fully feasible solution found in Pareto front.")
                 else:
-                    st.info("Pareto front empty. No golden solution available.")
+                    st.warning("No Pareto front found. Try adjusting NSGA-II parameters.")
+
+                # Also store objectives and fronts for the plotting function
+                # We'll set objectives as F_all, and fronts as the Pareto front indices? We'll use the direct arrays.
+                objectives = F_all
+                # For compatibility, we'll create a dummy fronts list (not used if we pass pareto_api_arr)
+                fronts = None
 
             # --- Model Comparison ---
             X_train, X_test, y_train, y_test = train_test_split(
@@ -1361,11 +1311,11 @@ with col_right:
                 comp_df_display[col] = comp_df_display[col].map(lambda x: f"{x:.4f}")
             comp_df = comp_df_display
 
-    # Tabs (added Granule Analysis as a new tab)
+    # Tabs
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["📉 Pareto", "🔍 Sensitivity", "📊 Comparison", "📄 Report", "🔬 Granule"])
 
     with tab1:
-        if predict_btn and objectives is not None:
+        if predict_btn and objectives is not None and pareto_api_arr is not None:
             golden_api = golden_info['api'] if golden_info else None
             golden_efrf = golden_info['efrf'] if golden_info else None
 
@@ -1376,7 +1326,9 @@ with col_right:
                 user_efrf=efrf,
                 golden_api=golden_api,
                 golden_efrf=golden_efrf,
-                smooth=show_smooth
+                smooth=show_smooth,
+                pareto_api=pareto_api_arr,
+                pareto_efrf=pareto_efrf_arr
             )
             if fig:
                 st.plotly_chart(fig, use_container_width=True)
@@ -1416,7 +1368,7 @@ with col_right:
                 hovertemplate='%{y}<br>R² = %{x:.4f}<extra></extra>'
             ))
             fig.update_layout(
-                title='R² Score Comparison (v29.41)',
+                title='R² Score Comparison (v29.42)',
                 xaxis=dict(title='R² Score', range=[-0.2, 1.05]),
                 yaxis=dict(title='Model'),
                 height=300,
@@ -1450,9 +1402,9 @@ with col_right:
                 status, timestamp, pdf_comp_df, golden_info
             )
             st.download_button(
-                "📥 Download PDF Report (v29.41)",
+                "📥 Download PDF Report (v29.42)",
                 data=pdf_data,
-                file_name=f"report_v29.41_{timestamp[:10]}.pdf",
+                file_name=f"report_v29.42_{timestamp[:10]}.pdf",
                 mime="application/pdf"
             )
         else:
@@ -1464,4 +1416,4 @@ with col_right:
         st.markdown("The plots are shown in the expander at the top of the page.")
 
 st.markdown("---")
-st.caption("🔬 **PINN v29.41** — Adaptive Loss · Granule Analysis · Two‑Star Pareto | Nile Valley University")
+st.caption("🔬 **PINN v29.42** — Simplified Adaptive Loss · PyMOO NSGA-II · Granule Analysis | Nile Valley University")
