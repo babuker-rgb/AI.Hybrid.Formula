@@ -1,9 +1,9 @@
 """
-True Physics-Informed Neural Network (PINN) - Version v29.38
+True Physics-Informed Neural Network (PINN) - Version v29.39
 Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
-Version: 29.38 (Smooth Pareto curve + toggle)
+Version: 29.39 (Improved accuracy: rebalanced loss, larger network, more features)
 """
 
 import streamlit as st
@@ -26,7 +26,6 @@ import os
 import pickle
 import re
 
-# Try importing scipy for spline interpolation
 try:
     from scipy.interpolate import UnivariateSpline
     SCIPY_AVAILABLE = True
@@ -36,7 +35,7 @@ except ImportError:
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. ENHANCED PARAMETERS (v29.38)
+# 0. ENHANCED PARAMETERS (v29.39)
 # ================================================================
 
 TENSILE_MIN = 1.90
@@ -52,11 +51,23 @@ NOISE_DENSITY = 0.002
 NOISE_STRENGTH = 0.005
 NOISE_ER = 0.005
 
-N_SAMPLES = 8000
-ADAM_EPOCHS = 400
+# --- Accuracy improvements ---
+N_SAMPLES = 12000               # increased from 8000
+ADAM_EPOCHS = 500               # increased from 400
 MONOTONICITY_FREQUENCY = 10
-PATIENCE = 25
+PATIENCE = 50                   # increased from 25
 
+# --- Loss weights (rebalanced) ---
+W_DENSITY = 2.0
+W_TENSILE = 10.0                # was 4.0
+W_TENSILE_PHYSICS = 0.6
+W_PHYSICS_BASE = 0.2            # was 0.5
+W_PHYSICS_FINAL = 0.8           # was 1.8
+W_EFRF = 2.0
+W_DENSITY_PENALTY = 8.0
+W_MCC = 0.5
+
+# --- NSGA-II (unchanged) ---
 NSGA_POP_SIZE = 60
 NSGA_GENERATIONS = 40
 
@@ -111,7 +122,7 @@ safe_initialize()
 clamp_session_state()
 
 # ================================================================
-# 2. HELPER FUNCTIONS
+# 2. HELPER FUNCTIONS (with extra interaction features)
 # ================================================================
 
 def sanitize_text(text):
@@ -189,16 +200,37 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
     return api_norm, binder_norm, pvpp_norm, mgst_norm, mcc_norm
 
 def add_interaction_features(X_raw):
-    pressure = X_raw[:, 5:6]; binder = X_raw[:, 4:5]
-    api = X_raw[:, 0:1]; speed = X_raw[:, 6:7]; mcc = X_raw[:, 1:2]
+    # Original features
+    pressure = X_raw[:, 5:6]
+    binder = X_raw[:, 4:5]
+    api = X_raw[:, 0:1]
+    speed = X_raw[:, 6:7]
+    mcc = X_raw[:, 1:2]
+    pvpp = X_raw[:, 2:3]
+    mgst = X_raw[:, 3:4]
+
+    # Original interactions
     pressure_speed = np.clip(pressure / (speed + 0.1), 0, 1000)
     api_mcc = np.clip(api / (mcc + 0.1), 0, 1000)
     binder_speed = np.clip(binder / (speed + 0.1), 0, 100)
     pressure_binder = pressure * binder
     pressure_api = pressure * api
+
+    # --- NEW: additional interaction terms ---
+    api_pvpp = api * pvpp
+    binder_mgst = binder * mgst
+    mcc_pvpp = mcc * pvpp
+    api2 = api ** 2
+    pressure2 = pressure ** 2
+    binder2 = binder ** 2
+    speed2 = speed ** 2
+
     return np.concatenate([
-        X_raw, pressure_binder, pressure_api,
-        pressure_speed, api_mcc, binder_speed
+        X_raw,
+        pressure_binder, pressure_api,
+        pressure_speed, api_mcc, binder_speed,
+        api_pvpp, binder_mgst, mcc_pvpp,
+        api2, pressure2, binder2, speed2
     ], axis=1)
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
@@ -267,7 +299,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# 3. PINN MODEL (384 neurons)
+# 3. PINN MODEL (enlarged: 512 neurons, 3 residual blocks)
 # ================================================================
 
 class Mish(nn.Module):
@@ -290,22 +322,25 @@ class ResidualBlock(nn.Module):
 class MultiTaskTruePINN(nn.Module):
     def __init__(self, input_dim=13, output_dim=5):
         super(MultiTaskTruePINN, self).__init__()
+        # Larger network for better accuracy
         self.input_layer = nn.Sequential(
-            nn.Linear(input_dim, 384),
+            nn.Linear(input_dim, 512),
             Mish()
         )
-        self.res_block1 = ResidualBlock(384)
-        self.res_block2 = ResidualBlock(384)
+        self.res_block1 = ResidualBlock(512)
+        self.res_block2 = ResidualBlock(512)
+        self.res_block3 = ResidualBlock(512)   # extra block
         self.transition = nn.Sequential(
-            nn.Linear(384, 192),
+            nn.Linear(512, 256),
             nn.Tanh()
         )
-        self.output_layer = nn.Linear(192, output_dim)
+        self.output_layer = nn.Linear(256, output_dim)
 
     def forward(self, X):
         x = self.input_layer(X)
         x = self.res_block1(x)
         x = self.res_block2(x)
+        x = self.res_block3(x)
         x = self.transition(x)
         raw = self.output_layer(x)
 
@@ -327,9 +362,14 @@ class MultiTaskTruePINN(nn.Module):
             return output[:, :3].cpu().numpy()
 
     def compute_loss(self, X_scaled, X_raw, y_true, epoch=0, max_epochs=ADAM_EPOCHS,
-                     w_density=2.0, w_tensile=4.0, w_tensile_physics=0.6,
-                     w_physics_base=0.5, w_physics_final=1.8, w_mcc=0.5,
-                     w_density_penalty=8.0, efrf_target=0.40, mcc_max=8.0,
+                     w_density=W_DENSITY,
+                     w_tensile=W_TENSILE,
+                     w_tensile_physics=W_TENSILE_PHYSICS,
+                     w_physics_base=W_PHYSICS_BASE,
+                     w_physics_final=W_PHYSICS_FINAL,
+                     w_mcc=W_MCC,
+                     w_density_penalty=W_DENSITY_PENALTY,
+                     efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
                      compute_grad=True):
         pressure_real = X_raw[:, 5].view(-1, 1)
         mcc_real = X_raw[:, 1].view(-1, 1)
@@ -341,16 +381,19 @@ class MultiTaskTruePINN(nn.Module):
         k_pred = y_pred[:, 3:4]
         A_pred = y_pred[:, 4:5]
 
+        # Physics weight scheduling (smoother)
         progress = epoch / max_epochs
         schedule_factor = 1 / (1 + math.exp(-12 * (progress - 0.5)))
         w_physics = w_physics_base + (w_physics_final - w_physics_base) * schedule_factor
         w_physics = max(w_physics, 0.1)
 
+        # Data losses (with increased tensile weight)
         density_data_loss = nn.MSELoss()(density_pred, y_true[:, 0:1])
         tensile_data_loss = nn.MSELoss()(tensile_pred, y_true[:, 1:2])
         er_data_loss = nn.MSELoss()(er_pred, y_true[:, 2:3])
         data_loss = (3.5 * density_data_loss) + (w_tensile * tensile_data_loss) + (3.5 * er_data_loss)
 
+        # Physics constraints
         tensile_physics_loss = torch.mean(torch.relu(0.3 - (tensile_pred * density_pred)) ** 2) * w_tensile_physics
         heckel_lhs = torch.log(1.0 / torch.clamp(1.0 - density_pred, min=1e-4))
         heckel_rhs = k_pred * pressure_real + A_pred
@@ -358,6 +401,7 @@ class MultiTaskTruePINN(nn.Module):
         efrf_pred = er_pred / torch.clamp(tensile_pred, min=1e-4)
         efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
 
+        # Penalties
         mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
         density_penalty = torch.mean(
             torch.relu(density_pred - D_MAX) ** 2 + torch.relu(D_MIN - density_pred) ** 2
@@ -658,72 +702,46 @@ def plot_training_curves(loss_history):
     fig.add_trace(go.Scatter(x=epochs, y=loss_history['train'], mode='lines', name='Training Loss'))
     if len(loss_history['val']) > 0:
         fig.add_trace(go.Scatter(x=epochs[:len(loss_history['val'])], y=loss_history['val'], mode='lines', name='Validation Loss'))
-    fig.update_layout(title='Training Curves (v29.38)', xaxis_title='Epoch', yaxis_title='Loss', height=400)
+    fig.update_layout(title='Training Curves (v29.39)', xaxis_title='Epoch', yaxis_title='Loss', height=400)
     return fig
 
-# --- NEW: smooth spline interpolation for Pareto front ---
 def smooth_pareto_curve(api_points, efrf_points, num_points=200):
-    """
-    Fit a smooth curve through the Pareto points using UnivariateSpline (if available)
-    or polynomial fit as fallback.
-    """
     if len(api_points) < 3:
-        # Not enough points for smoothing, return original
         return api_points, efrf_points
-
-    # Sort by API ascending
     sorted_idx = np.argsort(api_points)
     api_sorted = np.array(api_points)[sorted_idx]
     efrf_sorted = np.array(efrf_points)[sorted_idx]
-
-    # Remove duplicates in API (keep first occurrence)
     _, unique_idx = np.unique(api_sorted, return_index=True)
     api_unique = api_sorted[unique_idx]
     efrf_unique = efrf_sorted[unique_idx]
-
     if len(api_unique) < 3:
         return api_unique, efrf_unique
-
-    # Generate dense x values for smooth curve
     x_new = np.linspace(api_unique.min(), api_unique.max(), num_points)
-
     try:
         if SCIPY_AVAILABLE:
-            # Use UnivariateSpline with smoothing factor s (adjust as needed)
             spline = UnivariateSpline(api_unique, efrf_unique, s=0.001, k=3)
             y_new = spline(x_new)
         else:
-            # Fallback: polynomial fit (degree = min(3, len(api_unique)-1))
             degree = min(3, len(api_unique) - 1)
             coeffs = np.polyfit(api_unique, efrf_unique, degree)
             y_new = np.polyval(coeffs, x_new)
         return x_new, y_new
-    except Exception as e:
-        # If anything fails, return the original points
+    except:
         return api_unique, efrf_unique
 
-# --- UPDATED: Two‑star Pareto with optional smooth curve ---
 def plot_pareto_with_stars(objectives, fronts,
                            user_api=None, user_efrf=None,
                            golden_api=None, golden_efrf=None,
                            smooth=True):
-    # Always start with a fresh figure
     fig = go.Figure()
-    
-    # Clear any previous traces (extra safety)
     fig.data = []
-
-    # Pareto front
     front0 = fronts[0]
     pareto_api = -objectives[front0, 0]
     pareto_efrf = objectives[front0, 1]
-
-    # Sort by API for smooth curve
     sorted_idx = np.argsort(pareto_api)
     pareto_api_sorted = pareto_api[sorted_idx]
     pareto_efrf_sorted = pareto_efrf[sorted_idx]
 
-    # ---- Discrete Pareto points (red markers) ----
     fig.add_trace(go.Scatter(
         x=pareto_api_sorted, y=pareto_efrf_sorted,
         mode='markers',
@@ -731,17 +749,15 @@ def plot_pareto_with_stars(objectives, fronts,
         name='Pareto Solutions (discrete)'
     ))
 
-    # ---- Optional smooth curve ----
     if smooth and len(pareto_api_sorted) >= 3:
-        x_smooth, y_smooth = smooth_pareto_curve(pareto_api_sorted, pareto_efrf_sorted)
+        x_s, y_s = smooth_pareto_curve(pareto_api_sorted, pareto_efrf_sorted)
         fig.add_trace(go.Scatter(
-            x=x_smooth, y=y_smooth,
+            x=x_s, y=y_s,
             mode='lines',
             line=dict(color='red', width=2, dash='dash'),
             name='Pareto Front (smooth)'
         ))
     else:
-        # If no smooth, connect the points with a line (original behaviour)
         fig.add_trace(go.Scatter(
             x=pareto_api_sorted, y=pareto_efrf_sorted,
             mode='lines',
@@ -749,7 +765,6 @@ def plot_pareto_with_stars(objectives, fronts,
             name='Pareto Front (line)'
         ))
 
-    # ⭐ Golden Star (optimal)
     if golden_api is not None and golden_efrf is not None:
         fig.add_trace(go.Scatter(
             x=[golden_api], y=[golden_efrf],
@@ -760,7 +775,6 @@ def plot_pareto_with_stars(objectives, fronts,
             name='Golden Solution'
         ))
 
-    # 🔵 Blue Star (tested)
     if user_api is not None and user_efrf is not None:
         fig.add_trace(go.Scatter(
             x=[user_api], y=[user_efrf],
@@ -771,51 +785,17 @@ def plot_pareto_with_stars(objectives, fronts,
             name='Tested Solution'
         ))
 
-    # EFRF threshold line
     fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='red',
                   annotation_text=f'EFRF Threshold: {EFRF_MAX:.2f}',
                   annotation_position='top right')
-
     fig.update_layout(
-        title='Pareto Front with Two Stars (v29.38)',
+        title='Pareto Front with Two Stars (v29.39)',
         xaxis_title='API (%)',
         yaxis_title='EFRF',
         height=500,
         template='plotly_white',
-        legend=dict(orientation='h', yanchor='bottom', y=1.02,
-                    xanchor='right', x=1)
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
     )
-    return fig
-
-# --- (clean Pareto function kept for reference, without stars) ---
-def plot_pareto(objectives, fronts, smooth=True):
-    if objectives is None or fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
-        return None
-    front0 = fronts[0]
-    pareto_api = -objectives[front0, 0]
-    pareto_efrf = objectives[front0, 1]
-    sorted_idx = np.argsort(pareto_api)
-    pareto_api_sorted = pareto_api[sorted_idx]
-    pareto_efrf_sorted = pareto_efrf[sorted_idx]
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=-objectives[:, 0], y=objectives[:, 1],
-                             mode='markers', marker=dict(size=4, color='gray', opacity=0.3),
-                             name='All Solutions'))
-
-    if smooth and len(pareto_api_sorted) >= 3:
-        x_s, y_s = smooth_pareto_curve(pareto_api_sorted, pareto_efrf_sorted)
-        fig.add_trace(go.Scatter(x=x_s, y=y_s, mode='lines', line=dict(color='red', width=2, dash='dash'),
-                                 name='Pareto Front (smooth)'))
-    else:
-        fig.add_trace(go.Scatter(x=pareto_api_sorted, y=pareto_efrf_sorted,
-                                 mode='lines+markers', marker=dict(size=8, color='red'),
-                                 line=dict(color='red', width=2), name='Pareto Front'))
-    fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='red',
-                  annotation_text=f'EFRF Threshold: {EFRF_MAX:.2f}', annotation_position='top right')
-    fig.update_layout(title='Pareto Front (v29.38)', xaxis_title='API (%)', yaxis_title='EFRF',
-                      height=500, template='plotly_white',
-                      legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1))
     return fig
 
 def plot_sensitivity_plotly(inputs, model, scaler, y_scaler):
@@ -878,7 +858,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, sanitize_text("Formulation Optimization Report (v29.38)"), ln=True, align="C")
+    pdf.cell(0, 10, sanitize_text("Formulation Optimization Report (v29.39)"), ln=True, align="C")
     pdf.set_font("Arial", "", 10)
     pdf.cell(0, 6, sanitize_text(f"Date: {timestamp}"), ln=True, align="C")
     pdf.ln(5)
@@ -959,7 +939,7 @@ def load_or_train_model():
             checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
             required_keys = ['model_state', 'scaler', 'y_scaler', 'feature_names', 'df', 'loss_history']
             if all(k in checkpoint for k in required_keys):
-                model = MultiTaskTruePINN(input_dim=13)
+                model = MultiTaskTruePINN(input_dim=add_interaction_features(np.zeros((1,8))).shape[1])
                 model.load_state_dict(checkpoint['model_state'])
                 scaler = checkpoint['scaler']
                 y_scaler = checkpoint['y_scaler']
@@ -975,12 +955,13 @@ def load_or_train_model():
         if os.path.exists(checkpoint_path):
             os.remove(checkpoint_path)
 
-    st.caption("🔄 Training model from scratch (v29.38 improved settings)...")
+    st.caption("🔄 Training model from scratch (v29.39 improved settings)...")
 
     df, feature_names = generate_pinn_data(n_samples=N_SAMPLES)
     X_raw = df[feature_names].values
     y = df[['Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']].values
     X_augmented = add_interaction_features(X_raw)
+    input_dim = X_augmented.shape[1]
 
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_augmented)
@@ -997,7 +978,7 @@ def load_or_train_model():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     st.caption(f"🖥️ Using device: {device}")
 
-    model = MultiTaskTruePINN(input_dim=13).to(device)
+    model = MultiTaskTruePINN(input_dim=input_dim).to(device)
     optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=15, factor=0.5)
 
@@ -1024,6 +1005,11 @@ def load_or_train_model():
         loss, _ = model.compute_loss(
             X_train_t, X_raw_train_t, y_train_t,
             epoch=epoch, max_epochs=ADAM_EPOCHS,
+            w_density=W_DENSITY, w_tensile=W_TENSILE,
+            w_tensile_physics=W_TENSILE_PHYSICS,
+            w_physics_base=W_PHYSICS_BASE, w_physics_final=W_PHYSICS_FINAL,
+            w_mcc=W_MCC, w_density_penalty=W_DENSITY_PENALTY,
+            efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
             compute_grad=compute_grad
         )
         loss.backward()
@@ -1035,6 +1021,11 @@ def load_or_train_model():
             val_loss, _ = model.compute_loss(
                 X_val_t, X_raw_val_t, y_val_t,
                 epoch=epoch, max_epochs=ADAM_EPOCHS,
+                w_density=W_DENSITY, w_tensile=W_TENSILE,
+                w_tensile_physics=W_TENSILE_PHYSICS,
+                w_physics_base=W_PHYSICS_BASE, w_physics_final=W_PHYSICS_FINAL,
+                w_mcc=W_MCC, w_density_penalty=W_DENSITY_PENALTY,
+                efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
                 compute_grad=False
             )
 
@@ -1086,20 +1077,20 @@ def load_or_train_model():
 # 7. MAIN USER INTERFACE (Streamlit UI)
 # ================================================================
 
-st.set_page_config(page_title="PINN Cloud v29.38", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Cloud v29.39", page_icon="🧬", layout="wide")
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
             padding: 1.5rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
-    <h1 style="color: #ffffff; font-size: 2rem; margin: 0;">🧬 Hybrid AI Framework v29.38</h1>
-    <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">⚡ Two‑Star Pareto + Smooth Curve</p>
+    <h1 style="color: #ffffff; font-size: 2rem; margin: 0;">🧬 Hybrid AI Framework v29.39</h1>
+    <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">⚡ High Accuracy · Two‑Star Pareto · Smooth Curve</p>
 </div>
 """, unsafe_allow_html=True)
 
 st.markdown("---")
 
 with st.sidebar:
-    st.markdown("### 📚 Physics Constraints (v29.38)")
+    st.markdown("### 📚 Physics Constraints (v29.39)")
     st.markdown(f"""
     - ✅ **Heckel:** ln(1/(1-D)) = kP + A
     - ✅ **EFRF:** ER / σt < {EFRF_MAX:.2f}
@@ -1108,18 +1099,16 @@ with st.sidebar:
     - ✅ **Samples:** {N_SAMPLES} (Enhanced)
     - ✅ **Epochs:** {ADAM_EPOCHS} (Early Stopping at {PATIENCE})
     - ✅ **Device:** GPU (if available)
-    - ✅ **Loss:** 3.5× MSE for Density & ER
+    - ✅ **Loss:** 3.5× MSE for Density & ER, 10× for Tensile
     - ✅ **Noise:** Ultra-low (σ = 0.002, 0.005, 0.005)
     - ✅ **Cache:** Auto-repair if corrupted (with verification)
     - ✅ **NSGA-II:** Pop={NSGA_POP_SIZE}, Gen={NSGA_GENERATIONS}
     """)
-
-    # --- NEW: Toggle for smooth Pareto curve ---
     show_smooth = st.checkbox("Show smooth Pareto curve", value=True)
-    st.info("🔬 **v29.38** — Smooth Pareto curve added")
+    st.info("🔬 **v29.39** — Accuracy Enhanced")
 
 # Load or train model
-with st.spinner("📂 Loading/Training model (v29.38)..."):
+with st.spinner("📂 Loading/Training model (v29.39)..."):
     model, scaler, y_scaler, feature_names, df, loss_history = load_or_train_model()
 st.success("✅ Model ready!")
 
@@ -1162,7 +1151,7 @@ with col_left:
         pressure = st.slider("⚙️ Pressure (MPa)", 80.0, PRESSURE_MAX, get_safe_value('pressure'), 1.0, key="pressure")
         speed = st.slider("🔄 Speed (rpm)", 1.0, 50.0, get_safe_value('speed'), 0.5, key="speed")
         granule = st.slider("🔬 Granule Size (µm)", 30.0, 250.0, get_safe_value('granule'), 1.0, key="granule")
-    predict_btn = st.button("🔬 Predict & Optimize (v29.38)", use_container_width=True)
+    predict_btn = st.button("🔬 Predict & Optimize (v29.39)", use_container_width=True)
 
 with col_right:
     st.markdown("### 📈 Results")
@@ -1180,7 +1169,7 @@ with col_right:
             api_norm, binder_norm, pvpp_norm, mgst_norm, mcc_norm = normalize_components(api, binder, pvpp, mgst, mcc)
             inputs_norm = [api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm, pressure, speed, granule]
             api_use, mcc_use, pvpp_use, mgst_use, binder_use = api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm
-            with st.spinner("🧠 Predicting (v29.38)..."):
+            with st.spinner("🧠 Predicting (v29.39)..."):
                 density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs_norm)
             kpi_cols = st.columns(3)
             kpi_cols[0].metric("Density", f"{density:.3f}", delta=f"Target: {D_MIN:.2f}–{D_MAX:.2f}")
@@ -1203,7 +1192,7 @@ with col_right:
             pass_cols[3].metric("MCC", "✅" if mcc_ok else "❌")
 
             # --- NSGA‑II ---
-            st.markdown("### ⚙️ NSGA‑II (v29.38)")
+            st.markdown("### ⚙️ NSGA‑II (v29.39)")
             bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],[80,PRESSURE_MAX],[1,50],[30,250]])
             with st.spinner(f"🔄 NSGA‑II (pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS})..."):
                 nsga = NSGAII(model, scaler, y_scaler, bounds)
@@ -1321,7 +1310,7 @@ with col_right:
                 user_efrf=efrf,
                 golden_api=golden_api,
                 golden_efrf=golden_efrf,
-                smooth=show_smooth  # pass the toggle
+                smooth=show_smooth
             )
             if fig:
                 st.plotly_chart(fig, use_container_width=True)
@@ -1361,7 +1350,7 @@ with col_right:
                 hovertemplate='%{y}<br>R² = %{x:.4f}<extra></extra>'
             ))
             fig.update_layout(
-                title='R² Score Comparison (v29.38)',
+                title='R² Score Comparison (v29.39)',
                 xaxis=dict(title='R² Score', range=[-0.2, 1.05]),
                 yaxis=dict(title='Model'),
                 height=300,
@@ -1395,13 +1384,13 @@ with col_right:
                 status, timestamp, pdf_comp_df, golden_info
             )
             st.download_button(
-                "📥 Download PDF Report (v29.38)",
+                "📥 Download PDF Report (v29.39)",
                 data=pdf_data,
-                file_name=f"report_v29.38_{timestamp[:10]}.pdf",
+                file_name=f"report_v29.39_{timestamp[:10]}.pdf",
                 mime="application/pdf"
             )
         else:
             st.info("👆 Click 'Predict & Optimize' to generate the report.")
 
 st.markdown("---")
-st.caption("🔬 **PINN v29.38** — Two‑Star Pareto + Smooth Curve · Improved Accuracy & Visuals | Nile Valley University")
+st.caption("🔬 **PINN v29.39** — High Accuracy · Two‑Star Pareto · Smooth Curve | Nile Valley University")
