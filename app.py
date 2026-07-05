@@ -3,7 +3,7 @@ True Physics-Informed Neural Network (PINN) - Version v29.42
 Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
-Version: 29.42 (Simplified adaptive loss + PyMOO NSGA-II)
+Version: 29.42 (Fixed PyMOO bounds issue)
 """
 
 import streamlit as st
@@ -368,7 +368,7 @@ class MultiTaskTruePINN(nn.Module):
             output = self.forward(X_scaled)
             return output[:, :3].cpu().numpy()
 
-    # --- SIMPLIFIED ADAPTIVE LOSS (NEW) ---
+    # --- Simplified adaptive loss ---
     def compute_loss(self, X_scaled, X_raw, y_true, epoch=0, max_epochs=ADAM_EPOCHS,
                      w_density=W_DENSITY, w_tensile=W_TENSILE,
                      w_tensile_physics=W_TENSILE_PHYSICS,
@@ -386,18 +386,16 @@ class MultiTaskTruePINN(nn.Module):
         k_pred = y_pred[:, 3:4]
         A_pred = y_pred[:, 4:5]
 
-        # Physics weight scheduling (unchanged)
         progress = epoch / max_epochs
         schedule_factor = 1 / (1 + math.exp(-12 * (progress - 0.5)))
         w_physics = w_physics_base + (w_physics_final - w_physics_base) * schedule_factor
         w_physics = max(w_physics, 0.1)
 
-        # Individual losses
         density_loss = nn.MSELoss()(density_pred, y_true[:, 0:1])
         tensile_loss = nn.MSELoss()(tensile_pred, y_true[:, 1:2])
         er_loss = nn.MSELoss()(er_pred, y_true[:, 2:3])
 
-        # --- Simplified adaptive weights ---
+        # Simplified adaptive weighting
         losses_dict = {
             "density": density_loss.item(),
             "tensile": tensile_loss.item(),
@@ -412,10 +410,8 @@ class MultiTaskTruePINN(nn.Module):
         elif max_target == "er":
             w_er = 3.0
 
-        # Data loss with adaptive weights (but we still have base weights for scaling)
         data_loss = (w_den * density_loss) + (w_ten * tensile_loss) + (w_er * er_loss)
 
-        # Physics constraints (unchanged)
         tensile_physics_loss = torch.mean(torch.relu(0.3 - (tensile_pred * density_pred)) ** 2) * w_tensile_physics
         heckel_lhs = torch.log(1.0 / torch.clamp(1.0 - density_pred, min=1e-4))
         heckel_rhs = k_pred * pressure_real + A_pred
@@ -437,20 +433,20 @@ class MultiTaskTruePINN(nn.Module):
         return total_loss, {'total_loss': total_loss.item()}
 
 # ================================================================
-# 4. PyMOO NSGA-II (replaces custom class)
+# 4. FIXED PyMOO NSGA-II
 # ================================================================
 
 class TabletProblem(Problem):
     """
     Multi-objective problem for tablet formulation.
     Objectives:
-        1. Maximize (API + w_tensile * tensile) -> we minimize negative of that.
+        1. Maximize (API + w_tensile * tensile) -> minimize negative.
         2. Minimize EFRF.
     Constraints:
-        g1: 0.40 - density <= 0  (density >= 0.40)
-        g2: density - 0.97 <= 0   (density <= 0.97)
-        g3: 1.90 - tensile <= 0   (tensile >= 1.90)
-        g4: (er / tensile) - 0.40 <= 0  (EFRF <= 0.40)
+        g1: 0.40 - density <= 0
+        g2: density - 0.97 <= 0
+        g3: 1.90 - tensile <= 0
+        g4: efrf - 0.40 <= 0
     """
     def __init__(self, model, scaler, y_scaler, bounds,
                  granule_mode='Variable', fixed_granule=125.0,
@@ -461,11 +457,12 @@ class TabletProblem(Problem):
         self.granule_mode = granule_mode
         self.fixed_granule = fixed_granule
         self.w_tensile = w_tensile
-        # bounds: 8 variables (API, MCC, PVPP, MgSt, Binder, Pressure, Speed, Granule)
-        # We'll use the provided bounds array (shape 8x2)
         self.bounds = bounds
+        # Explicitly set bounds to avoid the 'bounds()' error
+        self.xl = bounds[:, 0]
+        self.xu = bounds[:, 1]
         super().__init__(n_var=8, n_obj=2, n_constr=4,
-                         xl=bounds[:, 0], xu=bounds[:, 1])
+                         xl=self.xl, xu=self.xu)
 
     def _evaluate(self, x, out, *args, **kwargs):
         n = x.shape[0]
@@ -474,11 +471,9 @@ class TabletProblem(Problem):
 
         for i in range(n):
             sol = x[i, :].copy()
-            # If fixed granule, override the granule value
             if self.granule_mode == "Fixed":
                 sol[7] = self.fixed_granule
 
-            # Normalize components and convert to list
             api, mcc, pvpp, mgst, binder, pressure, speed, granule = sol
             api, binder, pvpp, mgst, mcc = normalize_components(api, binder, pvpp, mgst, mcc)
             inputs = np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule]).reshape(1, -1)
@@ -495,11 +490,9 @@ class TabletProblem(Problem):
             er = float(max(pred_actual[2], 1e-4))
             efrf = er / tensile
 
-            # Objectives: maximize (api + w_tensile * tensile), minimize efrf
-            F[i, 0] = -(api + self.w_tensile * tensile)   # negative for minimization
+            F[i, 0] = -(api + self.w_tensile * tensile)   # minimize negative
             F[i, 1] = efrf
 
-            # Constraints (must be <= 0 for feasible)
             G[i, 0] = 0.40 - density
             G[i, 1] = density - 0.97
             G[i, 2] = 1.90 - tensile
@@ -512,13 +505,8 @@ def run_pymoo_nsga2(model, scaler, y_scaler, bounds,
                     pop_size=NSGA_POP_SIZE, generations=NSGA_GENERATIONS,
                     granule_mode='Variable', fixed_granule=125.0, w_tensile=0.0):
     """
-    Run NSGA-II using pymoo and return results in a format compatible with the rest of the app.
-    Returns: (population, objectives, constraints, fronts)
-    where:
-        population: numpy array of decision variables (all evaluated)
-        objectives: numpy array of objective values
-        constraints: numpy array of constraint violations (or values)
-        fronts: list of lists of indices in the Pareto front (first front only)
+    Run NSGA-II using pymoo and return results.
+    Returns: (X_all, F_all, None, pareto_X, pareto_F)
     """
     problem = TabletProblem(model, scaler, y_scaler, bounds,
                             granule_mode=granule_mode,
@@ -539,51 +527,24 @@ def run_pymoo_nsga2(model, scaler, y_scaler, bounds,
                    verbose=False,
                    save_history=False)
 
-    # Extract all evaluated solutions from the final population
+    # Extract all solutions from final population
     pop = res.pop
     if pop is None or len(pop) == 0:
-        # Fallback: use the final X and F from res
         X_all = res.X
         F_all = res.F
     else:
         X_all = np.array([ind.X for ind in pop])
         F_all = np.array([ind.F for ind in pop])
 
-    # Compute constraint violations (we'll just use the original G values)
-    # For front extraction, we need the Pareto front from pymoo.
-    # We can get the front from res (non-dominated solutions)
-    pareto_front = res.F  # this is the objective matrix of the Pareto front
-    # We also need the corresponding decision variables for the Pareto front
-    # In pymoo, res.X is the Pareto set (decision variables for the Pareto front)
-    # However, res.X contains only the non-dominated solutions, not all.
-    # But we also need the full population to plot all solutions.
-    # We'll keep X_all, F_all as all solutions (from final population), and then use the Pareto indices from res.
-    # To get the Pareto indices, we can compute the non-dominated front from F_all.
-    # Or we can use res.opt.get("X") and res.opt.get("F") which give Pareto set and front.
-    if hasattr(res, 'opt') and res.opt is not None:
+    # Get Pareto front
+    if res.opt is not None:
         pareto_X = res.opt.get('X')
         pareto_F = res.opt.get('F')
-        # Build a list of indices of the Pareto solutions in the full population
-        # Since we might not have all, we'll just use the Pareto set as the "fronts"
-        # For consistency, we'll create fronts as a list of lists of indices (but we don't have indices easily)
-        # We'll just return the Pareto set and objectives separately.
-        # We'll still return fronts as a list where front0 are the Pareto objective values.
-        # The plotting function expects fronts as a list where fronts[0] is indices of the first front.
-        # We'll adapt: we'll store the Pareto set and front as separate arrays, and modify the plotting function to accept them.
-        # To keep compatibility, we'll store the Pareto front objectives as an array and the indices as all zeros (placeholder).
-        # We'll handle this in the plotting function.
-        # Actually, the original plotting function uses fronts[0] to get indices and then extracts pareto_api and pareto_efrf.
-        # We'll adjust the plotting function to also accept direct arrays.
-        # For now, we'll store a dummy fronts list of indices (range(len(pareto_F))) and also pass the pareto_F.
-        # The plotting function will use the provided arrays.
-        # So we'll return the pareto_X, pareto_F, and the full X_all, F_all.
-        # We'll adapt the plotting function to accept two new arguments: pareto_api and pareto_efrf directly.
-        # That's simpler.
-        # We'll just return the full population and objectives, and separately the Pareto objectives and decision vars.
-        return X_all, F_all, None, pareto_X, pareto_F  # We'll handle this in the UI.
     else:
-        # No Pareto front found
-        return X_all, F_all, None, None, None
+        pareto_X = None
+        pareto_F = None
+
+    return X_all, F_all, None, pareto_X, pareto_F
 
 # ================================================================
 # 5. PREDICTION, PLOTTING, AND COMPARISON FUNCTIONS
@@ -646,21 +607,13 @@ def plot_pareto_with_stars(objectives, fronts,
                            golden_api=None, golden_efrf=None,
                            smooth=True,
                            pareto_api=None, pareto_efrf=None):
-    """
-    Plot Pareto front with two stars.
-    If pareto_api and pareto_efrf are provided, use them directly;
-    otherwise use fronts to extract them.
-    """
     fig = go.Figure()
     fig.data = []
 
-    # Determine Pareto front data
     if pareto_api is not None and pareto_efrf is not None:
-        # Use direct arrays
         api_pareto = pareto_api
         efrf_pareto = pareto_efrf
     else:
-        # Use fronts (old method)
         if objectives is None or fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
             return None
         front0 = fronts[0]
@@ -1050,27 +1003,27 @@ st.success("✅ Model ready!")
 st.markdown("---")
 st.markdown("### 🔬 Granule Size Analysis")
 with st.expander("Granule Size Toggle & Plots", expanded=True):
-    granule_mode = st.radio(
+    granule_mode_ui = st.radio(
         "Granule Size Mode:",
         ["Variable", "Fixed"],
         horizontal=True,
-        key="granule_mode"
+        key="granule_mode_ui"
     )
-    fixed_granule = 125.0
-    if granule_mode == "Fixed":
-        fixed_granule = st.number_input(
+    fixed_granule_ui = 125.0
+    if granule_mode_ui == "Fixed":
+        fixed_granule_ui = st.number_input(
             "Enter fixed granule size (µm):",
             min_value=30.0,
             max_value=250.0,
             value=125.0,
             step=1.0,
-            key="fixed_granule"
+            key="fixed_granule_ui"
         )
     with st.spinner("Generating data for granule analysis..."):
         df_granule, _ = generate_pinn_data(
             n_samples=2000,
-            granule_mode=granule_mode,
-            fixed_granule=fixed_granule
+            granule_mode=granule_mode_ui,
+            fixed_granule=fixed_granule_ui
         )
     fig1 = px.scatter(
         df_granule, x="Granule_Size_µm", y="Tensile_Strength_MPa",
@@ -1086,8 +1039,8 @@ with st.expander("Granule Size Toggle & Plots", expanded=True):
     )
     st.plotly_chart(fig2, use_container_width=True)
 
-    st.caption(f"Dataset size: {len(df_granule)} samples. Mode: {granule_mode}" + 
-               (f" (Fixed at {fixed_granule} µm)" if granule_mode=="Fixed" else ""))
+    st.caption(f"Dataset size: {len(df_granule)} samples. Mode: {granule_mode_ui}" + 
+               (f" (Fixed at {fixed_granule_ui} µm)" if granule_mode_ui=="Fixed" else ""))
 
 st.markdown("---")
 
@@ -1176,23 +1129,22 @@ with col_right:
             st.markdown("### ⚙️ NSGA‑II (v29.42, PyMOO)")
             bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],[80,PRESSURE_MAX],[1,50],[30,250]])
             with st.spinner(f"🔄 PyMOO NSGA‑II (pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS})..."):
-                # Run PyMOO NSGA-II
+                # Use the granule mode from the UI (but NSGA-II can also use fixed if needed)
+                # For flexibility, we pass 'Variable' as default; user can change later
+                granule_mode_nsga = 'Variable'
+                fixed_granule_nsga = 125.0
                 X_all, F_all, _, pareto_X, pareto_F = run_pymoo_nsga2(
                     model, scaler, y_scaler, bounds,
                     pop_size=NSGA_POP_SIZE,
                     generations=NSGA_GENERATIONS,
-                    granule_mode='Variable',  # or use the user's granule mode? Keep it flexible
-                    fixed_granule=125.0,
+                    granule_mode=granule_mode_nsga,
+                    fixed_granule=fixed_granule_nsga,
                     w_tensile=0.0
                 )
 
                 if pareto_F is not None and len(pareto_F) > 0:
                     st.success(f"📊 Pareto front found: **{len(pareto_F)}** optimal solutions")
                     # Extract API and EFRF from Pareto front
-                    # We need to convert F back to original objectives: F[0] = -(api + w_tensile*tensile)
-                    # So we need to compute api and efrf from the decision variables.
-                    # But we can also compute them from the model predictions.
-                    # We'll compute them by evaluating each Pareto solution.
                     api_list = []
                     efrf_list = []
                     density_list = []
@@ -1204,7 +1156,7 @@ with col_right:
                         api, binder, pvpp, mgst, mcc = normalize_components(api, binder, pvpp, mgst, mcc)
                         inputs_norm = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
                         d, t, e, ef = predict_pinn(model, scaler, y_scaler, inputs_norm)
-                        api_list.append(api)  # we use the normalized API
+                        api_list.append(api)
                         efrf_list.append(ef)
                         density_list.append(d)
                         tensile_list.append(t)
@@ -1213,10 +1165,7 @@ with col_right:
                     pareto_api_arr = np.array(api_list)
                     pareto_efrf_arr = np.array(efrf_list)
 
-                    # Golden solution: minimize EFRF, then maximize tensile (or minimize -tensile)
-                    # We'll find the solution with minimum EFRF, and if tie, max tensile
-                    # We can use the same logic as before.
-                    # Create a list of candidates with their data
+                    # Golden solution: minimize EFRF, then maximize tensile
                     candidates = []
                     for idx in range(len(pareto_X)):
                         candidates.append({
@@ -1227,7 +1176,6 @@ with col_right:
                             'efrf': efrf_list[idx],
                             'api': api_list[idx]
                         })
-                    # Filter feasible (already feasible if they are in Pareto front, but double-check)
                     feasible_candidates = [c for c in candidates if D_MIN <= c['density'] <= D_MAX and c['tensile'] >= TENSILE_MIN and c['efrf'] < EFRF_MAX]
                     if feasible_candidates:
                         best = min(feasible_candidates, key=lambda x: (x['efrf'], -x['tensile']))
@@ -1274,11 +1222,9 @@ with col_right:
                 else:
                     st.warning("No Pareto front found. Try adjusting NSGA-II parameters.")
 
-                # Also store objectives and fronts for the plotting function
-                # We'll set objectives as F_all, and fronts as the Pareto front indices? We'll use the direct arrays.
+                # Store for plotting
                 objectives = F_all
-                # For compatibility, we'll create a dummy fronts list (not used if we pass pareto_api_arr)
-                fronts = None
+                fronts = None  # not used if we pass pareto_api_arr
 
             # --- Model Comparison ---
             X_train, X_test, y_train, y_test = train_test_split(
