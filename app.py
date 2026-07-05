@@ -1,9 +1,9 @@
 """
-True Physics-Informed Neural Network (PINN) - Version v29.45
+True Physics-Informed Neural Network (PINN) - Version v29.46
 Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
-Version: 29.45 (Clean Pareto plot with optional stars)
+Version: 29.46 (Clean UI with px.scatter Pareto + optional stars)
 """
 
 import streamlit as st
@@ -35,7 +35,7 @@ except ImportError:
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. ENHANCED PARAMETERS (v29.45)
+# 0. ENHANCED PARAMETERS (v29.46)
 # ================================================================
 
 TENSILE_MIN = 1.90
@@ -720,7 +720,7 @@ def plot_training_curves(loss_history):
     fig.add_trace(go.Scatter(x=epochs, y=loss_history['train'], mode='lines', name='Training Loss'))
     if len(loss_history['val']) > 0:
         fig.add_trace(go.Scatter(x=epochs[:len(loss_history['val'])], y=loss_history['val'], mode='lines', name='Validation Loss'))
-    fig.update_layout(title='Training Curves (v29.45)', xaxis_title='Epoch', yaxis_title='Loss', height=400)
+    fig.update_layout(title='Training Curves (v29.46)', xaxis_title='Epoch', yaxis_title='Loss', height=400)
     return fig
 
 def smooth_pareto_curve(api_points, efrf_points, num_points=200):
@@ -747,9 +747,9 @@ def smooth_pareto_curve(api_points, efrf_points, num_points=200):
     except:
         return api_unique, efrf_unique
 
-# --- CLEAN Pareto plot (without any stars/circles) ---
+# --- CLEAN Pareto plot using px.scatter (no stars) ---
 def plot_pareto_clean(objectives, fronts, smooth=True):
-    """Pareto plot with only red markers and optional smooth curve - NO stars/circles"""
+    """Pareto plot using plotly.express (clean, no stars)"""
     if objectives is None or fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
 
@@ -757,64 +757,46 @@ def plot_pareto_clean(objectives, fronts, smooth=True):
     api_pareto = -objectives[front0, 0]
     efrf_pareto = objectives[front0, 1]
 
-    # Sort for clean line
+    # Sort for smooth line
     sorted_idx = np.argsort(api_pareto)
     api_sorted = api_pareto[sorted_idx]
     efrf_sorted = efrf_pareto[sorted_idx]
 
-    fig = go.Figure()
+    df_pareto = pd.DataFrame({'API': api_sorted, 'EFRF': efrf_sorted})
 
-    # Pareto markers (red)
-    fig.add_trace(go.Scatter(
-        x=api_sorted, y=efrf_sorted,
-        mode='markers',
-        marker=dict(size=8, color='red', opacity=0.8),
-        name='Pareto Solutions'
-    ))
+    fig = px.scatter(df_pareto, x='API', y='EFRF',
+                     title='Pareto Front (Clean)',
+                     labels={'API': 'API (%)', 'EFRF': 'EFRF'},
+                     color_discrete_sequence=['red'])
+    fig.update_traces(marker=dict(size=8, opacity=0.8))
 
-    # Optional smooth curve
+    # Add smooth curve if requested
     if smooth and len(api_sorted) >= 3:
         x_s, y_s = smooth_pareto_curve(api_sorted, efrf_sorted)
-        fig.add_trace(go.Scatter(
-            x=x_s, y=y_s,
-            mode='lines',
-            line=dict(color='red', width=2, dash='dash'),
-            name='Pareto Front (smooth)'
-        ))
-    else:
-        fig.add_trace(go.Scatter(
-            x=api_sorted, y=efrf_sorted,
-            mode='lines',
-            line=dict(color='red', width=2),
-            name='Pareto Front (line)'
-        ))
+        fig.add_trace(go.Scatter(x=x_s, y=y_s, mode='lines',
+                                 line=dict(color='red', width=2, dash='dash'),
+                                 name='Pareto Front (smooth)'))
 
     # EFRF threshold line
     fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='red',
                   annotation_text=f'EFRF Threshold: {EFRF_MAX:.2f}',
                   annotation_position='top right')
 
-    fig.update_layout(
-        title='Pareto Front (Clean)',
-        xaxis_title='API (%)',
-        yaxis_title='EFRF',
-        height=500,
-        template='plotly_white',
-        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
-    )
+    fig.update_layout(height=500, template='plotly_white',
+                      legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1))
     return fig
 
-# --- TWO-STAR Pareto plot (with blue and gold stars) ---
+# --- Two-star Pareto plot (using px.scatter + traces) ---
 def plot_pareto_with_stars(objectives, fronts,
                            user_api=None, user_efrf=None,
                            golden_api=None, golden_efrf=None,
                            smooth=True):
-    """Pareto plot with two stars (blue and gold) - can be toggled"""
+    """Pareto plot with two stars (blue and gold)"""
     fig = plot_pareto_clean(objectives, fronts, smooth=smooth)
     if fig is None:
         return None
 
-    # Add stars on top of the clean plot
+    # Add stars as scatter traces
     if golden_api is not None and golden_efrf is not None:
         fig.add_trace(go.Scatter(
             x=[golden_api], y=[golden_efrf],
@@ -836,7 +818,7 @@ def plot_pareto_with_stars(objectives, fronts,
         ))
 
     fig.update_layout(
-        title='Pareto Front with Two Stars (v29.45)',
+        title='Pareto Front with Two Stars (v29.46)',
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
     )
     return fig
@@ -888,7 +870,7 @@ def plot_pareto_3d(pareto_solutions, user_solution, golden_solution):
         ))
 
     fig.update_layout(
-        title='3D Pareto Surface (v29.45)',
+        title='3D Pareto Surface (v29.46)',
         scene=dict(
             xaxis_title='Cost (MCC + Binder)',
             yaxis_title='Efficacy (Tensile / EFRF)',
@@ -962,7 +944,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, sanitize_text("Formulation Optimization Report (v29.45)"), ln=True, align="C")
+    pdf.cell(0, 10, sanitize_text("Formulation Optimization Report (v29.46)"), ln=True, align="C")
     pdf.set_font("Arial", "", 10)
     pdf.cell(0, 6, sanitize_text(f"Date: {timestamp}"), ln=True, align="C")
     pdf.ln(5)
@@ -1060,7 +1042,7 @@ def load_or_train_model():
         if os.path.exists(checkpoint_path):
             os.remove(checkpoint_path)
 
-    st.caption("🔄 Training model from scratch (v29.45 improved settings)...")
+    st.caption("🔄 Training model from scratch (v29.46 improved settings)...")
 
     df, feature_names = generate_pinn_data(n_samples=N_SAMPLES)
     X_raw = df[feature_names].values
@@ -1182,20 +1164,21 @@ def load_or_train_model():
 # 7. MAIN USER INTERFACE (Streamlit UI)
 # ================================================================
 
-st.set_page_config(page_title="PINN Cloud v29.45", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Cloud v29.46", page_icon="🧬", layout="wide")
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-            padding: 1.5rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
-    <h1 style="color: #ffffff; font-size: 2rem; margin: 0;">🧬 Hybrid AI Framework v29.45</h1>
-    <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">⚡ Clean Pareto Plot · Optional Stars · 3D Surface</p>
+            padding: 1.2rem; border-radius: 1rem; margin-bottom: 1rem; text-align: center;">
+    <h2 style="color: #ffffff; margin: 0;">🧬 True Physics-Informed Neural Network (PINN)</h2>
+    <p style="color: #64ffda; font-size: 1rem; margin: 0.2rem 0 0 0;">v29.46 — Clean Interface · 3D Pareto · Optional Stars</p>
+    <p style="color: #a8b2d1; font-size: 0.85rem; margin: 0.2rem 0 0 0;">Nile Valley University · Sudan</p>
 </div>
 """, unsafe_allow_html=True)
 
 st.markdown("---")
 
 with st.sidebar:
-    st.markdown("### 📚 Physics Constraints (v29.45)")
+    st.markdown("### 📚 Physics Constraints (v29.46)")
     st.markdown(f"""
     - ✅ **Heckel:** ln(1/(1-D)) = kP + A
     - ✅ **EFRF:** ER / σt < {EFRF_MAX:.2f}
@@ -1213,9 +1196,8 @@ with st.sidebar:
     - ✅ **3D Pareto:** Cost vs Efficacy vs Density
     """)
     show_smooth = st.checkbox("Show smooth Pareto curve", value=True)
-    # NEW: toggle for stars
     show_stars = st.checkbox("Show stars on Pareto plot", value=False)
-    st.info("🔬 **v29.45** — Clean Pareto (no stars by default)")
+    st.info("🔬 **v29.46** — Clean Pareto (no stars by default)")
 
     # Edge Tabs Demo (sidebar)
     st.markdown("---")
@@ -1235,14 +1217,13 @@ with st.sidebar:
 # تحميل النموذج (AUTO-REPAIR)
 # ================================================================
 
-with st.spinner("📂 Loading/Training model (v29.45)..."):
+with st.spinner("📂 Loading/Training model (v29.46)..."):
     model, scaler, y_scaler, feature_names, df, loss_history = load_or_train_model()
 st.success("✅ Model ready!")
 
 # ================================================================
 # Granule Analysis Section (UI widgets)
 # ================================================================
-st.markdown("---")
 st.markdown("### 🔬 Granule Size Analysis")
 with st.expander("Granule Size Toggle & Plots", expanded=True):
     granule_mode_ui = st.radio(
@@ -1330,49 +1311,59 @@ with col_left:
         pressure = st.slider("⚙️ Pressure (MPa)", 80.0, PRESSURE_MAX, get_safe_value('pressure'), 1.0, key="pressure")
         speed = st.slider("🔄 Speed (rpm)", 1.0, 50.0, get_safe_value('speed'), 0.5, key="speed")
         granule = st.slider("🔬 Granule Size (µm)", 30.0, 250.0, get_safe_value('granule'), 1.0, key="granule")
-    predict_btn = st.button("🔬 Predict & Optimize (v29.45)", use_container_width=True)
+    predict_btn = st.button("🔬 Predict & Optimize (v29.46)", use_container_width=True)
 
 with col_right:
     st.markdown("### 📈 Results")
+
+    # Placeholders for results
     objectives = None; constraints = None; fronts = None; nsga = None
     api_norm = None; efrf = None; comp_df = pd.DataFrame()
     density = 0.0; tensile = 0.0; er = 0.0
     density_ok = False; tensile_ok = False; efrf_ok = False; mcc_ok = False
     api_use = 0.0; mcc_use = 0.0; pvpp_use = 0.0; mgst_use = 0.0; binder_use = 0.0
     golden_info = None
-    pareto_solutions_list = []  # for 3D plot
+    pareto_solutions_list = []
 
     if predict_btn:
         if abs(total - 100) > 0.1:
             st.warning("⚠️ Formulation must sum to 100%")
         else:
+            # Normalize and predict
             api_norm, binder_norm, pvpp_norm, mgst_norm, mcc_norm = normalize_components(api, binder, pvpp, mgst, mcc)
             inputs_norm = [api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm, pressure, speed, granule]
             api_use, mcc_use, pvpp_use, mgst_use, binder_use = api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm
-            with st.spinner("🧠 Predicting (v29.45)..."):
+            with st.spinner("🧠 Predicting (v29.46)..."):
                 density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs_norm)
-            kpi_cols = st.columns(3)
-            kpi_cols[0].metric("Density", f"{density:.3f}", delta=f"Target: {D_MIN:.2f}–{D_MAX:.2f}")
-            kpi_cols[1].metric("Tensile", f"{tensile:.3f} MPa", delta=f"Min: {TENSILE_MIN:.2f} MPa")
-            kpi_cols[2].metric("EFRF", f"{efrf:.4f}", delta=f"Max: {EFRF_MAX:.2f}")
-            st.markdown("---")
-            density_ok = (density >= D_MIN and density <= D_MAX)
+
+            # Display constraints with checkmarks using st.metric
+            st.markdown("#### Constraints Status")
+            cols = st.columns(4)
+            density_ok = (D_MIN <= density <= D_MAX)
             tensile_ok = (tensile >= TENSILE_MIN)
             efrf_ok = (efrf < EFRF_MAX)
             mcc_ok = (mcc_norm <= MCC_MAX)
+
+            cols[0].metric("Density", f"{density:.3f}",
+                           delta="✅" if density_ok else "❌",
+                           delta_color="normal")
+            cols[1].metric("Tensile", f"{tensile:.2f} MPa",
+                           delta="✅" if tensile_ok else "❌",
+                           delta_color="normal")
+            cols[2].metric("EFRF", f"{efrf:.4f}",
+                           delta="✅" if efrf_ok else "❌",
+                           delta_color="normal")
+            cols[3].metric("MCC", f"{mcc_norm:.1f}%",
+                           delta="✅" if mcc_ok else "❌",
+                           delta_color="normal")
+
             if density_ok and tensile_ok and efrf_ok and mcc_ok:
                 st.success("✅ All constraints satisfied!")
             else:
-                st.error("❌ Violates constraints")
-            st.markdown("### ✅ Feasibility")
-            pass_cols = st.columns(4)
-            pass_cols[0].metric("Density", "✅" if density_ok else "❌")
-            pass_cols[1].metric("Tensile", "✅" if tensile_ok else "❌")
-            pass_cols[2].metric("EFRF", "✅" if efrf_ok else "❌")
-            pass_cols[3].metric("MCC", "✅" if mcc_ok else "❌")
+                st.error("❌ One or more constraints violated.")
 
-            # --- NSGA‑II (with fixed granule support) ---
-            st.markdown("### ⚙️ NSGA‑II (v29.45)")
+            # --- NSGA‑II ---
+            st.markdown("#### ⚙️ Optimization (NSGA‑II)")
             bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],[80,PRESSURE_MAX],[1,50],[30,250]])
             with st.spinner(f"🔄 NSGA‑II (pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS})..."):
                 nsga_granule_mode = st.session_state.get('granule_mode_ui', 'Variable')
@@ -1394,7 +1385,6 @@ with col_right:
                 if pareto_count > 0:
                     front0 = fronts[0]
                     golden_candidates = []
-                    # Build list of all pareto solutions for 3D plot
                     pareto_solutions_list = []
                     for idx in front0:
                         formulation = nsga.population[idx]
@@ -1443,8 +1433,6 @@ with col_right:
                             - Tensile: `{golden_info['tensile']:.3f} MPa`
                             - EFRF: `{golden_info['efrf']:.4f}`
                             """)
-                    else:
-                        st.info("No fully feasible solution found in Pareto front.")
 
             # --- Model Comparison ---
             X_train, X_test, y_train, y_test = train_test_split(
@@ -1471,7 +1459,6 @@ with col_right:
                 'Physics': '✅ Enforced'
             }])
             comp_df = pd.concat([pinn_row, comp_df], ignore_index=True)
-
             comp_df_display = comp_df.copy()
             for col in ['R²', 'RMSE', 'MAE']:
                 comp_df_display[col] = comp_df_display[col].map(lambda x: f"{x:.4f}")
@@ -1489,7 +1476,6 @@ with col_right:
             golden_api = golden_info['api'] if golden_info else None
             golden_efrf = golden_info['efrf'] if golden_info else None
 
-            # Choose which plot function to use based on toggle
             if show_stars:
                 fig = plot_pareto_with_stars(
                     objectives=objectives,
@@ -1543,7 +1529,7 @@ with col_right:
                 hovertemplate='%{y}<br>R² = %{x:.4f}<extra></extra>'
             ))
             fig.update_layout(
-                title='R² Score Comparison (v29.45)',
+                title='R² Score Comparison (v29.46)',
                 xaxis=dict(title='R² Score', range=[-0.2, 1.05]),
                 yaxis=dict(title='Model'),
                 height=300,
@@ -1577,9 +1563,9 @@ with col_right:
                 status, timestamp, pdf_comp_df, golden_info
             )
             st.download_button(
-                "📥 Download PDF Report (v29.45)",
+                "📥 Download PDF Report (v29.46)",
                 data=pdf_data,
-                file_name=f"report_v29.45_{timestamp[:10]}.pdf",
+                file_name=f"report_v29.46_{timestamp[:10]}.pdf",
                 mime="application/pdf"
             )
         else:
@@ -1593,7 +1579,6 @@ with col_right:
     with tab6:
         st.markdown("### 🌐 3D Pareto Surface")
         if predict_btn and pareto_solutions_list:
-            # User solution dictionary
             user_dict = {
                 'api': api_norm,
                 'mcc': mcc_norm,
@@ -1603,7 +1588,7 @@ with col_right:
                 'efrf': efrf,
                 'er': er
             } if api_norm is not None else None
-            golden_dict = golden_info  # already a dict
+            golden_dict = golden_info
 
             fig3d = plot_pareto_3d(pareto_solutions_list, user_dict, golden_dict)
             if fig3d:
@@ -1615,4 +1600,4 @@ with col_right:
             st.info("👆 Click 'Predict & Optimize' to see the 3D Pareto surface.")
 
 st.markdown("---")
-st.caption("🔬 **PINN v29.45** — Clean Pareto · 3D Surface · Optional Stars | Nile Valley University")
+st.caption("🔬 **PINN v29.46** — Clean Pareto · 3D Surface · Optional Stars | Nile Valley University")
