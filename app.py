@@ -3,7 +3,7 @@ True Physics-Informed Neural Network (PINN) - Version v29.42
 Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
-Version: 29.42 (Fixed PyMOO bounds issue)
+Version: 29.42 (Fixed PyMOO bounds issue - final)
 """
 
 import streamlit as st
@@ -433,7 +433,7 @@ class MultiTaskTruePINN(nn.Module):
         return total_loss, {'total_loss': total_loss.item()}
 
 # ================================================================
-# 4. FIXED PyMOO NSGA-II
+# 4. FIXED PyMOO NSGA-II (bounds fixed)
 # ================================================================
 
 class TabletProblem(Problem):
@@ -458,11 +458,11 @@ class TabletProblem(Problem):
         self.fixed_granule = fixed_granule
         self.w_tensile = w_tensile
         self.bounds = bounds
-        # Explicitly set bounds to avoid the 'bounds()' error
+        # DO NOT pass xl/xu to super; set them as attributes after.
+        super().__init__(n_var=8, n_obj=2, n_constr=4)
+        # Now set the bounds attributes
         self.xl = bounds[:, 0]
         self.xu = bounds[:, 1]
-        super().__init__(n_var=8, n_obj=2, n_constr=4,
-                         xl=self.xl, xu=self.xu)
 
     def _evaluate(self, x, out, *args, **kwargs):
         n = x.shape[0]
@@ -1129,8 +1129,7 @@ with col_right:
             st.markdown("### ⚙️ NSGA‑II (v29.42, PyMOO)")
             bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],[80,PRESSURE_MAX],[1,50],[30,250]])
             with st.spinner(f"🔄 PyMOO NSGA‑II (pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS})..."):
-                # Use the granule mode from the UI (but NSGA-II can also use fixed if needed)
-                # For flexibility, we pass 'Variable' as default; user can change later
+                # Use Variable granule mode by default; the UI is only for analysis plots, not for NSGA-II
                 granule_mode_nsga = 'Variable'
                 fixed_granule_nsga = 125.0
                 X_all, F_all, _, pareto_X, pareto_F = run_pymoo_nsga2(
