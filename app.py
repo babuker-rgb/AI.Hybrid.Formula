@@ -1,9 +1,9 @@
 """
-True Physics-Informed Neural Network (PINN) - Version v29.39
+True Physics-Informed Neural Network (PINN) - Version v29.41
 Multi-Objective Tablet Manufacturing Optimization
 
 Author: Babuker A. Abdalla
-Version: 29.39 (Improved accuracy: rebalanced loss, larger network, more features)
+Version: 29.41 (Granule size toggle: Fixed/Variable)
 """
 
 import streamlit as st
@@ -35,7 +35,7 @@ except ImportError:
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. ENHANCED PARAMETERS (v29.39)
+# 0. ENHANCED PARAMETERS (v29.41)
 # ================================================================
 
 TENSILE_MIN = 1.90
@@ -47,29 +47,35 @@ PRESSURE_MAX = 300.0
 BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
+# Noise settings
 NOISE_DENSITY = 0.002
 NOISE_STRENGTH = 0.005
 NOISE_ER = 0.005
 
-# --- Accuracy improvements ---
-N_SAMPLES = 12000               # increased from 8000
-ADAM_EPOCHS = 500               # increased from 400
+# Data and training
+N_SAMPLES = 12000
+ADAM_EPOCHS = 500
 MONOTONICITY_FREQUENCY = 10
-PATIENCE = 50                   # increased from 25
+PATIENCE = 50
 
-# --- Loss weights (rebalanced) ---
+# Loss weights (initial, used in first 50 epochs)
 W_DENSITY = 2.0
-W_TENSILE = 10.0                # was 4.0
+W_TENSILE = 10.0
 W_TENSILE_PHYSICS = 0.6
-W_PHYSICS_BASE = 0.2            # was 0.5
-W_PHYSICS_FINAL = 0.8           # was 1.8
+W_PHYSICS_BASE = 0.2
+W_PHYSICS_FINAL = 0.8
 W_EFRF = 2.0
 W_DENSITY_PENALTY = 8.0
 W_MCC = 0.5
 
-# --- NSGA-II (unchanged) ---
-NSGA_POP_SIZE = 60
-NSGA_GENERATIONS = 40
+# NSGA-II (enhanced)
+NSGA_POP_SIZE = 80
+NSGA_GENERATIONS = 60
+
+# Granule defaults
+GRANULE_MIN = 30.0
+GRANULE_MAX = 250.0
+DEFAULT_GRANULE = 125.0
 
 # ================================================================
 # 1. SESSION STATE & HELPERS
@@ -78,7 +84,9 @@ NSGA_GENERATIONS = 40
 DEFAULTS = {
     'api': 90.5, 'binder': 2.7, 'pvpp': 3.0, 'mgst': 0.20,
     'mcc': 3.6,
-    'pressure': 230.0, 'speed': 12.0, 'granule': 125.0
+    'pressure': 230.0, 'speed': 12.0, 'granule': 125.0,
+    'granule_mode': 'Variable',  # 'Variable' or 'Fixed'
+    'fixed_granule': 125.0
 }
 
 RANGES = {
@@ -122,7 +130,7 @@ safe_initialize()
 clamp_session_state()
 
 # ================================================================
-# 2. HELPER FUNCTIONS (with extra interaction features)
+# 2. HELPER FUNCTIONS
 # ================================================================
 
 def sanitize_text(text):
@@ -200,7 +208,6 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
     return api_norm, binder_norm, pvpp_norm, mgst_norm, mcc_norm
 
 def add_interaction_features(X_raw):
-    # Original features
     pressure = X_raw[:, 5:6]
     binder = X_raw[:, 4:5]
     api = X_raw[:, 0:1]
@@ -209,14 +216,14 @@ def add_interaction_features(X_raw):
     pvpp = X_raw[:, 2:3]
     mgst = X_raw[:, 3:4]
 
-    # Original interactions
+    # Original
     pressure_speed = np.clip(pressure / (speed + 0.1), 0, 1000)
     api_mcc = np.clip(api / (mcc + 0.1), 0, 1000)
     binder_speed = np.clip(binder / (speed + 0.1), 0, 100)
     pressure_binder = pressure * binder
     pressure_api = pressure * api
 
-    # --- NEW: additional interaction terms ---
+    # Extra
     api_pvpp = api * pvpp
     binder_mgst = binder * mgst
     mcc_pvpp = mcc * pvpp
@@ -233,7 +240,17 @@ def add_interaction_features(X_raw):
         api2, pressure2, binder2, speed2
     ], axis=1)
 
-def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
+def generate_pinn_data(n_samples=N_SAMPLES, random_state=42,
+                       granule_mode='Variable', fixed_granule=None):
+    """
+    Generate synthetic data for PINN training.
+    
+    Parameters:
+    - n_samples: int, number of samples
+    - random_state: int, seed for reproducibility
+    - granule_mode: str, 'Variable' or 'Fixed'
+    - fixed_granule: float, fixed granule size (µm) when mode is 'Fixed'
+    """
     np.random.seed(random_state)
     X = np.zeros((n_samples, 8))
     y = np.zeros((n_samples, 3))
@@ -248,7 +265,12 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         mcc_raw = np.random.uniform(0.1, 20)
         pressure = np.random.uniform(80, PRESSURE_MAX)
         speed = np.random.uniform(1, 50)
-        granule = np.random.uniform(30, 250)
+        
+        # Granule size logic
+        if granule_mode == 'Fixed':
+            granule = fixed_granule if fixed_granule is not None else DEFAULT_GRANULE
+        else:  # Variable
+            granule = np.random.uniform(GRANULE_MIN, GRANULE_MAX)
 
         api, binder, pvpp, mgst, mcc = normalize_components(api_raw, binder_raw, pvpp_raw, mgst_raw, mcc_raw)
         X[i] = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
@@ -299,7 +321,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# 3. PINN MODEL (enlarged: 512 neurons, 3 residual blocks)
+# 3. PINN MODEL (with BatchNorm + Dropout)
 # ================================================================
 
 class Mish(nn.Module):
@@ -307,29 +329,33 @@ class Mish(nn.Module):
         return x * torch.tanh(torch.nn.functional.softplus(x))
 
 class ResidualBlock(nn.Module):
-    def __init__(self, features):
+    def __init__(self, features, dropout_rate=0.1):
         super(ResidualBlock, self).__init__()
         self.linear1 = nn.Linear(features, features)
+        self.bn1 = nn.BatchNorm1d(features)
         self.linear2 = nn.Linear(features, features)
+        self.bn2 = nn.BatchNorm1d(features)
         self.activation = Mish()
+        self.dropout = nn.Dropout(dropout_rate)
 
     def forward(self, x):
         identity = x
-        out = self.activation(self.linear1(x))
-        out = self.linear2(out)
+        out = self.activation(self.bn1(self.linear1(x)))
+        out = self.dropout(out)
+        out = self.bn2(self.linear2(out))
+        out = self.dropout(out)
         return identity + out
 
 class MultiTaskTruePINN(nn.Module):
-    def __init__(self, input_dim=13, output_dim=5):
+    def __init__(self, input_dim, output_dim=5):
         super(MultiTaskTruePINN, self).__init__()
-        # Larger network for better accuracy
         self.input_layer = nn.Sequential(
             nn.Linear(input_dim, 512),
             Mish()
         )
         self.res_block1 = ResidualBlock(512)
         self.res_block2 = ResidualBlock(512)
-        self.res_block3 = ResidualBlock(512)   # extra block
+        self.res_block3 = ResidualBlock(512)
         self.transition = nn.Sequential(
             nn.Linear(512, 256),
             nn.Tanh()
@@ -362,13 +388,10 @@ class MultiTaskTruePINN(nn.Module):
             return output[:, :3].cpu().numpy()
 
     def compute_loss(self, X_scaled, X_raw, y_true, epoch=0, max_epochs=ADAM_EPOCHS,
-                     w_density=W_DENSITY,
-                     w_tensile=W_TENSILE,
+                     w_density=W_DENSITY, w_tensile=W_TENSILE,
                      w_tensile_physics=W_TENSILE_PHYSICS,
-                     w_physics_base=W_PHYSICS_BASE,
-                     w_physics_final=W_PHYSICS_FINAL,
-                     w_mcc=W_MCC,
-                     w_density_penalty=W_DENSITY_PENALTY,
+                     w_physics_base=W_PHYSICS_BASE, w_physics_final=W_PHYSICS_FINAL,
+                     w_mcc=W_MCC, w_density_penalty=W_DENSITY_PENALTY,
                      efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
                      compute_grad=True):
         pressure_real = X_raw[:, 5].view(-1, 1)
@@ -381,19 +404,34 @@ class MultiTaskTruePINN(nn.Module):
         k_pred = y_pred[:, 3:4]
         A_pred = y_pred[:, 4:5]
 
-        # Physics weight scheduling (smoother)
         progress = epoch / max_epochs
         schedule_factor = 1 / (1 + math.exp(-12 * (progress - 0.5)))
         w_physics = w_physics_base + (w_physics_final - w_physics_base) * schedule_factor
         w_physics = max(w_physics, 0.1)
 
-        # Data losses (with increased tensile weight)
-        density_data_loss = nn.MSELoss()(density_pred, y_true[:, 0:1])
-        tensile_data_loss = nn.MSELoss()(tensile_pred, y_true[:, 1:2])
-        er_data_loss = nn.MSELoss()(er_pred, y_true[:, 2:3])
-        data_loss = (3.5 * density_data_loss) + (w_tensile * tensile_data_loss) + (3.5 * er_data_loss)
+        density_mse = nn.MSELoss()(density_pred, y_true[:, 0:1])
+        tensile_mse = nn.MSELoss()(tensile_pred, y_true[:, 1:2])
+        er_mse = nn.MSELoss()(er_pred, y_true[:, 2:3])
 
-        # Physics constraints
+        # Adaptive loss weighting
+        if epoch < 50:
+            data_loss = (3.5 * density_mse) + (w_tensile * tensile_mse) + (3.5 * er_mse)
+        else:
+            total_mse = density_mse + tensile_mse + er_mse + 1e-8
+            w_den = density_mse / total_mse
+            w_ten = tensile_mse / total_mse
+            w_er = er_mse / total_mse
+
+            base_den = 3.5
+            base_ten = w_tensile
+            base_er = 3.5
+
+            adaptive_den = base_den * (1 + w_den)
+            adaptive_ten = base_ten * (1 + w_ten)
+            adaptive_er = base_er * (1 + w_er)
+
+            data_loss = (adaptive_den * density_mse) + (adaptive_ten * tensile_mse) + (adaptive_er * er_mse)
+
         tensile_physics_loss = torch.mean(torch.relu(0.3 - (tensile_pred * density_pred)) ** 2) * w_tensile_physics
         heckel_lhs = torch.log(1.0 / torch.clamp(1.0 - density_pred, min=1e-4))
         heckel_rhs = k_pred * pressure_real + A_pred
@@ -401,7 +439,6 @@ class MultiTaskTruePINN(nn.Module):
         efrf_pred = er_pred / torch.clamp(tensile_pred, min=1e-4)
         efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
 
-        # Penalties
         mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
         density_penalty = torch.mean(
             torch.relu(density_pred - D_MAX) ** 2 + torch.relu(D_MIN - density_pred) ** 2
@@ -416,7 +453,7 @@ class MultiTaskTruePINN(nn.Module):
         return total_loss, {'total_loss': total_loss.item()}
 
 # ================================================================
-# 4. ENHANCED NSGA‑II (pop=60, gen=40)
+# 4. ENHANCED NSGA‑II (pop=80, gen=60)
 # ================================================================
 
 class NSGAII:
@@ -702,7 +739,7 @@ def plot_training_curves(loss_history):
     fig.add_trace(go.Scatter(x=epochs, y=loss_history['train'], mode='lines', name='Training Loss'))
     if len(loss_history['val']) > 0:
         fig.add_trace(go.Scatter(x=epochs[:len(loss_history['val'])], y=loss_history['val'], mode='lines', name='Validation Loss'))
-    fig.update_layout(title='Training Curves (v29.39)', xaxis_title='Epoch', yaxis_title='Loss', height=400)
+    fig.update_layout(title='Training Curves (v29.41)', xaxis_title='Epoch', yaxis_title='Loss', height=400)
     return fig
 
 def smooth_pareto_curve(api_points, efrf_points, num_points=200):
@@ -789,7 +826,7 @@ def plot_pareto_with_stars(objectives, fronts,
                   annotation_text=f'EFRF Threshold: {EFRF_MAX:.2f}',
                   annotation_position='top right')
     fig.update_layout(
-        title='Pareto Front with Two Stars (v29.39)',
+        title='Pareto Front with Two Stars (v29.41)',
         xaxis_title='API (%)',
         yaxis_title='EFRF',
         height=500,
@@ -858,7 +895,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, sanitize_text("Formulation Optimization Report (v29.39)"), ln=True, align="C")
+    pdf.cell(0, 10, sanitize_text("Formulation Optimization Report (v29.41)"), ln=True, align="C")
     pdf.set_font("Arial", "", 10)
     pdf.cell(0, 6, sanitize_text(f"Date: {timestamp}"), ln=True, align="C")
     pdf.ln(5)
@@ -926,11 +963,11 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, gran
     return pdf_bytes
 
 # ================================================================
-# 6. MODEL LOADING / TRAINING (AUTO-REPAIR)
+# 6. MODEL LOADING / TRAINING (with granule mode)
 # ================================================================
 
 @st.cache_resource
-def load_or_train_model():
+def load_or_train_model(granule_mode, fixed_granule):
     checkpoint_path = '/tmp/pinn_best_model.pt'
     
     try:
@@ -939,7 +976,8 @@ def load_or_train_model():
             checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
             required_keys = ['model_state', 'scaler', 'y_scaler', 'feature_names', 'df', 'loss_history']
             if all(k in checkpoint for k in required_keys):
-                model = MultiTaskTruePINN(input_dim=add_interaction_features(np.zeros((1,8))).shape[1])
+                input_dim = checkpoint['scaler'].mean_.shape[0]
+                model = MultiTaskTruePINN(input_dim=input_dim)
                 model.load_state_dict(checkpoint['model_state'])
                 scaler = checkpoint['scaler']
                 y_scaler = checkpoint['y_scaler']
@@ -955,9 +993,14 @@ def load_or_train_model():
         if os.path.exists(checkpoint_path):
             os.remove(checkpoint_path)
 
-    st.caption("🔄 Training model from scratch (v29.39 improved settings)...")
+    st.caption("🔄 Training model from scratch (v29.41 improved settings)...")
 
-    df, feature_names = generate_pinn_data(n_samples=N_SAMPLES)
+    # Generate data with the selected granule mode
+    df, feature_names = generate_pinn_data(
+        n_samples=N_SAMPLES,
+        granule_mode=granule_mode,
+        fixed_granule=fixed_granule
+    )
     X_raw = df[feature_names].values
     y = df[['Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']].values
     X_augmented = add_interaction_features(X_raw)
@@ -1077,20 +1120,23 @@ def load_or_train_model():
 # 7. MAIN USER INTERFACE (Streamlit UI)
 # ================================================================
 
-st.set_page_config(page_title="PINN Cloud v29.39", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PINN Cloud v29.41", page_icon="🧬", layout="wide")
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
             padding: 1.5rem; border-radius: 1rem; margin-bottom: 1.5rem; text-align: center;">
-    <h1 style="color: #ffffff; font-size: 2rem; margin: 0;">🧬 Hybrid AI Framework v29.39</h1>
-    <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">⚡ High Accuracy · Two‑Star Pareto · Smooth Curve</p>
+    <h1 style="color: #ffffff; font-size: 2rem; margin: 0;">🧬 Hybrid AI Framework v29.41</h1>
+    <p style="color: #64ffda; font-size: 0.9rem; margin: 0.5rem 0 0 0;">⚡ Granule Toggle · Adaptive Loss · BatchNorm · Dropout</p>
 </div>
 """, unsafe_allow_html=True)
 
 st.markdown("---")
 
+# ================================================================
+# SIDEBAR
+# ================================================================
 with st.sidebar:
-    st.markdown("### 📚 Physics Constraints (v29.39)")
+    st.markdown("### 📚 Physics Constraints (v29.41)")
     st.markdown(f"""
     - ✅ **Heckel:** ln(1/(1-D)) = kP + A
     - ✅ **EFRF:** ER / σt < {EFRF_MAX:.2f}
@@ -1099,17 +1145,47 @@ with st.sidebar:
     - ✅ **Samples:** {N_SAMPLES} (Enhanced)
     - ✅ **Epochs:** {ADAM_EPOCHS} (Early Stopping at {PATIENCE})
     - ✅ **Device:** GPU (if available)
-    - ✅ **Loss:** 3.5× MSE for Density & ER, 10× for Tensile
+    - ✅ **Loss:** Adaptive weighting (auto‑balances density, tensile, ER)
     - ✅ **Noise:** Ultra-low (σ = 0.002, 0.005, 0.005)
     - ✅ **Cache:** Auto-repair if corrupted (with verification)
     - ✅ **NSGA-II:** Pop={NSGA_POP_SIZE}, Gen={NSGA_GENERATIONS}
+    - ✅ **Network:** BatchNorm + Dropout (0.1)
     """)
-    show_smooth = st.checkbox("Show smooth Pareto curve", value=True)
-    st.info("🔬 **v29.39** — Accuracy Enhanced")
 
-# Load or train model
-with st.spinner("📂 Loading/Training model (v29.39)..."):
-    model, scaler, y_scaler, feature_names, df, loss_history = load_or_train_model()
+    # --- NEW: Granule size toggle ---
+    st.markdown("### 🧪 Granule Size Settings")
+    granule_mode = st.radio(
+        "Granule Size Mode:",
+        ["Variable", "Fixed"],
+        index=0 if st.session_state.get('granule_mode', 'Variable') == 'Variable' else 1,
+        key='granule_mode'
+    )
+
+    fixed_granule = DEFAULT_GRANULE
+    if granule_mode == "Fixed":
+        fixed_granule = st.number_input(
+            "Fixed Granule Size (µm):",
+            min_value=GRANULE_MIN,
+            max_value=GRANULE_MAX,
+            value=st.session_state.get('fixed_granule', DEFAULT_GRANULE),
+            step=1.0,
+            key='fixed_granule'
+        )
+    else:
+        # In variable mode, we ignore the fixed value but still store it for consistency
+        fixed_granule = DEFAULT_GRANULE
+
+    show_smooth = st.checkbox("Show smooth Pareto curve", value=True)
+    st.info("🔬 **v29.41** — Granule Size Toggle")
+
+# ================================================================
+# LOAD / TRAIN MODEL (pass granule mode)
+# ================================================================
+with st.spinner("📂 Loading/Training model (v29.41)..."):
+    model, scaler, y_scaler, feature_names, df, loss_history = load_or_train_model(
+        granule_mode=granule_mode,
+        fixed_granule=fixed_granule
+    )
 st.success("✅ Model ready!")
 
 # Quick experiments (sum to 100%)
@@ -1151,8 +1227,11 @@ with col_left:
         pressure = st.slider("⚙️ Pressure (MPa)", 80.0, PRESSURE_MAX, get_safe_value('pressure'), 1.0, key="pressure")
         speed = st.slider("🔄 Speed (rpm)", 1.0, 50.0, get_safe_value('speed'), 0.5, key="speed")
         granule = st.slider("🔬 Granule Size (µm)", 30.0, 250.0, get_safe_value('granule'), 1.0, key="granule")
-    predict_btn = st.button("🔬 Predict & Optimize (v29.39)", use_container_width=True)
+    predict_btn = st.button("🔬 Predict & Optimize (v29.41)", use_container_width=True)
 
+# ================================================================
+# RESULTS PANEL (unchanged from v29.40)
+# ================================================================
 with col_right:
     st.markdown("### 📈 Results")
     objectives = None; constraints = None; fronts = None; nsga = None
@@ -1169,7 +1248,7 @@ with col_right:
             api_norm, binder_norm, pvpp_norm, mgst_norm, mcc_norm = normalize_components(api, binder, pvpp, mgst, mcc)
             inputs_norm = [api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm, pressure, speed, granule]
             api_use, mcc_use, pvpp_use, mgst_use, binder_use = api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm
-            with st.spinner("🧠 Predicting (v29.39)..."):
+            with st.spinner("🧠 Predicting (v29.41)..."):
                 density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs_norm)
             kpi_cols = st.columns(3)
             kpi_cols[0].metric("Density", f"{density:.3f}", delta=f"Target: {D_MIN:.2f}–{D_MAX:.2f}")
@@ -1192,7 +1271,7 @@ with col_right:
             pass_cols[3].metric("MCC", "✅" if mcc_ok else "❌")
 
             # --- NSGA‑II ---
-            st.markdown("### ⚙️ NSGA‑II (v29.39)")
+            st.markdown("### ⚙️ NSGA‑II (v29.41)")
             bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],[80,PRESSURE_MAX],[1,50],[30,250]])
             with st.spinner(f"🔄 NSGA‑II (pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS})..."):
                 nsga = NSGAII(model, scaler, y_scaler, bounds)
@@ -1350,7 +1429,7 @@ with col_right:
                 hovertemplate='%{y}<br>R² = %{x:.4f}<extra></extra>'
             ))
             fig.update_layout(
-                title='R² Score Comparison (v29.39)',
+                title='R² Score Comparison (v29.41)',
                 xaxis=dict(title='R² Score', range=[-0.2, 1.05]),
                 yaxis=dict(title='Model'),
                 height=300,
@@ -1384,13 +1463,13 @@ with col_right:
                 status, timestamp, pdf_comp_df, golden_info
             )
             st.download_button(
-                "📥 Download PDF Report (v29.39)",
+                "📥 Download PDF Report (v29.41)",
                 data=pdf_data,
-                file_name=f"report_v29.39_{timestamp[:10]}.pdf",
+                file_name=f"report_v29.41_{timestamp[:10]}.pdf",
                 mime="application/pdf"
             )
         else:
             st.info("👆 Click 'Predict & Optimize' to generate the report.")
 
 st.markdown("---")
-st.caption("🔬 **PINN v29.39** — High Accuracy · Two‑Star Pareto · Smooth Curve | Nile Valley University")
+st.caption("🔬 **PINN v29.41** — Granule Toggle · Adaptive Loss · BatchNorm · Dropout | Nile Valley University")
