@@ -2,7 +2,7 @@
 Hubryd AI v29.27 – Minimal · Stable · Free Tier
 Core PINN & NSGA-II identical to v29.18
 Enhanced UI with toggle knobs: Pareto, Sensitivity, Comparison, Particle Size, Report
-FIXED: datetime import added.
+FIXED: import datetime added at the top.
 Nile Valley University · Sudan
 """
 
