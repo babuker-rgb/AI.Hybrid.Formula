@@ -1,9 +1,6 @@
-streamlit
-torch
-numpy
-pandas
-scikit-learn
-plotly
-fpdf
-scipy
-pymoo
+streamlit==1.35.0
+torch==2.3.0
+numpy==1.26.4
+pandas==2.2.2
+scikit-learn==1.5.0
+plotly==5.22.0
