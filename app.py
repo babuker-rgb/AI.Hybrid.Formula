@@ -1,6 +1,7 @@
 """
-Hybrid AI – v29.27-R2 (Balanced)
-Multi-Objective Optimisation 
+Hubryd AI – v29.27-R2 (Balanced)
+Optimised for R² while respecting free‑tier timeouts.
+XGBoost is optional – skips if not installed.
 Nile Valley University · Sudan
 """
 
@@ -36,15 +37,15 @@ BINDER_MAX = 5.0
 # ================================================================
 # Training Parameters – BALANCED for free tier
 # ================================================================
-N_SAMPLES = 8000           # Faster than 12k, still good
-ADAM_EPOCHS = 300          # Enough to converge
+N_SAMPLES = 8000
+ADAM_EPOCHS = 300
 PATIENCE = 25
 NSGA_POP = 40
 NSGA_GENS = 30
 HIDDEN_SIZE = 384
 
 W_DENSITY = 1.0
-W_TENSILE = 60.0           # High but not extreme
+W_TENSILE = 60.0
 W_ER = 15.0
 W_PHYSICS = 5.0
 W_EFRF_PENALTY = 200.0
@@ -507,12 +508,17 @@ def plot_pareto(objectives, fronts):
 def train_benchmark(X_train, X_test, y_train, y_test):
     from sklearn.neural_network import MLPRegressor
     from sklearn.ensemble import RandomForestRegressor
-    from xgboost import XGBRegressor
     models = {
         'MLP': MLPRegressor(hidden_layer_sizes=(64,32), max_iter=300, random_state=42),
-        'Random Forest': RandomForestRegressor(n_estimators=50, random_state=42),
-        'XGBoost': XGBRegressor(n_estimators=50, random_state=42, verbosity=0)
+        'Random Forest': RandomForestRegressor(n_estimators=50, random_state=42)
     }
+    # Optional XGBoost – skip if not installed
+    try:
+        from xgboost import XGBRegressor
+        models['XGBoost'] = XGBRegressor(n_estimators=50, random_state=42, verbosity=0)
+    except ImportError:
+        pass  # XGBoost not installed, skip it
+
     results = []
     for name, model in models.items():
         model.fit(X_train, y_train)
@@ -606,7 +612,7 @@ def load_or_train():
 # ================================================================
 # Streamlit UI – v29.27 with Knobs
 # ================================================================
-st.set_page_config(page_title="Hybrid AI Multi-Objective Optimisation v29.27-R2", layout="wide")
+st.set_page_config(page_title="Hubryd AI v29.27-R2", layout="wide")
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #0b1a33, #1a2a4a, #0f3460); padding:1.5rem; border-radius:1rem; text-align:center; margin-bottom:1rem;">
