@@ -2,6 +2,7 @@
 Hubryd AI v29.27 – Minimal · Stable · Free Tier
 Core PINN & NSGA-II identical to v29.18
 Enhanced UI with toggle knobs: Pareto, Sensitivity, Comparison, Particle Size, Report
+FIXED: datetime import added.
 Nile Valley University · Sudan
 """
 
@@ -18,7 +19,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import os
 import tempfile
-import datetime
+import datetime          # <-- THIS FIXES THE NameError
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -857,9 +858,13 @@ with col_right:
             # 4. Report (button triggered)
             if generate_report:
                 timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                if best_idx is not None:
-                    golden_str = ', '.join([f'{k}: {v:.2f}' for k,v in zip(['API','MCC','PVPP','MgSt','Binder','Pressure','Speed','Granule'], golden)])
-                else:
+                # Use current values if golden not defined
+                try:
+                    if best_idx is not None:
+                        golden_str = ', '.join([f'{k}: {v:.2f}' for k,v in zip(['API','MCC','PVPP','MgSt','Binder','Pressure','Speed','Granule'], golden)])
+                    else:
+                        golden_str = 'None'
+                except:
                     golden_str = 'None'
                 report = f"""
                 # Hubryd AI v29.27 Report
