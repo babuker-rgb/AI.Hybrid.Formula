@@ -1,7 +1,8 @@
 """
 Hubryd AI – v29.27-R2 (Balanced)
-Optimised for R² while respecting free‑tier timeouts.
-XGBoost is optional – skips if not installed.
+Optimised for R² · Fast training on free tier
+NSGA-II unchanged from v29.18
+No matplotlib dependency – clean table only.
 Nile Valley University · Sudan
 """
 
@@ -517,7 +518,7 @@ def train_benchmark(X_train, X_test, y_train, y_test):
         from xgboost import XGBRegressor
         models['XGBoost'] = XGBRegressor(n_estimators=50, random_state=42, verbosity=0)
     except ImportError:
-        pass  # XGBoost not installed, skip it
+        pass
 
     results = []
     for name, model in models.items():
@@ -850,8 +851,9 @@ with col_right:
                     'MAE': pinn_mae
                 }])
                 bench_df = pd.concat([pinn_row, bench_df], ignore_index=True)
-                st.dataframe(bench_df.style.background_gradient(subset=['R²'], cmap='RdYlGn', vmin=-1, vmax=1),
-                             use_container_width=True)
+
+                # Display table without gradient (avoids matplotlib dependency)
+                st.dataframe(bench_df, use_container_width=True)
 
             # Report
             if generate_report:
