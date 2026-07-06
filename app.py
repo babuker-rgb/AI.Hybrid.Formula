@@ -4,7 +4,7 @@ True Physics-Informed Neural Network (PINN) for Tablet Formulation
 
 Author: Babuker A. Abdalla
 Affiliation: Nile Valley University · Sudan
-Version: 29.27 (Improved R² + Curriculum Learning + Larger Network)
+Version: 29.27 (Simplified - without 3D Pareto and Granule Analysis)
 """
 
 import streamlit as st
@@ -48,28 +48,24 @@ PRESSURE_MAX = 300.0
 BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
-# Ultra‑low noise
 NOISE_DENSITY = 0.002
 NOISE_STRENGTH = 0.005
 NOISE_ER = 0.005
 
-# More data and longer training
 N_SAMPLES = 20000
 ADAM_EPOCHS = 800
 MONOTONICITY_FREQUENCY = 10
 PATIENCE = 80
 
-# --- Rebalanced loss weights (data‑first) ---
 W_DENSITY = 2.0
-W_TENSILE = 15.0                     # increased data weight
+W_TENSILE = 15.0
 W_TENSILE_PHYSICS = 0.5
-W_PHYSICS_BASE = 0.0                  # start with no physics
-W_PHYSICS_FINAL = 0.3                # max physics weight
+W_PHYSICS_BASE = 0.0
+W_PHYSICS_FINAL = 0.3
 W_EFRF = 2.0
 W_DENSITY_PENALTY = 8.0
 W_MCC = 0.5
 
-# --- NSGA‑II ---
 NSGA_POP_SIZE = 80
 NSGA_GENERATIONS = 60
 
@@ -210,21 +206,16 @@ def add_interaction_features(X_raw):
     pvpp = X_raw[:, 2:3]
     mgst = X_raw[:, 3:4]
 
-    # Existing
     pressure_speed = np.clip(pressure / (speed + 0.1), 0, 1000)
     api_mcc = np.clip(api / (mcc + 0.1), 0, 1000)
     binder_speed = np.clip(binder / (speed + 0.1), 0, 100)
     pressure_binder = pressure * binder
     pressure_api = pressure * api
-
-    # Extra: more interactions
     api_pvpp = api * pvpp
     binder_mgst = binder * mgst
     mcc_pvpp = mcc * pvpp
     api_mgst = api * mgst
     pressure_speed2 = pressure / (speed + 0.1) ** 2
-
-    # Quadratic terms
     api2 = api ** 2
     pressure2 = pressure ** 2
     binder2 = binder ** 2
@@ -239,8 +230,7 @@ def add_interaction_features(X_raw):
         api2, pressure2, binder2, speed2
     ], axis=1)
 
-def generate_pinn_data(n_samples=N_SAMPLES, random_state=42,
-                       granule_mode='Variable', fixed_granule=125.0):
+def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     np.random.seed(random_state)
     X = np.zeros((n_samples, 8))
     y = np.zeros((n_samples, 3))
@@ -255,15 +245,12 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42,
         mcc_raw = np.random.uniform(0.1, 20)
         pressure = np.random.uniform(80, PRESSURE_MAX)
         speed = np.random.uniform(1, 50)
-        if granule_mode == 'Variable':
-            granule = np.random.uniform(30, 250)
-        else:
-            granule = fixed_granule
+        granule = np.random.uniform(30, 250)
 
         api, binder, pvpp, mgst, mcc = normalize_components(api_raw, binder_raw, pvpp_raw, mgst_raw, mcc_raw)
         X[i] = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
 
-        # --- Heckel for density ---
+        # Heckel
         x = np.random.uniform(x_min, x_max)
         for _ in range(30):
             k = np.random.uniform(0.005, 0.055)
@@ -280,13 +267,12 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42,
         noise_d = np.random.normal(0, NOISE_DENSITY)
         D = np.clip(D_target + noise_d, D_MIN, D_MAX)
 
-        # --- Ryshkewitch‑Duckworth for tensile ---
+        # Ryshkewitch
         sigma0 = np.random.uniform(4.0, 8.0)
         b = np.random.uniform(1.5, 3.5)
         porosity = 1.0 - D
         tensile_base = sigma0 * np.exp(-b * porosity)
 
-        # Interactions
         api_effect = 1.0 - 0.005 * (api - 85)
         binder_effect = 1.0 + 0.03 * (binder - 2.0)
         mgst_effect = 1.0 - 0.1 * (mgst - 0.2)
@@ -297,7 +283,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42,
         strength = strength * np.random.normal(1.0, NOISE_STRENGTH)
         strength = np.clip(strength, 0.5, 6.0)
 
-        # --- Elastic Recovery ---
+        # ER
         er_base = 1.8 + 0.3 * (api - 85)/10 + 0.08 * (speed - 10)/30 - 0.1 * (pressure - 100)/150
         er_base = er_base * (1.0 - 0.15 * (D - 0.4))
         er = np.clip(er_base + np.random.normal(0, NOISE_ER), 0.5, 4.0)
@@ -313,7 +299,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42,
     return df, feature_names
 
 # ================================================================
-# 3. PINN MODEL (larger: 4 residual blocks, 512 neurons)
+# 3. PINN MODEL (with curriculum learning and adaptive physics)
 # ================================================================
 
 class Mish(nn.Module):
@@ -348,7 +334,7 @@ class MultiTaskTruePINN(nn.Module):
         self.res_block1 = ResidualBlock(512)
         self.res_block2 = ResidualBlock(512)
         self.res_block3 = ResidualBlock(512)
-        self.res_block4 = ResidualBlock(512)   # extra block
+        self.res_block4 = ResidualBlock(512)
         self.transition = nn.Sequential(
             nn.Linear(512, 256),
             nn.Tanh()
@@ -381,9 +367,6 @@ class MultiTaskTruePINN(nn.Module):
             output = self.forward(X_scaled)
             return output[:, :3].cpu().numpy()
 
-    # ============================================================
-    # COMPUTE LOSS with curriculum learning & adaptive physics
-    # ============================================================
     def compute_loss(self, X_scaled, X_raw, y_true, epoch=0, max_epochs=ADAM_EPOCHS,
                      w_density=W_DENSITY, w_tensile=W_TENSILE,
                      w_tensile_physics=W_TENSILE_PHYSICS,
@@ -401,29 +384,22 @@ class MultiTaskTruePINN(nn.Module):
         k_pred = y_pred[:, 3:4]
         A_pred = y_pred[:, 4:5]
 
-        # --- Curriculum learning: increase physics weight gradually ---
-        progress = epoch / max_epochs
-        # Sigmoid schedule: physics weight grows from 0 to final over ~200 epochs
-        # For first 100 epochs, keep physics weight near 0
+        # Curriculum learning: first 100 epochs no physics, then linear increase
         if epoch < 100:
             w_physics = 0.0
         else:
-            # linear increase from 0 to final over next 200 epochs
             w_physics = min(w_physics_final, (epoch - 100) / 200 * w_physics_final)
 
-        # Individual MSE losses
         density_mse = nn.MSELoss()(density_pred, y_true[:, 0:1])
         tensile_mse = nn.MSELoss()(tensile_pred, y_true[:, 1:2])
         er_mse = nn.MSELoss()(er_pred, y_true[:, 2:3])
 
-        # Data loss (weighted heavily)
         data_loss = (3.5 * density_mse) + (w_tensile * tensile_mse) + (3.5 * er_mse)
 
-        # --- Dynamic physics adjustment: reduce physics if data loss is high ---
+        # Dynamic reduction if data loss is high
         if data_loss.item() > 1.0 and w_physics > 0.01:
-            w_physics = w_physics * 0.5  # reduce physics temporarily
+            w_physics = w_physics * 0.5
 
-        # --- Physics constraints ---
         tensile_physics_loss = torch.mean(torch.relu(0.3 - (tensile_pred * density_pred)) ** 2) * w_tensile_physics
         heckel_lhs = torch.log(1.0 / torch.clamp(1.0 - density_pred, min=1e-4))
         heckel_rhs = k_pred * pressure_real + A_pred
@@ -431,7 +407,6 @@ class MultiTaskTruePINN(nn.Module):
         efrf_pred = er_pred / torch.clamp(tensile_pred, min=1e-4)
         efrf_loss = torch.mean(torch.relu(efrf_pred - efrf_target) ** 2)
 
-        # --- Additional penalties ---
         mcc_loss = torch.mean(torch.relu(mcc_real - mcc_max) ** 2)
         density_penalty = torch.mean(
             torch.relu(density_pred - D_MAX) ** 2 + torch.relu(D_MIN - density_pred) ** 2
@@ -766,7 +741,7 @@ def smooth_pareto_curve(api_points, efrf_points, num_points=200):
     except:
         return api_unique, efrf_unique
 
-# --- CLEAN Pareto plot using px.scatter (no stars) ---
+# Clean Pareto plot
 def plot_pareto_clean(objectives, fronts, smooth=True):
     if objectives is None or fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
@@ -794,6 +769,7 @@ def plot_pareto_clean(objectives, fronts, smooth=True):
                       legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1))
     return fig
 
+# Two-star Pareto plot
 def plot_pareto_with_stars(objectives, fronts,
                            user_api=None, user_efrf=None,
                            golden_api=None, golden_efrf=None,
@@ -821,66 +797,6 @@ def plot_pareto_with_stars(objectives, fronts,
         ))
     fig.update_layout(title='Pareto Front with Two Stars (v29.27)',
                       legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1))
-    return fig
-
-def compute_cost(mcc, binder):
-    return 2.0 * mcc + 1.5 * binder
-
-def compute_efficacy(tensile, efrf):
-    return tensile / (efrf + 1e-6)
-
-def plot_pareto_3d(pareto_solutions, user_solution, golden_solution):
-    if not pareto_solutions:
-        return None
-    cost_vals = [compute_cost(sol['mcc'], sol['binder']) for sol in pareto_solutions]
-    efficacy_vals = [compute_efficacy(sol['tensile'], sol['efrf']) for sol in pareto_solutions]
-    density_vals = [sol['density'] for sol in pareto_solutions]
-    efrf_vals = [sol['efrf'] for sol in pareto_solutions]
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter3d(
-        x=cost_vals, y=efficacy_vals, z=density_vals,
-        mode='markers',
-        marker=dict(size=6, color=efrf_vals, colorscale='Viridis', showscale=True,
-                    colorbar=dict(title="EFRF")),
-        name='Pareto Solutions'
-    ))
-
-    if golden_solution:
-        fig.add_trace(go.Scatter3d(
-            x=[compute_cost(golden_solution['mcc'], golden_solution['binder'])],
-            y=[compute_efficacy(golden_solution['tensile'], golden_solution['efrf'])],
-            z=[golden_solution['density']],
-            mode='markers+text',
-            marker=dict(size=14, color='gold', symbol='diamond'),
-            text=['⭐ Golden'], textposition='top center',
-            name='Golden Solution'
-        ))
-
-    if user_solution:
-        fig.add_trace(go.Scatter3d(
-            x=[compute_cost(user_solution['mcc'], user_solution['binder'])],
-            y=[compute_efficacy(user_solution['tensile'], user_solution['efrf'])],
-            z=[user_solution['density']],
-            mode='markers+text',
-            marker=dict(size=14, color='blue', symbol='circle'),
-            text=['🔵 Your Formulation'], textposition='top center',
-            name='Your Formulation'
-        ))
-
-    fig.update_layout(
-        title='3D Pareto Surface (v29.27)',
-        scene=dict(
-            xaxis_title='Cost (MCC + Binder)',
-            yaxis_title='Efficacy (Tensile / EFRF)',
-            zaxis_title='Density',
-            xaxis=dict(range=[0, 25]),
-            yaxis=dict(range=[0, 60]),
-            zaxis=dict(range=[0.4, 1.0])
-        ),
-        height=600,
-        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
-    )
     return fig
 
 def plot_sensitivity_plotly(inputs, model, scaler, y_scaler):
@@ -1169,7 +1085,7 @@ st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
             padding: 1.2rem; border-radius: 1rem; margin-bottom: 1rem; text-align: center;">
     <h2 style="color: #ffffff; margin: 0;">🧬 Hubryd AI Multi‑objective Optimization Framework</h2>
-    <p style="color: #64ffda; font-size: 1rem; margin: 0.2rem 0 0 0;">v29.27 — Improved R² · Curriculum Learning · 3D Pareto</p>
+    <p style="color: #64ffda; font-size: 1rem; margin: 0.2rem 0 0 0;">v29.27 — Improved R² · Curriculum Learning · Clean Interface</p>
     <p style="color: #a8b2d1; font-size: 0.85rem; margin: 0.2rem 0 0 0;">Nile Valley University · Sudan</p>
 </div>
 """, unsafe_allow_html=True)
@@ -1191,8 +1107,6 @@ with st.sidebar:
     - ✅ **Cache:** Auto‑repair if corrupted
     - ✅ **NSGA‑II:** Custom, Pop={NSGA_POP_SIZE}, Gen={NSGA_GENERATIONS}
     - ✅ **Network:** 4 Residual Blocks, 512 Neurons
-    - ✅ **Granule Analysis:** Toggle Fixed/Variable
-    - ✅ **3D Pareto:** Cost vs Efficacy vs Density
     """)
     show_smooth = st.checkbox("Show smooth Pareto curve", value=True)
     show_stars = st.checkbox("Show stars on Pareto plot", value=False)
@@ -1219,50 +1133,6 @@ with st.sidebar:
 with st.spinner("📂 Loading/Training model (v29.27)..."):
     model, scaler, y_scaler, feature_names, df, loss_history = load_or_train_model()
 st.success("✅ Model ready!")
-
-# ================================================================
-# Granule Analysis
-# ================================================================
-st.markdown("### 🔬 Granule Size Analysis")
-with st.expander("Granule Size Toggle & Plots", expanded=True):
-    granule_mode_ui = st.radio(
-        "Granule Size Mode:",
-        ["Variable", "Fixed"],
-        horizontal=True,
-        key="granule_mode_ui"
-    )
-    fixed_granule_ui = 125.0
-    if granule_mode_ui == "Fixed":
-        fixed_granule_ui = st.number_input(
-            "Enter fixed granule size (µm):",
-            min_value=30.0,
-            max_value=250.0,
-            value=125.0,
-            step=1.0,
-            key="fixed_granule_ui"
-        )
-    with st.spinner("Generating data for granule analysis..."):
-        df_granule, _ = generate_pinn_data(
-            n_samples=2000,
-            granule_mode=granule_mode_ui,
-            fixed_granule=fixed_granule_ui
-        )
-    fig1 = px.scatter(
-        df_granule, x="Granule_Size_µm", y="Tensile_Strength_MPa",
-        color="Density", title="Granule Size vs Tensile Strength",
-        color_continuous_scale="viridis"
-    )
-    st.plotly_chart(fig1, use_container_width=True)
-
-    fig2 = px.scatter(
-        df_granule, x="Granule_Size_µm", y="Density",
-        color="Tensile_Strength_MPa", title="Granule Size vs Density",
-        color_continuous_scale="plasma"
-    )
-    st.plotly_chart(fig2, use_container_width=True)
-
-    st.caption(f"Dataset size: {len(df_granule)} samples. Mode: {granule_mode_ui}" + 
-               (f" (Fixed at {fixed_granule_ui} µm)" if granule_mode_ui=="Fixed" else ""))
 
 st.markdown("---")
 
@@ -1321,7 +1191,6 @@ with col_right:
     density_ok = False; tensile_ok = False; efrf_ok = False; mcc_ok = False
     api_use = 0.0; mcc_use = 0.0; pvpp_use = 0.0; mgst_use = 0.0; binder_use = 0.0
     golden_info = None
-    pareto_solutions_list = []
 
     if predict_btn:
         if abs(total - 100) > 0.1:
@@ -1358,12 +1227,11 @@ with col_right:
             st.markdown("#### ⚙️ Optimization (NSGA‑II)")
             bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],[80,PRESSURE_MAX],[1,50],[30,250]])
             with st.spinner(f"🔄 NSGA‑II (pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS})..."):
-                nsga_granule_mode = st.session_state.get('granule_mode_ui', 'Variable')
-                nsga_fixed_granule = st.session_state.get('fixed_granule_ui', 125.0)
+                # Granule mode is always variable in this simplified version (no UI toggle)
                 nsga = NSGAII(
                     model, scaler, y_scaler, bounds,
-                    granule_mode=nsga_granule_mode,
-                    fixed_granule=nsga_fixed_granule
+                    granule_mode='Variable',
+                    fixed_granule=125.0
                 )
                 pop, objectives, constraints, fronts = nsga.run()
 
@@ -1372,32 +1240,28 @@ with col_right:
                     st.success(f"📊 Pareto front found: **{pareto_count}** optimal solutions")
                 else:
                     st.warning("No feasible Pareto solutions found.")
-                    pareto_count = 0
 
                 if pareto_count > 0:
                     front0 = fronts[0]
                     golden_candidates = []
-                    pareto_solutions_list = []
                     for idx in front0:
                         formulation = nsga.population[idx]
                         d, t, e, ef = predict_pinn(model, scaler, y_scaler, formulation)
-                        sol_dict = {
-                            'api': formulation[0],
-                            'mcc': formulation[1],
-                            'pvpp': formulation[2],
-                            'mgst': formulation[3],
-                            'binder': formulation[4],
-                            'pressure': formulation[5],
-                            'speed': formulation[6],
-                            'granule': formulation[7],
-                            'density': d,
-                            'tensile': t,
-                            'er': e,
-                            'efrf': ef
-                        }
-                        pareto_solutions_list.append(sol_dict)
                         if D_MIN <= d <= D_MAX and t >= TENSILE_MIN and ef < EFRF_MAX:
-                            golden_candidates.append(sol_dict)
+                            golden_candidates.append({
+                                'api': formulation[0],
+                                'mcc': formulation[1],
+                                'pvpp': formulation[2],
+                                'mgst': formulation[3],
+                                'binder': formulation[4],
+                                'pressure': formulation[5],
+                                'speed': formulation[6],
+                                'granule': formulation[7],
+                                'density': d,
+                                'tensile': t,
+                                'er': e,
+                                'efrf': ef
+                            })
                     if golden_candidates:
                         best = min(golden_candidates, key=lambda x: (x['efrf'], -x['tensile']))
                         golden_info = best
@@ -1457,10 +1321,10 @@ with col_right:
             comp_df = comp_df_display
 
     # ================================================================
-    # Tabs
+    # Tabs (5 tabs: removed 3D and Granule)
     # ================================================================
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
-        ["📉 Pareto", "🔍 Sensitivity", "📊 Comparison", "📄 Report", "🔬 Granule", "🌐 3D Pareto"]
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["📉 Pareto", "🔍 Sensitivity", "📊 Comparison", "📄 Report"]
     )
 
     with tab1:
@@ -1562,33 +1426,5 @@ with col_right:
         else:
             st.info("👆 Click 'Predict & Optimize' to generate the report.")
 
-    with tab5:
-        st.markdown("### 🔬 Granule Size Effect")
-        st.info("Use the toggle at the top of the page to switch between Fixed and Variable granule modes.")
-        st.markdown("The plots are shown in the expander at the top of the page.")
-
-    with tab6:
-        st.markdown("### 🌐 3D Pareto Surface")
-        if predict_btn and pareto_solutions_list:
-            user_dict = {
-                'api': api_norm,
-                'mcc': mcc_norm,
-                'binder': binder_norm,
-                'density': density,
-                'tensile': tensile,
-                'efrf': efrf,
-                'er': er
-            } if api_norm is not None else None
-            golden_dict = golden_info
-
-            fig3d = plot_pareto_3d(pareto_solutions_list, user_dict, golden_dict)
-            if fig3d:
-                st.plotly_chart(fig3d, use_container_width=True)
-                st.caption("🔵 Blue = Your formulation · ⭐ Gold = Optimal solution · Color = EFRF")
-            else:
-                st.info("Could not generate 3D plot.")
-        else:
-            st.info("👆 Click 'Predict & Optimize' to see the 3D Pareto surface.")
-
 st.markdown("---")
-st.caption("🔬 **Hubryd AI v29.27** — Improved R² · Curriculum Learning · 3D Pareto | Nile Valley University")
+st.caption("🔬 **Hubryd AI v29.27** — Improved R² · Curriculum Learning | Nile Valley University")
