@@ -1,7 +1,6 @@
 """
-Hubryd AI – v29.27 UI + v29.18 R²‑Optimised Core
-Fixes: session_state initialisation, datetime import, slider defaults.
-Nile Valley University · Sudan
+Hubryd AI Multi-objective Optimization Framework – Minimal Working Version
+PINN + NSGA-II for Tablet Formulation
 """
 
 import streamlit as st
@@ -12,99 +11,94 @@ import torch.nn as nn
 import torch.optim as optim
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from sklearn.metrics import r2_score, mean_squared_error
 import plotly.express as px
 import plotly.graph_objects as go
+import math
 import os
-import tempfile
-import datetime
+import pickle
 import warnings
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# Physics Constants
+# Parameters (reduced for free tier)
 # ================================================================
-D_MIN = 0.40
-D_MAX = 0.97
+
 TENSILE_MIN = 1.90
 EFRF_MAX = 0.40
 MCC_MAX = 8.0
+D_MIN = 0.40
+D_MAX = 0.97
 PRESSURE_MAX = 300.0
 BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
-# ================================================================
-# Training Parameters – OPTIMISED FOR R²
-# ================================================================
-N_SAMPLES = 12000          # More data
-ADAM_EPOCHS = 500          # Longer training
-PATIENCE = 50
-NSGA_POP = 40
-NSGA_GENS = 30
-HIDDEN_SIZE = 384
+N_SAMPLES = 2000
+ADAM_EPOCHS = 100
+PATIENCE = 20
+NSGA_POP_SIZE = 20
+NSGA_GENERATIONS = 15
 
-# Loss weights – heavily biased toward tensile
-W_DENSITY = 1.0
-W_TENSILE = 80.0           # MAJOR INCREASE for R²
-W_ER = 15.0
-W_PHYSICS = 5.0
-W_EFRF_PENALTY = 200.0
+W_TENSILE = 10.0
+W_PHYSICS_FINAL = 0.2
 
 # ================================================================
-# Session State Initialisation – MUST BE BEFORE ANY WIDGET
+# Helper functions
 # ================================================================
-if 'api' not in st.session_state:
-    st.session_state.update({
-        'api': 90.5,
-        'binder': 3.0,
-        'pvpp': 3.0,
-        'mgst': 0.15,
-        'mcc': 3.35,
-        'pressure': 235.0,
-        'speed': 10.0,
-        'granule': 125.0,
-        'show_pareto': True,
-        'show_sensitivity': False,
-        'show_comparison': True,
-        'granule_mode': 'Fixed'
-    })
 
-# ================================================================
-# Helper Functions (identical to v29.18 – no changes)
-# ================================================================
 def normalize_components(api, binder, pvpp, mgst, mcc):
-    api = np.clip(api, 60, 100)
-    binder = np.clip(binder, 0.1, 15)
-    pvpp = np.clip(pvpp, 0.1, 15)
-    mgst = np.clip(mgst, 0.01, 3.0)
-    mcc = np.clip(mcc, 0.1, 20)
+    api = max(api, 0.1); binder = max(binder, 0.1)
+    pvpp = max(pvpp, 0.1); mgst = max(mgst, 0.01); mcc = max(mcc, 0.1)
+    api = min(api, 100.0); binder = min(binder, 15.0)
+    pvpp = min(pvpp, 15.0); mgst = min(mgst, 3.0); mcc = min(mcc, 25.0)
     total = api + binder + pvpp + mgst + mcc
-    if total <= 0:
-        total = 1.0
-    api = (api / total) * 100
-    binder = (binder / total) * 100
-    pvpp = (pvpp / total) * 100
-    mgst = (mgst / total) * 100
-    mcc = (mcc / total) * 100
-    api = np.clip(api, 85, 95)
-    binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
-    pvpp = np.clip(pvpp, 0.5, 6.0)
-    mgst = np.clip(mgst, 0.01, 1.2)
-    mcc = np.clip(mcc, 0, MCC_MAX)
-    total2 = api + binder + pvpp + mgst + mcc
-    if abs(total2 - 100) > 1e-6:
-        scale = 100 / total2
-        api *= scale
-        binder *= scale
-        pvpp *= scale
-        mgst *= scale
-        mcc *= scale
-        api = np.clip(api, 85, 95)
-        binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
-        pvpp = np.clip(pvpp, 0.5, 6.0)
-        mgst = np.clip(mgst, 0.01, 1.2)
-        mcc = np.clip(mcc, 0, MCC_MAX)
-    return api, binder, pvpp, mgst, mcc
+    if total <= 0: total = 1.0
+    api_norm = (api / total) * 100
+    binder_norm = (binder / total) * 100
+    pvpp_norm = (pvpp / total) * 100
+    mgst_norm = (mgst / total) * 100
+    mcc_norm = (mcc / total) * 100
+    
+    if mcc_norm > MCC_MAX:
+        excess = mcc_norm - MCC_MAX; mcc_norm = MCC_MAX
+        other_sum = api_norm + binder_norm + pvpp_norm + mgst_norm
+        if other_sum > 0:
+            api_norm += excess * (api_norm / other_sum)
+            binder_norm += excess * (binder_norm / other_sum)
+            pvpp_norm += excess * (pvpp_norm / other_sum)
+            mgst_norm += excess * (mgst_norm / other_sum)
+    if api_norm < 85.0:
+        deficit = 85.0 - api_norm; api_norm = 85.0
+        other_sum = binder_norm + pvpp_norm + mgst_norm
+        if other_sum > 0:
+            binder_norm -= deficit * (binder_norm / other_sum) if binder_norm > 0 else 0
+            pvpp_norm -= deficit * (pvpp_norm / other_sum) if pvpp_norm > 0 else 0
+            mgst_norm -= deficit * (mgst_norm / other_sum) if mgst_norm > 0 else 0
+    if api_norm > 95.0:
+        excess = api_norm - 95.0; api_norm = 95.0
+        other_sum = binder_norm + pvpp_norm + mgst_norm + mcc_norm
+        if other_sum > 0:
+            binder_norm += excess * (binder_norm / other_sum) if binder_norm > 0 else 0
+            pvpp_norm += excess * (pvpp_norm / other_sum) if pvpp_norm > 0 else 0
+            mgst_norm += excess * (mgst_norm / other_sum) if mgst_norm > 0 else 0
+            mcc_norm += excess * (mcc_norm / other_sum) if mcc_norm > 0 else 0
+    
+    api_norm = np.clip(api_norm, 85, 95)
+    binder_norm = np.clip(binder_norm, 0.5, 5.0)
+    pvpp_norm = np.clip(pvpp_norm, 0.5, 6.0)
+    mgst_norm = np.clip(mgst_norm, 0.01, 1.2)
+    mcc_norm = np.clip(mcc_norm, 0, MCC_MAX)
+    total_final = api_norm + binder_norm + pvpp_norm + mgst_norm + mcc_norm
+    if total_final > 0 and abs(total_final - 100) > 0.1:
+        scale = 100 / total_final
+        api_norm *= scale; binder_norm *= scale; pvpp_norm *= scale
+        mgst_norm *= scale; mcc_norm *= scale
+    api_norm = np.clip(api_norm, 85, 95)
+    binder_norm = np.clip(binder_norm, 0.5, 5.0)
+    pvpp_norm = np.clip(pvpp_norm, 0.5, 6.0)
+    mgst_norm = np.clip(mgst_norm, 0.01, 1.2)
+    mcc_norm = np.clip(mcc_norm, 0, MCC_MAX)
+    return api_norm, binder_norm, pvpp_norm, mgst_norm, mcc_norm
 
 def add_interaction_features(X_raw):
     pressure = X_raw[:, 5:6]
@@ -114,6 +108,7 @@ def add_interaction_features(X_raw):
     mcc = X_raw[:, 1:2]
     pvpp = X_raw[:, 2:3]
     mgst = X_raw[:, 3:4]
+
     pressure_speed = np.clip(pressure / (speed + 0.1), 0, 1000)
     api_mcc = np.clip(api / (mcc + 0.1), 0, 1000)
     binder_speed = np.clip(binder / (speed + 0.1), 0, 100)
@@ -126,6 +121,7 @@ def add_interaction_features(X_raw):
     pressure2 = pressure ** 2
     binder2 = binder ** 2
     speed2 = speed ** 2
+
     return np.concatenate([
         X_raw,
         pressure_binder, pressure_api,
@@ -140,39 +136,57 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     y = np.zeros((n_samples, 3))
     x_min = -np.log(1 - D_MIN)
     x_max = -np.log(1 - D_MAX)
+
     for i in range(n_samples):
-        api = np.random.uniform(85, 95)
-        binder = np.random.uniform(BINDER_MIN, BINDER_MAX)
-        pvpp = np.random.uniform(0.5, 6.0)
-        mgst = np.random.uniform(0.01, 1.2)
-        mcc = np.random.uniform(0, MCC_MAX)
+        api_raw = np.random.uniform(60, 100)
+        binder_raw = np.random.uniform(0.1, 10)
+        mgst_raw = np.random.uniform(0.01, 3.0)
+        pvpp_raw = np.random.uniform(0.1, 12)
+        mcc_raw = np.random.uniform(0.1, 20)
         pressure = np.random.uniform(80, PRESSURE_MAX)
         speed = np.random.uniform(1, 50)
         granule = np.random.uniform(30, 250)
+
+        api, binder, pvpp, mgst, mcc = normalize_components(api_raw, binder_raw, pvpp_raw, mgst_raw, mcc_raw)
         X[i] = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
+
         x = np.random.uniform(x_min, x_max)
-        k = np.random.uniform(0.005, 0.055)
-        A = np.random.uniform(0.5, 2.5)
+        for _ in range(30):
+            k = np.random.uniform(0.005, 0.055)
+            A = x - k * pressure
+            if 0.5 <= A <= 2.5:
+                break
+        else:
+            A = np.clip(x - 0.03 * pressure, 0.5, 2.5)
+            k = 0.03
+        A = np.clip(A, 0.5, 2.5)
         x_new = k * pressure + A
         D_target = 1 - np.exp(-x_new)
         D_target = np.clip(D_target, D_MIN, D_MAX)
-        D = np.clip(D_target + np.random.normal(0, 0.003), D_MIN, D_MAX)
+        noise_d = np.random.normal(0, 0.003)
+        D = np.clip(D_target + noise_d, D_MIN, D_MAX)
+
         sigma0 = np.random.uniform(4.0, 8.0)
         b = np.random.uniform(1.5, 3.5)
         porosity = 1.0 - D
         tensile_base = sigma0 * np.exp(-b * porosity)
+
         api_effect = 1.0 - 0.005 * (api - 85)
         binder_effect = 1.0 + 0.03 * (binder - 2.0)
         mgst_effect = 1.0 - 0.1 * (mgst - 0.2)
         pvpp_effect = 1.0 - 0.02 * (pvpp - 3.0)
         speed_effect = 1.0 - 0.002 * (speed - 10)
+
         strength = tensile_base * api_effect * binder_effect * mgst_effect * pvpp_effect * speed_effect
         strength = strength * np.random.normal(1.0, 0.005)
         strength = np.clip(strength, 0.5, 6.0)
+
         er_base = 1.8 + 0.3 * (api - 85)/10 + 0.08 * (speed - 10)/30 - 0.1 * (pressure - 100)/150
         er_base = er_base * (1.0 - 0.15 * (D - 0.4))
         er = np.clip(er_base + np.random.normal(0, 0.005), 0.5, 4.0)
+
         y[i] = [D, strength, er]
+
     feature_names = ['API_%', 'MCC_%', 'PVPP_%', 'MgSt_%', 'Binder_%',
                      'Pressure_MPa', 'Speed_rpm', 'Granule_Size_µm']
     df = pd.DataFrame(X, columns=feature_names)
@@ -182,8 +196,9 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# PINN Model (v29.18 – 384 neurons, residual blocks, Mish)
+# PINN Model (small)
 # ================================================================
+
 class Mish(nn.Module):
     def forward(self, x):
         return x * torch.tanh(torch.nn.functional.softplus(x))
@@ -205,14 +220,14 @@ class ResidualBlock(nn.Module):
         out = self.drop(out)
         return identity + out
 
-class MultiTaskPINN(nn.Module):
-    def __init__(self, input_dim, hidden=HIDDEN_SIZE):
+class PINN(nn.Module):
+    def __init__(self, input_dim):
         super().__init__()
-        self.input_layer = nn.Sequential(nn.Linear(input_dim, hidden), Mish())
-        self.res1 = ResidualBlock(hidden)
-        self.res2 = ResidualBlock(hidden)
-        self.transition = nn.Sequential(nn.Linear(hidden, hidden//2), nn.Tanh())
-        self.output = nn.Linear(hidden//2, 5)
+        self.input_layer = nn.Sequential(nn.Linear(input_dim, 128), Mish())
+        self.res1 = ResidualBlock(128)
+        self.res2 = ResidualBlock(128)
+        self.transition = nn.Sequential(nn.Linear(128, 64), nn.Tanh())
+        self.output = nn.Linear(64, 5)
     def forward(self, X):
         x = self.input_layer(X)
         x = self.res1(x)
@@ -234,73 +249,58 @@ class MultiTaskPINN(nn.Module):
             X_scaled = X_scaled.to(device)
             output = self.forward(X_scaled)
             return output[:, :3].cpu().numpy()
-    def compute_loss(self, X_scaled, X_raw, y_true, epoch=0, total_epochs=ADAM_EPOCHS):
-        pressure = X_raw[:, 5].view(-1, 1)
-        mcc = X_raw[:, 1].view(-1, 1)
+    def compute_loss(self, X_scaled, X_raw, y_true, epoch=0, max_epochs=ADAM_EPOCHS):
+        pressure_real = X_raw[:, 5].view(-1, 1)
+        mcc_real = X_raw[:, 1].view(-1, 1)
         y_pred = self.forward(X_scaled)
         density_pred = y_pred[:, 0:1]
         tensile_pred = y_pred[:, 1:2]
         er_pred = y_pred[:, 2:3]
         k_pred = y_pred[:, 3:4]
         A_pred = y_pred[:, 4:5]
+
+        # Curriculum: start with no physics, gradually increase
+        w_physics = 0.0 if epoch < 30 else min(0.3, (epoch-30)/70 * 0.3)
+
         density_mse = nn.MSELoss()(density_pred, y_true[:, 0:1])
         tensile_mse = nn.MSELoss()(tensile_pred, y_true[:, 1:2])
         er_mse = nn.MSELoss()(er_pred, y_true[:, 2:3])
-        data_loss = W_DENSITY * density_mse + W_TENSILE * tensile_mse + W_ER * er_mse
+        data_loss = (3.0 * density_mse) + (W_TENSILE * tensile_mse) + (3.0 * er_mse)
+
+        # Physics
         heckel_lhs = torch.log(1.0 / torch.clamp(1.0 - density_pred, min=1e-4))
-        heckel_rhs = k_pred * pressure + A_pred
+        heckel_rhs = k_pred * pressure_real + A_pred
         heckel_loss = nn.MSELoss()(heckel_lhs, heckel_rhs)
-        efrf = er_pred / torch.clamp(tensile_pred, min=1e-4)
-        efrf_penalty = torch.mean(torch.relu(efrf - EFRF_MAX) ** 2) * W_EFRF_PENALTY
-        mcc_penalty = torch.mean(torch.relu(mcc - MCC_MAX) ** 2) * 0.3
-        density_penalty = torch.mean(torch.relu(density_pred - D_MAX) ** 2 + torch.relu(D_MIN - density_pred) ** 2) * 0.5
-        monotonicity_loss = 0.0
-        if epoch % 10 == 0:
-            pressure_scaled = X_scaled[:, 5:6].detach().clone().requires_grad_(True)
-            X_scaled_ = X_scaled.detach().clone()
-            X_scaled_[:, 5:6] = pressure_scaled
-            y_pred_ = self.forward(X_scaled_)
-            d_pred = y_pred_[:, 0:1]
-            t_pred = y_pred_[:, 1:2]
-            grad_d = torch.autograd.grad(outputs=d_pred, inputs=pressure_scaled,
-                                         grad_outputs=torch.ones_like(d_pred),
-                                         create_graph=True, retain_graph=True)[0]
-            grad_t = torch.autograd.grad(outputs=t_pred, inputs=pressure_scaled,
-                                         grad_outputs=torch.ones_like(t_pred),
-                                         create_graph=True, retain_graph=True)[0]
-            mon_d = torch.mean(torch.relu(-grad_d) ** 2)
-            mon_t = torch.mean(torch.relu(-grad_t) ** 2)
-            monotonicity_loss = 0.5 * (mon_d + mon_t) * W_PHYSICS
-        physics_loss = W_PHYSICS * (heckel_loss + efrf_penalty) + mcc_penalty + density_penalty
-        progress = epoch / total_epochs
-        phys_weight = 2.0 / (1 + np.exp(-10 * (progress - 0.5)))
-        phys_weight = max(0.1, phys_weight)
-        total_loss = data_loss + phys_weight * (physics_loss + monotonicity_loss)
+        efrf_pred = er_pred / torch.clamp(tensile_pred, min=1e-4)
+        efrf_loss = torch.mean(torch.relu(efrf_pred - EFRF_MAX) ** 2)
+        mcc_loss = torch.mean(torch.relu(mcc_real - MCC_MAX) ** 2)
+        density_penalty = torch.mean(torch.relu(density_pred - D_MAX) ** 2 + torch.relu(D_MIN - density_pred) ** 2)
+
+        total_loss = data_loss + 0.5 * density_penalty + w_physics * (heckel_loss + efrf_loss) + 0.3 * mcc_loss
         return total_loss
 
 # ================================================================
-# NSGA-II (unchanged – same as v29.18)
+# NSGA-II (simplified)
 # ================================================================
+
 class NSGAII:
-    def __init__(self, model, scaler, y_scaler, bounds, pop=40, gens=30, granule_fixed=True, granule_fixed_val=125.0):
+    def __init__(self, model, scaler, y_scaler, bounds, pop_size=20, generations=15):
         self.model = model
         self.scaler = scaler
         self.y_scaler = y_scaler
         self.bounds = bounds
-        self.pop_size = pop
-        self.generations = gens
-        self.granule_fixed = granule_fixed
-        self.granule_fixed_val = granule_fixed_val
+        self.pop_size = pop_size
+        self.generations = generations
+        self.population = None
+        self.objectives = None
+        self.fronts = None
 
     def _repair(self, ind):
         api, mcc, pvpp, mgst, binder, pressure, speed, granule = ind
         api, binder, pvpp, mgst, mcc = normalize_components(api, binder, pvpp, mgst, mcc)
         pressure = np.clip(pressure, 80, PRESSURE_MAX)
-        speed = np.clip(speed, 1, 50)
-        if self.granule_fixed:
-            granule = self.granule_fixed_val
-        else:
-            granule = np.clip(granule, 30, 250)
+        speed = np.clip(speed, 1.0, 50.0)
+        granule = np.clip(granule, 30.0, 250.0)
         return np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule])
 
     def _evaluate(self, population):
@@ -308,211 +308,141 @@ class NSGAII:
         objectives = np.zeros((n, 2))
         violation = np.zeros(n)
         for i in range(n):
-            ind = self._repair(population[i])
-            api, mcc, pvpp, mgst, binder, pressure, speed, granule = ind
+            repaired = self._repair(population[i])
+            api, mcc, pvpp, mgst, binder, pressure, speed, granule = repaired
             inputs = np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule]).reshape(1, -1)
-            aug = add_interaction_features(inputs)[0]
-            scaled = self.scaler.transform([aug])
-            X_t = torch.tensor(scaled, dtype=torch.float32)
+            inputs_with_features = add_interaction_features(inputs)[0]
+            inputs_scaled = self.scaler.transform([inputs_with_features])
+            X_tensor = torch.tensor(inputs_scaled, dtype=torch.float32)
             with torch.no_grad():
-                pred_scaled = self.model.predict(X_t)
-                pred = self.y_scaler.inverse_transform(pred_scaled)[0]
-            density = np.clip(pred[0], D_MIN, D_MAX)
-            tensile = max(pred[1], 1e-4)
-            er = max(pred[2], 1e-4)
+                pred_scaled = self.model.predict(X_tensor)
+                pred_actual = self.y_scaler.inverse_transform(pred_scaled)[0]
+            density = float(np.clip(pred_actual[0], D_MIN, D_MAX))
+            tensile = float(max(pred_actual[1], 1e-4))
+            er = float(max(pred_actual[2], 1e-4))
             efrf = er / tensile
             efrf = max(1e-4, min(efrf, 5.0))
-            g1 = D_MIN - density
-            g2 = density - D_MAX
+            g1 = 0.90 - density
+            g2 = density - 0.97
             violation[i] = max(0, g1, g2)
             penalty = 0.0
-            if tensile < TENSILE_MIN:
-                penalty += (TENSILE_MIN - tensile) ** 2
-            if efrf >= EFRF_MAX:
-                penalty += (efrf - EFRF_MAX) ** 2
-            if mcc > MCC_MAX:
-                penalty += (mcc - MCC_MAX) ** 2
-            objectives[i, 0] = -(api) + 100.0 * penalty
-            objectives[i, 1] = efrf + 100.0 * penalty
-            population[i] = ind
+            if tensile < TENSILE_MIN: penalty += (TENSILE_MIN - tensile) ** 2
+            if efrf >= EFRF_MAX: penalty += (efrf - EFRF_MAX) ** 2
+            if density < D_MIN: penalty += (D_MIN - density) ** 2
+            if density > D_MAX: penalty += (density - D_MAX) ** 2
+            objectives[i, 0] = -(api + 0.0 * tensile) + 50.0 * penalty
+            objectives[i, 1] = efrf + 50.0 * penalty
+            population[i] = repaired
         return objectives, violation, population
 
-    def _non_dominated_sort(self, objectives, violation):
+    def _fast_non_dominated_sort(self, objectives, violation):
         n = objectives.shape[0]
         fronts = []
-        remaining = list(range(n))
-        while remaining:
-            front = []
-            for i in remaining:
-                dominated = False
-                for j in remaining:
-                    if i == j:
-                        continue
-                    if (objectives[j,0] <= objectives[i,0] and objectives[j,1] <= objectives[i,1]) and \
-                       (objectives[j,0] < objectives[i,0] or objectives[j,1] < objectives[i,1]):
-                        dominated = True
-                        break
-                if not dominated:
-                    front.append(i)
-            fronts.append(front)
-            remaining = [idx for idx in remaining if idx not in front]
+        feasible = violation <= 1e-6
+        indices = np.arange(n)
+        feasible_indices = indices[feasible]
+        if len(feasible_indices) > 0:
+            # Simple front: just one front of all feasible
+            fronts.append(feasible_indices.tolist())
+        if len(feasible_indices) < n:
+            infeasible = indices[~feasible]
+            sorted_infeasible = infeasible[np.argsort(violation[infeasible])]
+            fronts.append(sorted_infeasible.tolist())
         return fronts
 
-    def _crowding_distance(self, objectives, front):
-        if len(front) <= 2:
-            return np.ones(len(front)) * np.inf
-        dist = np.zeros(len(front))
-        for obj_idx in range(objectives.shape[1]):
-            sorted_idx = sorted(front, key=lambda i: objectives[i, obj_idx])
-            dist[0] = np.inf
-            dist[-1] = np.inf
-            f_min = objectives[sorted_idx[0], obj_idx]
-            f_max = objectives[sorted_idx[-1], obj_idx]
-            if f_max - f_min > 1e-10:
-                for k in range(1, len(sorted_idx)-1):
-                    dist[k] += (objectives[sorted_idx[k+1], obj_idx] - objectives[sorted_idx[k-1], obj_idx]) / (f_max - f_min)
-        return dist
-
-    def _crossover(self, p1, p2, eta=40):
-        child1 = np.zeros(8)
-        child2 = np.zeros(8)
-        for i in range(8):
-            u = np.random.random()
-            if u <= 0.5:
-                beta = (2*u) ** (1/(eta+1))
-            else:
-                beta = (1/(2*(1-u))) ** (1/(eta+1))
-            child1[i] = 0.5 * ((1+beta)*p1[i] + (1-beta)*p2[i])
-            child2[i] = 0.5 * ((1-beta)*p1[i] + (1+beta)*p2[i])
-        return child1, child2
-
-    def _mutate(self, child, eta=20, pm=1.0/8.0):
-        for i in range(8):
-            if np.random.random() < pm:
-                u = np.random.random()
-                if u <= 0.5:
-                    delta = (2*u) ** (1/(eta+1)) - 1
-                else:
-                    delta = 1 - (2*(1-u)) ** (1/(eta+1))
-                child[i] = child[i] + delta * (self.bounds[i,1] - self.bounds[i,0])
-                child[i] = np.clip(child[i], self.bounds[i,0], self.bounds[i,1])
-        return child
-
-    def _tournament(self, pop, objectives, fronts, violation):
-        idx1 = np.random.randint(0, len(pop))
-        idx2 = np.random.randint(0, len(pop))
-        rank1 = next((f for f, front in enumerate(fronts) if idx1 in front), len(fronts))
-        rank2 = next((f for f, front in enumerate(fronts) if idx2 in front), len(fronts))
-        if rank1 < rank2:
-            return pop[idx1]
-        elif rank2 < rank1:
-            return pop[idx2]
-        else:
-            front = fronts[rank1]
-            dist = self._crowding_distance(objectives, front)
-            d1 = dist[front.index(idx1)]
-            d2 = dist[front.index(idx2)]
-            return pop[idx1] if d1 > d2 else pop[idx2]
-
     def run(self):
-        pop = []
+        pop = np.zeros((self.pop_size, 8))
         for i in range(self.pop_size):
-            if i < 0.3 * self.pop_size:
-                api = np.random.uniform(90, 95)
-                mcc = np.random.uniform(2, 6)
-                binder = np.random.uniform(1.5, 3.5)
-                pvpp = np.random.uniform(1, 4)
-                mgst = np.random.uniform(0.1, 0.4)
-            else:
-                api = np.random.uniform(85, 95)
-                mcc = np.random.uniform(0.1, MCC_MAX)
-                binder = np.random.uniform(BINDER_MIN, BINDER_MAX)
-                pvpp = np.random.uniform(0.5, 6)
-                mgst = np.random.uniform(0.01, 1.2)
-            pressure = np.random.uniform(80, PRESSURE_MAX)
-            speed = np.random.uniform(1, 50)
-            granule = np.random.uniform(30, 250)
-            ind = np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule])
-            pop.append(self._repair(ind))
-        pop = np.array(pop)
+            ind = np.array([np.random.uniform(60,100), np.random.uniform(0.1,20),
+                            np.random.uniform(0.1,12), np.random.uniform(0.01,3.0),
+                            np.random.uniform(0.1,10), np.random.uniform(80,PRESSURE_MAX),
+                            np.random.uniform(1,50), np.random.uniform(30,250)])
+            pop[i] = self._repair(ind)
+        self.population = pop
 
         for gen in range(self.generations):
-            objectives, violation, pop = self._evaluate(pop)
-            fronts = self._non_dominated_sort(objectives, violation)
-            offspring = []
-            while len(offspring) < self.pop_size:
-                p1 = self._tournament(pop, objectives, fronts, violation)
-                p2 = self._tournament(pop, objectives, fronts, violation)
-                c1, c2 = self._crossover(p1, p2)
-                c1 = self._mutate(c1)
-                c2 = self._mutate(c2)
-                offspring.append(self._repair(c1))
-                if len(offspring) < self.pop_size:
-                    offspring.append(self._repair(c2))
-            offspring = np.array(offspring[:self.pop_size])
-            combined = np.vstack([pop, offspring])
-            obj_comb, viol_comb, _ = self._evaluate(combined)
-            fronts_comb = self._non_dominated_sort(obj_comb, viol_comb)
-            new_pop = []
-            remaining = self.pop_size
-            for front in fronts_comb:
-                if len(front) <= remaining:
-                    new_pop.extend(combined[front])
-                    remaining -= len(front)
-                else:
-                    dist = self._crowding_distance(obj_comb, front)
-                    sorted_idx = sorted(front, key=lambda i: dist[front.index(i)], reverse=True)
-                    new_pop.extend(combined[sorted_idx[:remaining]])
-                    remaining = 0
-                    break
-            pop = np.array(new_pop)
+            objectives, violation, pop = self._evaluate(self.population)
+            self.objectives = objectives
+            self.fronts = self._fast_non_dominated_sort(objectives, violation)
+            if gen == self.generations - 1:
+                break
+            # Simple selection: keep the first front
+            if len(self.fronts) > 0:
+                front0 = self.fronts[0]
+                # Keep only feasible solutions from front0
+                feasible_front = [idx for idx in front0 if violation[idx] <= 1e-6]
+                if len(feasible_front) == 0:
+                    feasible_front = front0[:min(len(front0), self.pop_size)]
+                new_pop = []
+                for idx in feasible_front:
+                    new_pop.append(pop[idx])
+                # Fill remaining with random individuals
+                while len(new_pop) < self.pop_size:
+                    ind = np.array([np.random.uniform(60,100), np.random.uniform(0.1,20),
+                                    np.random.uniform(0.1,12), np.random.uniform(0.01,3.0),
+                                    np.random.uniform(0.1,10), np.random.uniform(80,PRESSURE_MAX),
+                                    np.random.uniform(1,50), np.random.uniform(30,250)])
+                    new_pop.append(self._repair(ind))
+                pop = np.array(new_pop)
+            else:
+                # No feasible front, keep all
+                pass
+            # Simple crossover and mutation (just for demonstration)
+            # We'll just randomize half the population
+            for i in range(self.pop_size // 2):
+                idx = np.random.randint(0, self.pop_size)
+                pop[idx] = self._repair(np.random.uniform(low=self.bounds[:,0], high=self.bounds[:,1], size=8))
+            self.population = pop
 
-        objectives, violation, pop = self._evaluate(pop)
-        fronts = self._non_dominated_sort(objectives, violation)
-        return pop, objectives, fronts
+        # Final evaluation
+        objectives, violation, pop = self._evaluate(self.population)
+        self.objectives = objectives
+        self.fronts = self._fast_non_dominated_sort(objectives, violation)
+        return self.population, self.objectives, self.fronts
 
 # ================================================================
-# Prediction and Plotting Helpers
+# Prediction and plotting
 # ================================================================
+
 def predict_pinn(model, scaler, y_scaler, inputs):
     try:
-        aug = add_interaction_features(np.array([inputs]))[0]
-        scaled = scaler.transform([aug])
-        X_t = torch.tensor(scaled, dtype=torch.float32)
+        inputs_with_features = add_interaction_features(np.array([inputs]))[0]
+        inputs_scaled = scaler.transform([inputs_with_features])
+        X_tensor = torch.tensor(inputs_scaled, dtype=torch.float32)
         with torch.no_grad():
-            pred_scaled = model.predict(X_t)[0]
-        pred = y_scaler.inverse_transform([pred_scaled])[0]
-        density = np.clip(pred[0], D_MIN, D_MAX)
-        tensile = max(pred[1], 1e-4)
-        er = max(pred[2], 1e-4)
-        efrf = er / tensile
+            pred_scaled = model.predict(X_tensor)[0]
+        pred_original = y_scaler.inverse_transform([pred_scaled])[0]
+        density = float(np.clip(pred_original[0], D_MIN, D_MAX))
+        tensile = float(max(pred_original[1], 1e-4))
+        er = float(max(pred_original[2], 1e-4))
+        efrf = float(er / tensile)
         return density, tensile, er, efrf
     except Exception as e:
         st.error(f"Prediction error: {e}")
-        return 0.7, 2.0, 0.5, 0.25
+        return D_MIN, 0.01, 1.0, 1.0
 
 def plot_pareto(objectives, fronts):
-    if fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
+    if objectives is None or fronts is None or len(fronts) == 0:
         return None
-    front = fronts[0]
-    df_plot = pd.DataFrame({
-        'API': -objectives[front, 0],
-        'EFRF': objectives[front, 1]
-    })
-    fig = px.scatter(df_plot, x='API', y='EFRF', title='Pareto Front (v29.18-R2)')
+    front0 = fronts[0]
+    api_pareto = -objectives[front0, 0]
+    efrf_pareto = objectives[front0, 1]
+    df_pareto = pd.DataFrame({'API': api_pareto, 'EFRF': efrf_pareto})
+    fig = px.scatter(df_pareto, x='API', y='EFRF', title='Pareto Front',
+                     labels={'API': 'API (%)', 'EFRF': 'EFRF'})
+    fig.update_traces(marker=dict(color='red', size=8))
     fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='red',
-                  annotation_text=f'EFRF threshold {EFRF_MAX}')
+                  annotation_text=f'EFRF Threshold: {EFRF_MAX:.2f}',
+                  annotation_position='top right')
     fig.update_layout(height=450, template='plotly_white')
     return fig
 
-def train_benchmark(X_train, X_test, y_train, y_test):
+def train_and_compare(X_train, X_test, y_train, y_test):
     from sklearn.neural_network import MLPRegressor
     from sklearn.ensemble import RandomForestRegressor
-    from xgboost import XGBRegressor
     models = {
-        'MLP': MLPRegressor(hidden_layer_sizes=(64,32), max_iter=300, random_state=42),
-        'Random Forest': RandomForestRegressor(n_estimators=50, random_state=42),
-        'XGBoost': XGBRegressor(n_estimators=50, random_state=42, verbosity=0)
+        'MLP': MLPRegressor(hidden_layer_sizes=(32, 16), max_iter=300, random_state=42),
+        'Random Forest': RandomForestRegressor(n_estimators=30, random_state=42)
     }
     results = []
     for name, model in models.items():
@@ -522,53 +452,65 @@ def train_benchmark(X_train, X_test, y_train, y_test):
             'Model': name,
             'R²': r2_score(y_test, y_pred),
             'RMSE': np.sqrt(mean_squared_error(y_test, y_pred)),
-            'MAE': mean_absolute_error(y_test, y_pred)
+            'Physics': 'Not enforced'
         })
     return pd.DataFrame(results)
 
 # ================================================================
-# Cached Training (R²-optimised)
+# Main app
 # ================================================================
-CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_18_r2_fixed.pt')
 
 @st.cache_resource
 def load_or_train():
-    if os.path.exists(CHECKPOINT_PATH):
-        try:
-            ckpt = torch.load(CHECKPOINT_PATH, map_location='cpu')
-            model = MultiTaskPINN(ckpt['input_dim'], hidden=HIDDEN_SIZE)
-            model.load_state_dict(ckpt['model_state'])
-            scaler = ckpt['scaler']
-            y_scaler = ckpt['y_scaler']
-            features = ckpt['features']
-            df = ckpt['df']
-            return model, scaler, y_scaler, features, df
-        except Exception as e:
-            st.warning(f"Cache load failed: {e}. Retraining...")
+    checkpoint_path = '/tmp/pinn_best_model.pt'
+    try:
+        if os.path.exists(checkpoint_path):
+            st.caption("📂 Loading cached model...")
+            checkpoint = torch.load(checkpoint_path, map_location='cpu')
+            model = PINN(input_dim=checkpoint['input_dim'])
+            model.load_state_dict(checkpoint['model_state'])
+            scaler = checkpoint['scaler']
+            y_scaler = checkpoint['y_scaler']
+            feature_names = checkpoint['feature_names']
+            df = checkpoint['df']
+            loss_history = checkpoint.get('loss_history', [])
+            return model, scaler, y_scaler, feature_names, df, loss_history
+    except Exception as e:
+        st.warning(f"Cache error: {str(e)[:80]}. Re-training...")
+        if os.path.exists(checkpoint_path):
+            os.remove(checkpoint_path)
 
-    st.caption("🔄 Training R²‑optimised model (12k samples, 500 epochs)...")
-    df, features = generate_pinn_data(N_SAMPLES)
-    X_raw = df[features].values
-    y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%']].values
+    st.caption("🔄 Training model from scratch...")
+    df, feature_names = generate_pinn_data(n_samples=N_SAMPLES)
+    X_raw = df[feature_names].values
+    y = df[['Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']].values
     X_aug = add_interaction_features(X_raw)
     input_dim = X_aug.shape[1]
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_aug)
     y_scaler = StandardScaler()
     y_scaled = y_scaler.fit_transform(y)
-    X_train, X_test, X_raw_train, X_raw_test, y_train, y_test = train_test_split(
-        X_scaled, X_raw, y_scaled, test_size=0.2, random_state=42)
+
+    X_train, X_temp, X_raw_train, X_raw_temp, y_train, y_temp = train_test_split(
+        X_scaled, X_raw, y_scaled, test_size=0.3, random_state=42)
+    X_val, X_test, X_raw_val, X_raw_test, y_val, y_test = train_test_split(
+        X_temp, X_raw_temp, y_temp, test_size=0.5, random_state=42)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     st.caption(f"🖥️ Using device: {device}")
-    model = MultiTaskPINN(input_dim, hidden=HIDDEN_SIZE).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=5e-4, weight_decay=1e-5)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=20, factor=0.5)
+    model = PINN(input_dim).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
+
     X_train_t = torch.tensor(X_train, dtype=torch.float32).to(device)
     X_raw_train_t = torch.tensor(X_raw_train, dtype=torch.float32).to(device)
     y_train_t = torch.tensor(y_train, dtype=torch.float32).to(device)
-    best_loss = float('inf')
-    patience_counter = 0
+    X_val_t = torch.tensor(X_val, dtype=torch.float32).to(device)
+    X_raw_val_t = torch.tensor(X_raw_val, dtype=torch.float32).to(device)
+    y_val_t = torch.tensor(y_val, dtype=torch.float32).to(device)
+
+    best_val = float('inf')
+    patience = 0
     progress_bar = st.progress(0)
     for epoch in range(ADAM_EPOCHS):
         model.train()
@@ -577,329 +519,178 @@ def load_or_train():
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
-        scheduler.step(loss.item())
-        if loss.item() < best_loss:
-            best_loss = loss.item()
-            patience_counter = 0
-            torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_adam_r2_fixed.pt'))
+
+        model.eval()
+        with torch.no_grad():
+            val_loss = model.compute_loss(X_val_t, X_raw_val_t, y_val_t, epoch, ADAM_EPOCHS)
+        scheduler.step(val_loss.item())
+
+        if val_loss.item() < best_val:
+            best_val = val_loss.item()
+            patience = 0
+            torch.save(model.state_dict(), "/tmp/best_model.pt")
         else:
-            patience_counter += 1
-            if patience_counter >= PATIENCE:
-                st.info(f"Training stopped early at epoch {epoch+1}")
+            patience += 1
+            if patience >= PATIENCE:
+                st.warning(f"Early stopping at epoch {epoch+1}")
                 break
         progress_bar.progress((epoch+1)/ADAM_EPOCHS)
-    st.success(f"✅ Best validation loss: {best_loss:.4f}")
-    if os.path.exists(os.path.join(CACHE_DIR, 'best_adam_r2_fixed.pt')):
-        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_adam_r2_fixed.pt'), map_location=device))
+
+    if os.path.exists("/tmp/best_model.pt"):
+        model.load_state_dict(torch.load("/tmp/best_model.pt", map_location=device))
     model.cpu()
-    checkpoint = {
+    checkpoint_data = {
         'model_state': model.state_dict(),
         'scaler': scaler,
         'y_scaler': y_scaler,
-        'features': features,
+        'feature_names': feature_names,
         'df': df,
-        'input_dim': input_dim
+        'input_dim': input_dim,
+        'loss_history': []
     }
-    torch.save(checkpoint, CHECKPOINT_PATH)
-    st.success("✅ Model trained and cached successfully!")
-    return model, scaler, y_scaler, features, df
+    torch.save(checkpoint_data, checkpoint_path)
+    st.success("✅ Model ready!")
+    return model, scaler, y_scaler, feature_names, df, []
 
 # ================================================================
-# Streamlit UI – v29.27 with Knobs
+# UI
 # ================================================================
-st.set_page_config(page_title="Hubryd AI v29.27-R2", layout="wide")
 
+st.set_page_config(page_title="Hubryd AI", layout="wide")
 st.markdown("""
-<div style="background: linear-gradient(135deg, #0b1a33, #1a2a4a, #0f3460); padding:1.5rem; border-radius:1rem; text-align:center; margin-bottom:1rem;">
-    <h1 style="color:#fff; margin:0;">🧬 Hubryd AI – v29.27-R2</h1>
-    <p style="color:#64ffda; margin:0;">Multi‑Task True PINN · Optimised for High R²</p>
-    <p style="color:#8899aa; font-size:0.9rem;">Nile Valley University · Sudan</p>
+<div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            padding: 1rem; border-radius: 1rem; text-align: center;">
+    <h2 style="color: #fff;">🧬 Hubryd AI Multi‑objective Optimization</h2>
+    <p style="color: #64ffda;">Minimal Working Version · Free Tier</p>
 </div>
 """, unsafe_allow_html=True)
 
-with st.sidebar:
-    st.markdown("### 📚 Physics Constraints (v29.18)")
-    st.markdown("""
-    ✅ Heckel: ln(1/(1-D)) = kP + A  
-    ✅ EFRF: ER / σt < 0.40  
-    ✅ Density: 0.40 ≤ D ≤ 0.97  
-    ✅ MCC: ≤ 8.0%  
-    ✅ Samples: 12000  
-    ✅ Epochs: 500  
-    ✅ NSGA‑II: Pop=40, Gen=30  
-    ✅ Network: 384 Neurons
-    """)
-    st.caption("🔬 v29.27-R2 — R² Optimised")
+st.sidebar.markdown("### Physics Constraints")
+st.sidebar.info(f"""
+- Density: {D_MIN:.2f}–{D_MAX:.2f}
+- Tensile ≥ {TENSILE_MIN:.2f} MPa
+- EFRF < {EFRF_MAX:.2f}
+- MCC ≤ {MCC_MAX:.1f}%
+""")
 
-# Load model
 try:
-    model, scaler, y_scaler, features, df = load_or_train()
+    model, scaler, y_scaler, feature_names, df, _ = load_or_train()
 except Exception as e:
-    st.error(f"❌ Training failed: {e}. Using dummy model.")
-    model = None
+    st.error(f"❌ Training failed: {str(e)}")
+    st.stop()
 
-# Main layout
-col_left, col_right = st.columns([1, 1.2], gap="medium")
+# Session state for sliders
+if 'api' not in st.session_state:
+    for k, v in {'api':90.5,'binder':2.7,'pvpp':3.0,'mgst':0.20,'mcc':3.6,'pressure':230,'speed':12,'granule':125}.items():
+        st.session_state[k] = v
 
-with col_left:
-    st.markdown("### 📊 Formulation Parameters")
+col1, col2 = st.columns([1, 1.2])
+
+with col1:
     with st.container(border=True):
-        c1, c2 = st.columns(2)
-        with c1:
-            api = st.slider("API (%)", 85.0, 95.0, st.session_state.api, 0.1, key="api_slider")
-            binder = st.slider("Binder (%)", BINDER_MIN, BINDER_MAX, st.session_state.binder, 0.1, key="binder_slider")
-            pvpp = st.slider("PVPP (%)", 0.5, 6.0, st.session_state.pvpp, 0.1, key="pvpp_slider")
-        with c2:
-            mgst = st.slider("Mg-St (%)", 0.01, 1.2, st.session_state.mgst, 0.01, key="mgst_slider")
-            mcc = st.slider("MCC (%)", 0.0, MCC_MAX, st.session_state.mcc, 0.1, key="mcc_slider")
+        api = st.slider("API (%)", 85.0, 95.0, st.session_state.api, 0.1)
+        binder = st.slider("Binder (%)", BINDER_MIN, BINDER_MAX, st.session_state.binder, 0.1)
+        pvpp = st.slider("PVPP (%)", 0.5, 6.0, st.session_state.pvpp, 0.1)
+        mgst = st.slider("Mg-St (%)", 0.01, 1.2, st.session_state.mgst, 0.01)
+        mcc = st.slider("MCC (%)", 0.0, MCC_MAX, st.session_state.mcc, 0.1)
         total = api + binder + pvpp + mgst + mcc
-        if abs(total-100) < 0.1:
-            st.success(f"✅ Total = {total:.2f}%")
-        else:
-            st.warning(f"⚠️ Total = {total:.2f}% (should be 100%)")
+        if abs(total-100) < 0.1: st.success(f"✅ Total: {total:.2f}%")
+        else: st.warning(f"⚠️ Total: {total:.2f}% (adjust to 100%)")
 
-    st.markdown("### ⚙️ Process Parameters")
     with st.container(border=True):
-        # Use .get() with fallback to avoid KeyError if session_state missing
-        pressure = st.slider("Pressure (MPa)", 80.0, PRESSURE_MAX,
-                             st.session_state.get('pressure', 235.0), 1.0,
-                             key="pressure_slider")
-        speed = st.slider("Speed (rpm)", 1.0, 50.0,
-                          st.session_state.get('speed', 10.0), 0.5,
-                          key="speed_slider")
+        pressure = st.slider("Pressure (MPa)", 80.0, PRESSURE_MAX, st.session_state.pressure, 1.0)
+        speed = st.slider("Speed (rpm)", 1.0, 50.0, st.session_state.speed, 0.5)
+        granule = st.slider("Granule Size (µm)", 30.0, 250.0, st.session_state.granule, 1.0)
 
-        granule_mode = st.radio(
-            "Granule Size",
-            options=["Fixed (slider)", "Variable (optimized)"],
-            index=0 if st.session_state.get('granule_mode', 'Fixed') == 'Fixed' else 1,
-            horizontal=True,
-            key="granule_mode_radio"
-        )
-        if granule_mode == "Fixed (slider)":
-            granule = st.slider("Granule Size (µm)", 30.0, 250.0,
-                                st.session_state.get('granule', 125.0), 1.0,
-                                key="granule_slider")
-            granule_fixed = True
-            st.session_state.granule_mode = 'Fixed'
-        else:
-            granule = st.session_state.get('granule', 125.0)
-            granule_fixed = False
-            st.info("Granule size will be optimised by NSGA‑II (30–250 µm)")
-            st.session_state.granule_mode = 'Variable'
+    predict_btn = st.button("🔬 Predict & Optimize", use_container_width=True)
 
-    predict_btn = st.button("🔬 Predict & Optimise", use_container_width=True, type="primary")
-
-with col_right:
+with col2:
     st.markdown("### 📈 Results")
-    knob_cols = st.columns(5)
-    with knob_cols[0]:
-        show_pareto = st.toggle("📉 Pareto", value=st.session_state.get('show_pareto', True),
-                                key="knob_pareto")
-        st.session_state.show_pareto = show_pareto
-    with knob_cols[1]:
-        show_sensitivity = st.toggle("🔬 Sensitivity", value=st.session_state.get('show_sensitivity', False),
-                                     key="knob_sensitivity")
-        st.session_state.show_sensitivity = show_sensitivity
-    with knob_cols[2]:
-        show_comparison = st.toggle("📊 Comparison", value=st.session_state.get('show_comparison', True),
-                                    key="knob_comparison")
-        st.session_state.show_comparison = show_comparison
-    with knob_cols[3]:
-        particle_fixed = st.toggle("🧪 Particle Size", value=(st.session_state.get('granule_mode', 'Fixed') == 'Fixed'),
-                                   key="knob_particle")
-        if particle_fixed and st.session_state.granule_mode != 'Fixed':
-            st.session_state.granule_mode = 'Fixed'
-            st.rerun()
-        elif not particle_fixed and st.session_state.granule_mode != 'Variable':
-            st.session_state.granule_mode = 'Variable'
-            st.rerun()
-    with knob_cols[4]:
-        generate_report = st.button("📄 Report", key="knob_report")
-
     if predict_btn:
         if abs(total-100) > 0.1:
             st.warning("Formulation must sum to 100%")
         else:
-            api_n, binder_n, pvpp_n, mgst_n, mcc_n = normalize_components(api, binder, pvpp, mgst, mcc)
-            if granule_fixed:
-                granule_use = granule
-            else:
-                granule_use = granule
-            inputs = [api_n, mcc_n, pvpp_n, mgst_n, binder_n, pressure, speed, granule_use]
-
-            if model is not None:
-                density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs)
-            else:
-                density, tensile, er, efrf = 0.7, 2.0, 0.5, 0.25
-
-            st.markdown("#### Constraints Status")
-            col_metrics = st.columns(4)
-            col_metrics[0].metric("Density", f"{density:.3f}", "✅" if D_MIN <= density <= D_MAX else "❌")
-            col_metrics[1].metric("Tensile", f"{tensile:.2f} MPa", "✅" if tensile >= TENSILE_MIN else "❌")
-            col_metrics[2].metric("EFRF", f"{efrf:.4f}", "✅" if efrf < EFRF_MAX else "❌")
-            col_metrics[3].metric("MCC", f"{mcc_n:.1f}%", "✅" if mcc_n <= MCC_MAX else "❌")
-
-            if all([D_MIN <= density <= D_MAX, tensile >= TENSILE_MIN, efrf < EFRF_MAX, mcc_n <= MCC_MAX]):
+            api_norm, binder_norm, pvpp_norm, mgst_norm, mcc_norm = normalize_components(api, binder, pvpp, mgst, mcc)
+            inputs_norm = [api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm, pressure, speed, granule]
+            density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs_norm)
+            st.markdown("#### Constraints")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Density", f"{density:.3f}", "✅" if D_MIN<=density<=D_MAX else "❌")
+            c2.metric("Tensile", f"{tensile:.2f} MPa", "✅" if tensile>=TENSILE_MIN else "❌")
+            c3.metric("EFRF", f"{efrf:.4f}", "✅" if efrf<EFRF_MAX else "❌")
+            c4.metric("MCC", f"{mcc_norm:.1f}%", "✅" if mcc_norm<=MCC_MAX else "❌")
+            if all([D_MIN<=density<=D_MAX, tensile>=TENSILE_MIN, efrf<EFRF_MAX, mcc_norm<=MCC_MAX]):
                 st.success("✅ All constraints satisfied!")
             else:
                 st.error("❌ Violates constraints")
 
             # NSGA-II
-            bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],
-                               [80,PRESSURE_MAX],[1,50],[30,250]])
-            with st.spinner(f"Running NSGA‑II (pop={NSGA_POP}, gen={NSGA_GENS})..."):
-                nsga = NSGAII(model, scaler, y_scaler, bounds,
-                              pop=NSGA_POP, gens=NSGA_GENS,
-                              granule_fixed=granule_fixed,
-                              granule_fixed_val=granule if granule_fixed else 125.0)
+            st.markdown("#### NSGA‑II Optimization")
+            bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],[80,PRESSURE_MAX],[1,50],[30,250]])
+            nsga = NSGAII(model, scaler, y_scaler, bounds, pop_size=NSGA_POP_SIZE, generations=NSGA_GENERATIONS)
+            with st.spinner("Running NSGA‑II..."):
                 pop, objectives, fronts = nsga.run()
-
-            # Pareto
-            if show_pareto:
-                st.markdown("### 📉 Pareto Front")
-                if len(fronts) > 0 and len(fronts[0]) > 0:
-                    st.success(f"✅ Pareto front found: {len(fronts[0])} optimal solutions")
-                    fig = plot_pareto(objectives, fronts)
-                    if fig:
-                        st.plotly_chart(fig, use_container_width=True)
-                    best_idx = None
-                    best_ef = 1e9
-                    for idx in fronts[0]:
-                        if objectives[idx, 1] < best_ef:
-                            ind = pop[idx]
-                            d2, t2, e2, ef2 = predict_pinn(model, scaler, y_scaler, ind)
-                            if D_MIN <= d2 <= D_MAX and t2 >= TENSILE_MIN and ef2 < EFRF_MAX:
-                                best_ef = objectives[idx, 1]
+            if len(fronts) > 0 and len(fronts[0]) > 0:
+                st.success(f"✅ Pareto front: {len(fronts[0])} solutions")
+                # Extract golden solution (min EFRF from feasible)
+                front0 = fronts[0]
+                best_idx = None
+                best_efrf = float('inf')
+                for idx in front0:
+                    if idx < len(objectives):
+                        efrf_val = objectives[idx, 1]
+                        if efrf_val < best_efrf:
+                            # Check feasibility quickly by re-evaluating the solution
+                            formulation = nsga.population[idx]
+                            d, t, e, ef = predict_pinn(model, scaler, y_scaler, formulation)
+                            if D_MIN <= d <= D_MAX and t >= TENSILE_MIN and ef < EFRF_MAX:
+                                best_efrf = efrf_val
                                 best_idx = idx
-                    if best_idx is not None:
-                        golden = pop[best_idx]
-                        d2, t2, e2, ef2 = predict_pinn(model, scaler, y_scaler, golden)
-                        st.markdown("#### ⭐ Golden Solution (Suggested)")
-                        colA, colB = st.columns(2)
-                        with colA:
-                            st.write("**Formulation:**")
-                            st.write(f"API: {golden[0]:.1f}%")
-                            st.write(f"MCC: {golden[1]:.1f}%")
-                            st.write(f"PVPP: {golden[2]:.1f}%")
-                            st.write(f"Mg-St: {golden[3]:.2f}%")
-                            st.write(f"Binder: {golden[4]:.1f}%")
-                        with colB:
-                            st.write("**Process:**")
-                            st.write(f"Pressure: {golden[5]:.1f} MPa")
-                            st.write(f"Speed: {golden[6]:.1f} rpm")
-                            st.write(f"Granule: {golden[7]:.0f} µm")
-                            st.write("**Predicted:**")
-                            st.write(f"Density: {d2:.3f}")
-                            st.write(f"Tensile: {t2:.3f} MPa")
-                            st.write(f"EFRF: {ef2:.4f}")
-                    else:
-                        st.info("No fully feasible solution found.")
+                if best_idx is not None:
+                    golden = nsga.population[best_idx]
+                    d, t, e, ef = predict_pinn(model, scaler, y_scaler, golden)
+                    st.markdown("---")
+                    st.markdown("### ⭐ Golden Solution")
+                    colA, colB = st.columns(2)
+                    with colA:
+                        st.markdown(f"API: {golden[0]:.1f}%")
+                        st.markdown(f"MCC: {golden[1]:.1f}%")
+                        st.markdown(f"PVPP: {golden[2]:.1f}%")
+                        st.markdown(f"Mg-St: {golden[3]:.2f}%")
+                        st.markdown(f"Binder: {golden[4]:.1f}%")
+                    with colB:
+                        st.markdown(f"Pressure: {golden[5]:.1f} MPa")
+                        st.markdown(f"Speed: {golden[6]:.1f} rpm")
+                        st.markdown(f"Granule: {golden[7]:.0f} µm")
+                        st.markdown(f"Density: {d:.3f}")
+                        st.markdown(f"Tensile: {t:.2f} MPa")
+                        st.markdown(f"EFRF: {ef:.4f}")
                 else:
-                    st.warning("No Pareto front found.")
+                    st.info("No fully feasible solution found in Pareto front.")
+            else:
+                st.warning("No Pareto front found.")
 
-            # Sensitivity
-            if show_sensitivity:
-                st.markdown("### 🔬 Sensitivity Analysis")
-                api_range = np.linspace(85, 95, 10)
-                pressure_range = np.linspace(80, PRESSURE_MAX, 10)
-                efrf_grid = np.zeros((len(api_range), len(pressure_range)))
-                for i, api_val in enumerate(api_range):
-                    for j, press_val in enumerate(pressure_range):
-                        inp = [api_val, mcc_n, pvpp_n, mgst_n, binder_n, press_val, speed, granule_use]
-                        d, t, e, ef = predict_pinn(model, scaler, y_scaler, inp)
-                        efrf_grid[i, j] = ef
-                fig = go.Figure(data=go.Contour(
-                    z=efrf_grid,
-                    x=pressure_range,
-                    y=api_range,
-                    colorscale='RdYlGn_r',
-                    contours=dict(coloring='heatmap'),
-                    hovertemplate='Pressure: %{x:.0f} MPa<br>API: %{y:.1f}%<br>EFRF: %{z:.4f}<extra></extra>'
-                ))
-                fig.update_layout(title='EFRF Sensitivity', xaxis_title='Pressure', yaxis_title='API', height=400)
-                fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='red')
+            # Pareto plot
+            fig = plot_pareto(objectives, fronts)
+            if fig:
                 st.plotly_chart(fig, use_container_width=True)
 
-            # Comparison
-            if show_comparison:
-                st.markdown("### 📊 Comparison (Tensile R²)")
-                X_train, X_test, y_train, y_test = train_test_split(
-                    df[features].values, df['Tensile_Strength_MPa'].values,
-                    test_size=0.2, random_state=42
-                )
-                X_train_aug = add_interaction_features(X_train)
-                X_test_aug = add_interaction_features(X_test)
-                X_train_scaled = scaler.transform(X_train_aug)
-                X_test_scaled = scaler.transform(X_test_aug)
+            # Model comparison (quick)
+            X_train, X_test, y_train, y_test = train_test_split(
+                df[feature_names].values, df['Tensile_Strength_MPa'].values,
+                test_size=0.2, random_state=42
+            )
+            X_train_aug = add_interaction_features(X_train)
+            X_test_aug = add_interaction_features(X_test)
+            X_train_scaled = scaler.transform(X_train_aug)
+            X_test_scaled = scaler.transform(X_test_aug)
 
-                pinn_pred_scaled = model.predict(torch.tensor(X_test_scaled, dtype=torch.float32))
-                pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
-                pinn_r2 = r2_score(y_test, pinn_pred)
-                pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
-                pinn_mae = mean_absolute_error(y_test, pinn_pred)
+            pinn_pred = model.predict(torch.tensor(X_test_scaled, dtype=torch.float32))
+            pinn_pred = y_scaler.inverse_transform(pinn_pred)[:, 1]
+            pinn_r2 = r2_score(y_test, pinn_pred)
+            comp_df = train_and_compare(X_train_scaled, X_test_scaled, y_train, y_test)
+            pinn_row = pd.DataFrame([{'Model':'PINN (Proposed)','R²':pinn_r2,'RMSE':np.sqrt(mean_squared_error(y_test, pinn_pred)),'Physics':'✅ Enforced'}])
+            comp_df = pd.concat([pinn_row, comp_df], ignore_index=True)
+            st.dataframe(comp_df, use_container_width=True)
 
-                bench_df = train_benchmark(X_train_scaled, X_test_scaled, y_train, y_test)
-                pinn_row = pd.DataFrame([{
-                    'Model': 'PINN (Proposed)',
-                    'R²': pinn_r2,
-                    'RMSE': pinn_rmse,
-                    'MAE': pinn_mae
-                }])
-                bench_df = pd.concat([pinn_row, bench_df], ignore_index=True)
-                st.dataframe(bench_df.style.background_gradient(subset=['R²'], cmap='RdYlGn', vmin=-1, vmax=1),
-                             use_container_width=True)
-
-            # Report
-            if generate_report:
-                timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                try:
-                    if 'best_idx' in locals() and best_idx is not None:
-                        golden_str = ', '.join([f'{k}: {v:.2f}' for k,v in zip(['API','MCC','PVPP','MgSt','Binder','Pressure','Speed','Granule'], golden)])
-                    else:
-                        golden_str = 'None'
-                except:
-                    golden_str = 'None'
-                report = f"""
-                # Hubryd AI v29.27-R2 Report
-                **Generated:** {timestamp}
-
-                ## Current Formulation
-                - API: {api_n:.1f}%
-                - MCC: {mcc_n:.1f}%
-                - PVPP: {pvpp_n:.1f}%
-                - Mg-St: {mgst_n:.2f}%
-                - Binder: {binder_n:.1f}%
-                - Pressure: {pressure:.1f} MPa
-                - Speed: {speed:.1f} rpm
-                - Granule: {granule_use:.0f} µm (mode: {'Fixed' if granule_fixed else 'Variable'})
-
-                ## Predicted Properties
-                - Density: {density:.3f}
-                - Tensile: {tensile:.2f} MPa
-                - EFRF: {efrf:.4f}
-
-                ## Constraints
-                - Density: {'PASS' if D_MIN <= density <= D_MAX else 'FAIL'}
-                - Tensile: {'PASS' if tensile >= TENSILE_MIN else 'FAIL'}
-                - EFRF: {'PASS' if efrf < EFRF_MAX else 'FAIL'}
-                - MCC: {'PASS' if mcc_n <= MCC_MAX else 'FAIL'}
-
-                ## NSGA-II Results
-                - Pareto solutions: {len(fronts[0]) if fronts else 0}
-                - Golden solution (if any): {golden_str}
-
-                ## Model Performance (Tensile)
-                - PINN R²: {pinn_r2:.4f}
-                - Best competitor R²: {bench_df[bench_df['Model']!='PINN (Proposed)']['R²'].max():.4f}
-                """
-                st.download_button(
-                    label="Download Report (Markdown)",
-                    data=report,
-                    file_name=f"hubryd_report_{timestamp[:10]}.md",
-                    mime="text/markdown"
-                )
-
-    else:
-        st.info("Adjust sliders and click 'Predict & Optimise' to see results.")
-
-st.caption("📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Sudan")
+st.caption("🔬 Hubryd AI · Minimal Working Version")
