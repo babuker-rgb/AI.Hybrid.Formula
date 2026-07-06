@@ -1,8 +1,6 @@
 """
-Hubryd AI v29.27 – Minimal · Stable · Free Tier
-Core PINN & NSGA-II identical to v29.18
-Enhanced UI with toggle knobs: Pareto, Sensitivity, Comparison, Particle Size, Report
-FIXED: import datetime added at the top.
+Hubryd AI – v29.27 UI + v29.18 R²‑Optimised Core
+Fixes: session_state initialisation, datetime import, slider defaults.
 Nile Valley University · Sudan
 """
 
@@ -19,12 +17,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 import os
 import tempfile
-import datetime          # <-- THIS FIXES THE NameError
+import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# Physics Constants (v29.18)
+# Physics Constants
 # ================================================================
 D_MIN = 0.40
 D_MAX = 0.97
@@ -36,23 +34,43 @@ BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
 # ================================================================
-# Training Parameters (v29.18 – reduced for free tier)
+# Training Parameters – OPTIMISED FOR R²
 # ================================================================
-N_SAMPLES = 5000
-ADAM_EPOCHS = 200
-PATIENCE = 30
+N_SAMPLES = 12000          # More data
+ADAM_EPOCHS = 500          # Longer training
+PATIENCE = 50
 NSGA_POP = 40
 NSGA_GENS = 30
-HIDDEN_SIZE = 384          # v29.18: 384 neurons
+HIDDEN_SIZE = 384
 
+# Loss weights – heavily biased toward tensile
 W_DENSITY = 1.0
-W_TENSILE = 30.0           # v29.18 tuning
-W_ER = 5.0
-W_PHYSICS = 2.0
-W_EFRF_PENALTY = 100.0
+W_TENSILE = 80.0           # MAJOR INCREASE for R²
+W_ER = 15.0
+W_PHYSICS = 5.0
+W_EFRF_PENALTY = 200.0
 
 # ================================================================
-# Helper Functions (identical to v29.18)
+# Session State Initialisation – MUST BE BEFORE ANY WIDGET
+# ================================================================
+if 'api' not in st.session_state:
+    st.session_state.update({
+        'api': 90.5,
+        'binder': 3.0,
+        'pvpp': 3.0,
+        'mgst': 0.15,
+        'mcc': 3.35,
+        'pressure': 235.0,
+        'speed': 10.0,
+        'granule': 125.0,
+        'show_pareto': True,
+        'show_sensitivity': False,
+        'show_comparison': True,
+        'granule_mode': 'Fixed'
+    })
+
+# ================================================================
+# Helper Functions (identical to v29.18 – no changes)
 # ================================================================
 def normalize_components(api, binder, pvpp, mgst, mcc):
     api = np.clip(api, 60, 100)
@@ -194,7 +212,7 @@ class MultiTaskPINN(nn.Module):
         self.res1 = ResidualBlock(hidden)
         self.res2 = ResidualBlock(hidden)
         self.transition = nn.Sequential(nn.Linear(hidden, hidden//2), nn.Tanh())
-        self.output = nn.Linear(hidden//2, 5)   # D, σt, ER, k, A
+        self.output = nn.Linear(hidden//2, 5)
     def forward(self, X):
         x = self.input_layer(X)
         x = self.res1(x)
@@ -261,7 +279,7 @@ class MultiTaskPINN(nn.Module):
         return total_loss
 
 # ================================================================
-# NSGA-II (v29.18 – SBX, smart seeding, crowding distance)
+# NSGA-II (unchanged – same as v29.18)
 # ================================================================
 class NSGAII:
     def __init__(self, model, scaler, y_scaler, bounds, pop=40, gens=30, granule_fixed=True, granule_fixed_val=125.0):
@@ -481,7 +499,7 @@ def plot_pareto(objectives, fronts):
         'API': -objectives[front, 0],
         'EFRF': objectives[front, 1]
     })
-    fig = px.scatter(df_plot, x='API', y='EFRF', title='Pareto Front (v29.18 core)')
+    fig = px.scatter(df_plot, x='API', y='EFRF', title='Pareto Front (v29.18-R2)')
     fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='red',
                   annotation_text=f'EFRF threshold {EFRF_MAX}')
     fig.update_layout(height=450, template='plotly_white')
@@ -509,10 +527,10 @@ def train_benchmark(X_train, X_test, y_train, y_test):
     return pd.DataFrame(results)
 
 # ================================================================
-# Cached Training (v29.18 core)
+# Cached Training (R²-optimised)
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_18_core.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_18_r2_fixed.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -529,7 +547,7 @@ def load_or_train():
         except Exception as e:
             st.warning(f"Cache load failed: {e}. Retraining...")
 
-    st.caption("🔄 Training model from scratch (v29.18 core)...")
+    st.caption("🔄 Training R²‑optimised model (12k samples, 500 epochs)...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%']].values
@@ -544,8 +562,8 @@ def load_or_train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     st.caption(f"🖥️ Using device: {device}")
     model = MultiTaskPINN(input_dim, hidden=HIDDEN_SIZE).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=15, factor=0.5)
+    optimizer = optim.Adam(model.parameters(), lr=5e-4, weight_decay=1e-5)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=20, factor=0.5)
     X_train_t = torch.tensor(X_train, dtype=torch.float32).to(device)
     X_raw_train_t = torch.tensor(X_raw_train, dtype=torch.float32).to(device)
     y_train_t = torch.tensor(y_train, dtype=torch.float32).to(device)
@@ -563,7 +581,7 @@ def load_or_train():
         if loss.item() < best_loss:
             best_loss = loss.item()
             patience_counter = 0
-            torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_adam_v29_18.pt'))
+            torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_adam_r2_fixed.pt'))
         else:
             patience_counter += 1
             if patience_counter >= PATIENCE:
@@ -571,8 +589,8 @@ def load_or_train():
                 break
         progress_bar.progress((epoch+1)/ADAM_EPOCHS)
     st.success(f"✅ Best validation loss: {best_loss:.4f}")
-    if os.path.exists(os.path.join(CACHE_DIR, 'best_adam_v29_18.pt')):
-        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_adam_v29_18.pt'), map_location=device))
+    if os.path.exists(os.path.join(CACHE_DIR, 'best_adam_r2_fixed.pt')):
+        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_adam_r2_fixed.pt'), map_location=device))
     model.cpu()
     checkpoint = {
         'model_state': model.state_dict(),
@@ -587,20 +605,18 @@ def load_or_train():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# Streamlit UI – v29.27 with Toggle Knobs
+# Streamlit UI – v29.27 with Knobs
 # ================================================================
-st.set_page_config(page_title="Hubryd AI v29.27", layout="wide")
+st.set_page_config(page_title="Hubryd AI v29.27-R2", layout="wide")
 
-# Header
 st.markdown("""
 <div style="background: linear-gradient(135deg, #0b1a33, #1a2a4a, #0f3460); padding:1.5rem; border-radius:1rem; text-align:center; margin-bottom:1rem;">
-    <h1 style="color:#fff; margin:0;">🧬 Hubryd AI – v29.27</h1>
-    <p style="color:#64ffda; margin:0;">Multi‑Task True PINN · v29.18 Core · Enhanced UI</p>
+    <h1 style="color:#fff; margin:0;">🧬 Hubryd AI – v29.27-R2</h1>
+    <p style="color:#64ffda; margin:0;">Multi‑Task True PINN · Optimised for High R²</p>
     <p style="color:#8899aa; font-size:0.9rem;">Nile Valley University · Sudan</p>
 </div>
 """, unsafe_allow_html=True)
 
-# Sidebar – Physics constraints
 with st.sidebar:
     st.markdown("### 📚 Physics Constraints (v29.18)")
     st.markdown("""
@@ -608,13 +624,12 @@ with st.sidebar:
     ✅ EFRF: ER / σt < 0.40  
     ✅ Density: 0.40 ≤ D ≤ 0.97  
     ✅ MCC: ≤ 8.0%  
-    ✅ Samples: 5000  
-    ✅ Epochs: 200  
+    ✅ Samples: 12000  
+    ✅ Epochs: 500  
     ✅ NSGA‑II: Pop=40, Gen=30  
     ✅ Network: 384 Neurons
     """)
-    st.markdown("---")
-    st.caption("🔬 v29.27 — Minimal & Stable")
+    st.caption("🔬 v29.27-R2 — R² Optimised")
 
 # Load model
 try:
@@ -622,17 +637,6 @@ try:
 except Exception as e:
     st.error(f"❌ Training failed: {e}. Using dummy model.")
     model = None
-
-# Session state for presets and knobs
-if 'api' not in st.session_state:
-    st.session_state.update({
-        'api':90.5, 'binder':3.0, 'pvpp':3.0, 'mgst':0.15, 'mcc':3.35,
-        'pressure':235, 'speed':10, 'granule':125,
-        'show_pareto': True,
-        'show_sensitivity': False,
-        'show_comparison': True,
-        'granule_mode': 'Fixed'
-    })
 
 # Main layout
 col_left, col_right = st.columns([1, 1.2], gap="medium")
@@ -656,46 +660,53 @@ with col_left:
 
     st.markdown("### ⚙️ Process Parameters")
     with st.container(border=True):
-        pressure = st.slider("Pressure (MPa)", 80.0, PRESSURE_MAX, st.session_state.pressure, 1.0, key="pressure_slider")
-        speed = st.slider("Speed (rpm)", 1.0, 50.0, st.session_state.speed, 0.5, key="speed_slider")
-        # Particle size radio (synced with knob)
+        # Use .get() with fallback to avoid KeyError if session_state missing
+        pressure = st.slider("Pressure (MPa)", 80.0, PRESSURE_MAX,
+                             st.session_state.get('pressure', 235.0), 1.0,
+                             key="pressure_slider")
+        speed = st.slider("Speed (rpm)", 1.0, 50.0,
+                          st.session_state.get('speed', 10.0), 0.5,
+                          key="speed_slider")
+
         granule_mode = st.radio(
             "Granule Size",
             options=["Fixed (slider)", "Variable (optimized)"],
-            index=0 if st.session_state.granule_mode == 'Fixed' else 1,
+            index=0 if st.session_state.get('granule_mode', 'Fixed') == 'Fixed' else 1,
             horizontal=True,
             key="granule_mode_radio"
         )
         if granule_mode == "Fixed (slider)":
-            granule = st.slider("Granule Size (µm)", 30.0, 250.0, st.session_state.granule, 1.0, key="granule_slider")
+            granule = st.slider("Granule Size (µm)", 30.0, 250.0,
+                                st.session_state.get('granule', 125.0), 1.0,
+                                key="granule_slider")
             granule_fixed = True
             st.session_state.granule_mode = 'Fixed'
         else:
-            granule = st.session_state.granule  # placeholder
+            granule = st.session_state.get('granule', 125.0)
             granule_fixed = False
-            st.info("Granule size will be optimized by NSGA‑II (30–250 µm)")
+            st.info("Granule size will be optimised by NSGA‑II (30–250 µm)")
             st.session_state.granule_mode = 'Variable'
 
-    predict_btn = st.button("🔬 Predict & Optimize", use_container_width=True, type="primary")
+    predict_btn = st.button("🔬 Predict & Optimise", use_container_width=True, type="primary")
 
 with col_right:
     st.markdown("### 📈 Results")
-
-    # ---------- KNOBS (toggles) ----------
-    st.markdown("**🔘 Knobs:**")
     knob_cols = st.columns(5)
     with knob_cols[0]:
-        show_pareto = st.toggle("📉 Pareto", value=st.session_state.show_pareto, key="knob_pareto")
+        show_pareto = st.toggle("📉 Pareto", value=st.session_state.get('show_pareto', True),
+                                key="knob_pareto")
         st.session_state.show_pareto = show_pareto
     with knob_cols[1]:
-        show_sensitivity = st.toggle("🔬 Sensitivity", value=st.session_state.show_sensitivity, key="knob_sensitivity")
+        show_sensitivity = st.toggle("🔬 Sensitivity", value=st.session_state.get('show_sensitivity', False),
+                                     key="knob_sensitivity")
         st.session_state.show_sensitivity = show_sensitivity
     with knob_cols[2]:
-        show_comparison = st.toggle("📊 Comparison", value=st.session_state.show_comparison, key="knob_comparison")
+        show_comparison = st.toggle("📊 Comparison", value=st.session_state.get('show_comparison', True),
+                                    key="knob_comparison")
         st.session_state.show_comparison = show_comparison
     with knob_cols[3]:
-        # Particle size knob – sync with radio
-        particle_fixed = st.toggle("🧪 Particle Size", value=(st.session_state.granule_mode == 'Fixed'), key="knob_particle")
+        particle_fixed = st.toggle("🧪 Particle Size", value=(st.session_state.get('granule_mode', 'Fixed') == 'Fixed'),
+                                   key="knob_particle")
         if particle_fixed and st.session_state.granule_mode != 'Fixed':
             st.session_state.granule_mode = 'Fixed'
             st.rerun()
@@ -705,20 +716,15 @@ with col_right:
     with knob_cols[4]:
         generate_report = st.button("📄 Report", key="knob_report")
 
-    st.markdown("---")
-
-    # Execute prediction & optimization if button clicked
     if predict_btn:
         if abs(total-100) > 0.1:
             st.warning("Formulation must sum to 100%")
         else:
-            # Normalize formulation
             api_n, binder_n, pvpp_n, mgst_n, mcc_n = normalize_components(api, binder, pvpp, mgst, mcc)
-            # Use granule from slider if fixed, else placeholder
             if granule_fixed:
                 granule_use = granule
             else:
-                granule_use = granule  # still use slider value for preview
+                granule_use = granule
             inputs = [api_n, mcc_n, pvpp_n, mgst_n, binder_n, pressure, speed, granule_use]
 
             if model is not None:
@@ -726,7 +732,6 @@ with col_right:
             else:
                 density, tensile, er, efrf = 0.7, 2.0, 0.5, 0.25
 
-            # Constraint status
             st.markdown("#### Constraints Status")
             col_metrics = st.columns(4)
             col_metrics[0].metric("Density", f"{density:.3f}", "✅" if D_MIN <= density <= D_MAX else "❌")
@@ -739,7 +744,7 @@ with col_right:
             else:
                 st.error("❌ Violates constraints")
 
-            # ---- Run NSGA-II always ----
+            # NSGA-II
             bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],
                                [80,PRESSURE_MAX],[1,50],[30,250]])
             with st.spinner(f"Running NSGA‑II (pop={NSGA_POP}, gen={NSGA_GENS})..."):
@@ -749,9 +754,7 @@ with col_right:
                               granule_fixed_val=granule if granule_fixed else 125.0)
                 pop, objectives, fronts = nsga.run()
 
-            # ---- Show sections based on knobs ----
-
-            # 1. Pareto
+            # Pareto
             if show_pareto:
                 st.markdown("### 📉 Pareto Front")
                 if len(fronts) > 0 and len(fronts[0]) > 0:
@@ -759,7 +762,6 @@ with col_right:
                     fig = plot_pareto(objectives, fronts)
                     if fig:
                         st.plotly_chart(fig, use_container_width=True)
-                    # Show golden solution
                     best_idx = None
                     best_ef = 1e9
                     for idx in fronts[0]:
@@ -791,15 +793,13 @@ with col_right:
                             st.write(f"Tensile: {t2:.3f} MPa")
                             st.write(f"EFRF: {ef2:.4f}")
                     else:
-                        st.info("No fully feasible solution found in Pareto front.")
+                        st.info("No fully feasible solution found.")
                 else:
                     st.warning("No Pareto front found.")
 
-            # 2. Sensitivity
+            # Sensitivity
             if show_sensitivity:
                 st.markdown("### 🔬 Sensitivity Analysis")
-                st.info("Varying API and Pressure (others fixed) – EFRF contours")
-                # Create grid over API and Pressure
                 api_range = np.linspace(85, 95, 10)
                 pressure_range = np.linspace(80, PRESSURE_MAX, 10)
                 efrf_grid = np.zeros((len(api_range), len(pressure_range)))
@@ -816,17 +816,11 @@ with col_right:
                     contours=dict(coloring='heatmap'),
                     hovertemplate='Pressure: %{x:.0f} MPa<br>API: %{y:.1f}%<br>EFRF: %{z:.4f}<extra></extra>'
                 ))
-                fig.update_layout(
-                    title='EFRF Sensitivity to API and Pressure',
-                    xaxis_title='Pressure (MPa)',
-                    yaxis_title='API (%)',
-                    height=400
-                )
-                fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='red',
-                              annotation_text=f'EFRF max {EFRF_MAX}')
+                fig.update_layout(title='EFRF Sensitivity', xaxis_title='Pressure', yaxis_title='API', height=400)
+                fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='red')
                 st.plotly_chart(fig, use_container_width=True)
 
-            # 3. Comparison
+            # Comparison
             if show_comparison:
                 st.markdown("### 📊 Comparison (Tensile R²)")
                 X_train, X_test, y_train, y_test = train_test_split(
@@ -855,19 +849,18 @@ with col_right:
                 st.dataframe(bench_df.style.background_gradient(subset=['R²'], cmap='RdYlGn', vmin=-1, vmax=1),
                              use_container_width=True)
 
-            # 4. Report (button triggered)
+            # Report
             if generate_report:
                 timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                # Use current values if golden not defined
                 try:
-                    if best_idx is not None:
+                    if 'best_idx' in locals() and best_idx is not None:
                         golden_str = ', '.join([f'{k}: {v:.2f}' for k,v in zip(['API','MCC','PVPP','MgSt','Binder','Pressure','Speed','Granule'], golden)])
                     else:
                         golden_str = 'None'
                 except:
                     golden_str = 'None'
                 report = f"""
-                # Hubryd AI v29.27 Report
+                # Hubryd AI v29.27-R2 Report
                 **Generated:** {timestamp}
 
                 ## Current Formulation
@@ -907,6 +900,6 @@ with col_right:
                 )
 
     else:
-        st.info("Adjust sliders and click 'Predict & Optimize' to see results.")
+        st.info("Adjust sliders and click 'Predict & Optimise' to see results.")
 
 st.caption("📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Sudan")
