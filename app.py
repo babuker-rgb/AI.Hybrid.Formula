@@ -1,6 +1,6 @@
 """
-Hubryd AI – v29.27-R2 (Balanced)
-Optimised for R² while respecting free‑tier timeouts.
+Hybrid AI – v29.27-R2 (Balanced)
+Multi-Objective Optimisation 
 Nile Valley University · Sudan
 """
 
