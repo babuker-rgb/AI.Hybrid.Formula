@@ -1,6 +1,7 @@
 """
 Hubryd AI v29.27 – Minimal · Stable · Free Tier
 Enhanced with Toggle Knobs: Pareto, Sensitivity, Comparison, Particle Size, Report
+Fixed datetime import error.
 Nile Valley University · Sudan
 """
 
@@ -17,7 +18,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import os
 import tempfile
-import datetime
+import datetime          # <-- FIXED: now imported
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -657,11 +658,11 @@ with col_left:
     with st.container(border=True):
         pressure = st.slider("Pressure (MPa)", 80.0, PRESSURE_MAX, st.session_state.pressure, 1.0, key="pressure_slider")
         speed = st.slider("Speed (rpm)", 1.0, 50.0, st.session_state.speed, 0.5, key="speed_slider")
-        # Particle size toggle (also controlled by knob)
+        # Particle size radio (also synced with knob)
         granule_mode = st.radio(
             "Granule Size",
             options=["Fixed (slider)", "Variable (optimized)"],
-            index=0,
+            index=0 if st.session_state.granule_mode == 'Fixed' else 1,
             horizontal=True,
             key="granule_mode_radio"
         )
@@ -693,9 +694,8 @@ with col_right:
         show_comparison = st.toggle("📊 Comparison", value=st.session_state.show_comparison, key="knob_comparison")
         st.session_state.show_comparison = show_comparison
     with knob_cols[3]:
-        # Particle size knob – sync with radio button
+        # Particle size knob – sync with radio
         particle_fixed = st.toggle("🧪 Particle Size", value=(st.session_state.granule_mode == 'Fixed'), key="knob_particle")
-        # If toggled, update the radio button accordingly
         if particle_fixed and st.session_state.granule_mode != 'Fixed':
             st.session_state.granule_mode = 'Fixed'
             st.rerun()
@@ -860,6 +860,11 @@ with col_right:
             # 4. Report (button triggered)
             if generate_report:
                 timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                # Make sure golden is defined (use current if not)
+                if best_idx is not None:
+                    golden_str = ', '.join([f'{k}: {v:.2f}' for k,v in zip(['API','MCC','PVPP','MgSt','Binder','Pressure','Speed','Granule'], golden)])
+                else:
+                    golden_str = 'None'
                 report = f"""
                 # Hubryd AI v29.27 Report
                 **Generated:** {timestamp}
@@ -887,7 +892,7 @@ with col_right:
 
                 ## NSGA-II Results
                 - Pareto solutions: {len(fronts[0]) if fronts else 0}
-                - Golden solution (if any): {', '.join([f'{k}: {v:.2f}' for k,v in zip(['API','MCC','PVPP','MgSt','Binder','Pressure','Speed','Granule'], golden)]) if best_idx is not None else 'None'}
+                - Golden solution (if any): {golden_str}
 
                 ## Model Performance (Tensile)
                 - PINN R²: {pinn_r2:.4f}
