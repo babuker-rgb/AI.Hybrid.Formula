@@ -1,10 +1,9 @@
 """
-Hubryd AI Multi-objective Optimization Framework v29.27
+Hubryd AI Multi-objective Optimization Framework v29.27 (Minimal)
 True Physics-Informed Neural Network (PINN) for Tablet Formulation
 
 Author: Babuker A. Abdalla
-Affiliation: Nile Valley University · Sudan
-Version: 29.27 (Simplified - without 3D Pareto and Granule Analysis)
+Nile Valley University · Sudan
 """
 
 import streamlit as st
@@ -16,27 +15,17 @@ import torch.optim as optim
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
-from fpdf import FPDF
-import datetime
 import warnings
-import plotly.graph_objects as go
-import plotly.express as px
-import time
 import math
 import os
 import pickle
-import re
-
-try:
-    from scipy.interpolate import UnivariateSpline
-    SCIPY_AVAILABLE = True
-except ImportError:
-    SCIPY_AVAILABLE = False
+import plotly.graph_objects as go
+import plotly.express as px
 
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# 0. ENHANCED PARAMETERS (v29.27)
+# 0. PARAMETERS (Minimal, robust)
 # ================================================================
 
 TENSILE_MIN = 1.90
@@ -62,7 +51,6 @@ W_TENSILE = 15.0
 W_TENSILE_PHYSICS = 0.5
 W_PHYSICS_BASE = 0.0
 W_PHYSICS_FINAL = 0.3
-W_EFRF = 2.0
 W_DENSITY_PENALTY = 8.0
 W_MCC = 0.5
 
@@ -70,76 +58,35 @@ NSGA_POP_SIZE = 80
 NSGA_GENERATIONS = 60
 
 # ================================================================
-# 1. SESSION STATE & HELPERS
+# 1. SESSION STATE (minimal)
 # ================================================================
 
-DEFAULTS = {
-    'api': 90.5, 'binder': 2.7, 'pvpp': 3.0, 'mgst': 0.20,
-    'mcc': 3.6,
-    'pressure': 230.0, 'speed': 12.0, 'granule': 125.0
-}
+if 'api' not in st.session_state:
+    st.session_state.api = 90.5
+if 'binder' not in st.session_state:
+    st.session_state.binder = 2.7
+if 'pvpp' not in st.session_state:
+    st.session_state.pvpp = 3.0
+if 'mgst' not in st.session_state:
+    st.session_state.mgst = 0.20
+if 'mcc' not in st.session_state:
+    st.session_state.mcc = 3.6
+if 'pressure' not in st.session_state:
+    st.session_state.pressure = 230.0
+if 'speed' not in st.session_state:
+    st.session_state.speed = 12.0
+if 'granule' not in st.session_state:
+    st.session_state.granule = 125.0
 
-RANGES = {
-    'api': (85.0, 95.0), 'binder': (BINDER_MIN, BINDER_MAX),
-    'pvpp': (0.5, 6.0), 'mgst': (0.01, 1.2), 'mcc': (0.0, MCC_MAX),
-    'pressure': (80.0, PRESSURE_MAX), 'speed': (1.0, 50.0), 'granule': (30.0, 250.0)
-}
-
-def safe_initialize():
-    for key in DEFAULTS:
-        if key not in st.session_state:
-            st.session_state[key] = DEFAULTS[key]
-        else:
-            try:
-                float(st.session_state[key])
-            except:
-                st.session_state[key] = DEFAULTS[key]
-
-def clamp_session_state():
-    for key in DEFAULTS:
-        if key in st.session_state:
-            try:
-                val = float(st.session_state[key])
-                min_val, max_val = RANGES[key]
-                if val < min_val: st.session_state[key] = min_val
-                elif val > max_val: st.session_state[key] = max_val
-            except:
-                st.session_state[key] = DEFAULTS[key]
-
-def get_safe_value(key):
-    if key not in st.session_state:
-        st.session_state[key] = DEFAULTS[key]
+def get_val(key):
     try:
-        val = float(st.session_state[key])
-        min_val, max_val = RANGES[key]
-        return max(min_val, min(val, max_val))
+        return float(st.session_state[key])
     except:
-        return DEFAULTS[key]
-
-safe_initialize()
-clamp_session_state()
+        return 90.5 if key == 'api' else 2.7 if key == 'binder' else 3.0 if key == 'pvpp' else 0.2 if key == 'mgst' else 3.6 if key == 'mcc' else 230.0 if key == 'pressure' else 12.0 if key == 'speed' else 125.0
 
 # ================================================================
-# 2. HELPER FUNCTIONS
+# 2. HELPER FUNCTIONS (Core)
 # ================================================================
-
-def sanitize_text(text):
-    replacements = {
-        '🌟': '[GOLDEN]',
-        '✅': '[PASS]',
-        '❌': '[FAIL]',
-        '⚠️': '[WARNING]',
-        'σ': 'sigma',
-        'µ': 'um',
-        '≥': '>=',
-        '≤': '<=',
-        '•': '-',
-        '—': '-',
-    }
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-    text = re.sub(r'[^\x00-\x7F]+', '', text)
-    return text
 
 def normalize_components(api, binder, pvpp, mgst, mcc):
     api = max(api, 0.1); binder = max(binder, 0.1)
@@ -183,13 +130,11 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
     pvpp_norm = np.clip(pvpp_norm, 0.5, 6.0)
     mgst_norm = np.clip(mgst_norm, 0.01, 1.2)
     mcc_norm = np.clip(mcc_norm, 0, MCC_MAX)
-    
     total_final = api_norm + binder_norm + pvpp_norm + mgst_norm + mcc_norm
     if total_final > 0 and abs(total_final - 100) > 0.1:
         scale = 100 / total_final
         api_norm *= scale; binder_norm *= scale; pvpp_norm *= scale
         mgst_norm *= scale; mcc_norm *= scale
-    
     api_norm = np.clip(api_norm, 85, 95)
     binder_norm = np.clip(binder_norm, 0.5, 5.0)
     pvpp_norm = np.clip(pvpp_norm, 0.5, 6.0)
@@ -250,7 +195,6 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         api, binder, pvpp, mgst, mcc = normalize_components(api_raw, binder_raw, pvpp_raw, mgst_raw, mcc_raw)
         X[i] = [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
 
-        # Heckel
         x = np.random.uniform(x_min, x_max)
         for _ in range(30):
             k = np.random.uniform(0.005, 0.055)
@@ -267,7 +211,6 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         noise_d = np.random.normal(0, NOISE_DENSITY)
         D = np.clip(D_target + noise_d, D_MIN, D_MAX)
 
-        # Ryshkewitch
         sigma0 = np.random.uniform(4.0, 8.0)
         b = np.random.uniform(1.5, 3.5)
         porosity = 1.0 - D
@@ -283,7 +226,6 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         strength = strength * np.random.normal(1.0, NOISE_STRENGTH)
         strength = np.clip(strength, 0.5, 6.0)
 
-        # ER
         er_base = 1.8 + 0.3 * (api - 85)/10 + 0.08 * (speed - 10)/30 - 0.1 * (pressure - 100)/150
         er_base = er_base * (1.0 - 0.15 * (D - 0.4))
         er = np.clip(er_base + np.random.normal(0, NOISE_ER), 0.5, 4.0)
@@ -299,7 +241,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# 3. PINN MODEL (with curriculum learning and adaptive physics)
+# 3. PINN MODEL
 # ================================================================
 
 class Mish(nn.Module):
@@ -384,7 +326,6 @@ class MultiTaskTruePINN(nn.Module):
         k_pred = y_pred[:, 3:4]
         A_pred = y_pred[:, 4:5]
 
-        # Curriculum learning: first 100 epochs no physics, then linear increase
         if epoch < 100:
             w_physics = 0.0
         else:
@@ -396,7 +337,6 @@ class MultiTaskTruePINN(nn.Module):
 
         data_loss = (3.5 * density_mse) + (w_tensile * tensile_mse) + (3.5 * er_mse)
 
-        # Dynamic reduction if data loss is high
         if data_loss.item() > 1.0 and w_physics > 0.01:
             w_physics = w_physics * 0.5
 
@@ -421,14 +361,12 @@ class MultiTaskTruePINN(nn.Module):
         return total_loss, {'total_loss': total_loss.item()}
 
 # ================================================================
-# 4. CUSTOM NSGA-II (with fixed granule support)
+# 4. NSGA-II (simplified, no granule mode)
 # ================================================================
 
 class NSGAII:
     def __init__(self, model, scaler, y_scaler, bounds,
-                 pop_size=NSGA_POP_SIZE, n_generations=NSGA_GENERATIONS,
-                 w_tensile=0.0,
-                 granule_mode='Variable', fixed_granule=125.0):
+                 pop_size=NSGA_POP_SIZE, n_generations=NSGA_GENERATIONS, w_tensile=0.0):
         self.model = model
         self.scaler = scaler
         self.y_scaler = y_scaler
@@ -436,8 +374,6 @@ class NSGAII:
         self.pop_size = pop_size
         self.n_generations = n_generations
         self.w_tensile = w_tensile
-        self.granule_mode = granule_mode
-        self.fixed_granule = fixed_granule
         self.population = None
         self.objectives = None
         self.constraints = None
@@ -448,10 +384,7 @@ class NSGAII:
         api, binder, pvpp, mgst, mcc = normalize_components(api, binder, pvpp, mgst, mcc)
         pressure = np.clip(pressure, 80, PRESSURE_MAX)
         speed = np.clip(speed, 1.0, 50.0)
-        if self.granule_mode == "Fixed":
-            granule = self.fixed_granule
-        else:
-            granule = np.clip(granule, 30.0, 250.0)
+        granule = np.clip(granule, 30.0, 250.0)
         return np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule], dtype=float)
 
     def _evaluate(self, population):
@@ -686,7 +619,7 @@ class NSGAII:
         return self.population, self.objectives, self.constraints, self.fronts
 
 # ================================================================
-# 5. PREDICTION, PLOTTING, AND COMPARISON FUNCTIONS
+# 5. PREDICTION & PLOTTING (simplified)
 # ================================================================
 
 def predict_pinn(model, scaler, y_scaler, inputs):
@@ -706,140 +639,29 @@ def predict_pinn(model, scaler, y_scaler, inputs):
         st.error(f"Prediction error: {e}")
         return D_MIN, 0.01, 1.0, 1.0
 
-def plot_training_curves(loss_history):
-    if not loss_history or len(loss_history['train']) == 0:
-        return None
-    epochs = list(range(1, len(loss_history['train']) + 1))
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=epochs, y=loss_history['train'], mode='lines', name='Training Loss'))
-    if len(loss_history['val']) > 0:
-        fig.add_trace(go.Scatter(x=epochs[:len(loss_history['val'])], y=loss_history['val'], mode='lines', name='Validation Loss'))
-    fig.update_layout(title='Training Curves (v29.27)', xaxis_title='Epoch', yaxis_title='Loss', height=400)
-    return fig
-
-def smooth_pareto_curve(api_points, efrf_points, num_points=200):
-    if len(api_points) < 3:
-        return api_points, efrf_points
-    sorted_idx = np.argsort(api_points)
-    api_sorted = np.array(api_points)[sorted_idx]
-    efrf_sorted = np.array(efrf_points)[sorted_idx]
-    _, unique_idx = np.unique(api_sorted, return_index=True)
-    api_unique = api_sorted[unique_idx]
-    efrf_unique = efrf_sorted[unique_idx]
-    if len(api_unique) < 3:
-        return api_unique, efrf_unique
-    x_new = np.linspace(api_unique.min(), api_unique.max(), num_points)
-    try:
-        if SCIPY_AVAILABLE:
-            spline = UnivariateSpline(api_unique, efrf_unique, s=0.001, k=3)
-            y_new = spline(x_new)
-        else:
-            degree = min(3, len(api_unique) - 1)
-            coeffs = np.polyfit(api_unique, efrf_unique, degree)
-            y_new = np.polyval(coeffs, x_new)
-        return x_new, y_new
-    except:
-        return api_unique, efrf_unique
-
-# Clean Pareto plot
-def plot_pareto_clean(objectives, fronts, smooth=True):
+def plot_pareto_clean(objectives, fronts):
     if objectives is None or fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
     front0 = fronts[0]
     api_pareto = -objectives[front0, 0]
     efrf_pareto = objectives[front0, 1]
-    sorted_idx = np.argsort(api_pareto)
-    api_sorted = api_pareto[sorted_idx]
-    efrf_sorted = efrf_pareto[sorted_idx]
-    df_pareto = pd.DataFrame({'API': api_sorted, 'EFRF': efrf_sorted})
-    fig = px.scatter(df_pareto, x='API', y='EFRF',
-                     title='Pareto Front (Clean)',
-                     labels={'API': 'API (%)', 'EFRF': 'EFRF'},
-                     color_discrete_sequence=['red'])
-    fig.update_traces(marker=dict(size=8, opacity=0.8))
-    if smooth and len(api_sorted) >= 3:
-        x_s, y_s = smooth_pareto_curve(api_sorted, efrf_sorted)
-        fig.add_trace(go.Scatter(x=x_s, y=y_s, mode='lines',
-                                 line=dict(color='red', width=2, dash='dash'),
-                                 name='Pareto Front (smooth)'))
+    df_pareto = pd.DataFrame({'API': api_pareto, 'EFRF': efrf_pareto})
+    fig = px.scatter(df_pareto, x='API', y='EFRF', title='Pareto Front',
+                     labels={'API': 'API (%)', 'EFRF': 'EFRF'})
+    fig.update_traces(marker=dict(color='red', size=8))
     fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='red',
                   annotation_text=f'EFRF Threshold: {EFRF_MAX:.2f}',
                   annotation_position='top right')
-    fig.update_layout(height=500, template='plotly_white',
-                      legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1))
+    fig.update_layout(height=500, template='plotly_white')
     return fig
-
-# Two-star Pareto plot
-def plot_pareto_with_stars(objectives, fronts,
-                           user_api=None, user_efrf=None,
-                           golden_api=None, golden_efrf=None,
-                           smooth=True):
-    fig = plot_pareto_clean(objectives, fronts, smooth=smooth)
-    if fig is None:
-        return None
-    if golden_api is not None and golden_efrf is not None:
-        fig.add_trace(go.Scatter(
-            x=[golden_api], y=[golden_efrf],
-            mode='markers+text',
-            marker=dict(size=18, color='gold', symbol='star',
-                        line=dict(color='darkgoldenrod', width=2)),
-            text=['⭐ Golden'], textposition='top center',
-            name='Golden Solution'
-        ))
-    if user_api is not None and user_efrf is not None:
-        fig.add_trace(go.Scatter(
-            x=[user_api], y=[user_efrf],
-            mode='markers+text',
-            marker=dict(size=14, color='blue', symbol='star',
-                        line=dict(color='darkblue', width=2)),
-            text=['🔵 Tested'], textposition='top center',
-            name='Tested Solution'
-        ))
-    fig.update_layout(title='Pareto Front with Two Stars (v29.27)',
-                      legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1))
-    return fig
-
-def plot_sensitivity_plotly(inputs, model, scaler, y_scaler):
-    try:
-        features = ['API%', 'MCC%', 'PVPP%', 'Mg-St%', 'Binder%', 'Pressure', 'Speed', 'Granule']
-        _, _, _, base_efrf = predict_pinn(model, scaler, y_scaler, inputs)
-        sensitivities = []
-        for i in range(8):
-            test = inputs.copy()
-            test[i] += 0.05 * (inputs[i] + 0.1)
-            _, _, _, efrf_pos = predict_pinn(model, scaler, y_scaler, test)
-            test[i] = inputs[i] - 0.05 * (inputs[i] + 0.1)
-            _, _, _, efrf_neg = predict_pinn(model, scaler, y_scaler, test)
-            sensitivities.append(max(abs(efrf_pos - base_efrf), abs(efrf_neg - base_efrf)))
-        sorted_idx = np.argsort(sensitivities)[::-1]
-        fig = go.Figure()
-        fig.add_trace(go.Bar(
-            y=[features[i] for i in sorted_idx],
-            x=[sensitivities[i] for i in sorted_idx],
-            orientation='h',
-            marker_color='#1f77b4'
-        ))
-        fig.update_layout(title='Sensitivity Analysis (EFRF)', xaxis_title='Sensitivity', height=400)
-        return fig
-    except:
-        return None
 
 def train_and_compare(X_train, X_test, y_train, y_test):
     from sklearn.neural_network import MLPRegressor
     from sklearn.ensemble import RandomForestRegressor
-    try:
-        from xgboost import XGBRegressor
-        xgb_available = True
-    except:
-        xgb_available = False
-
     models = {
         'MLP': MLPRegressor(hidden_layer_sizes=(64, 32), max_iter=500, random_state=42),
         'Random Forest': RandomForestRegressor(n_estimators=50, random_state=42)
     }
-    if xgb_available:
-        models['XGBoost'] = XGBRegressor(n_estimators=50, learning_rate=0.1, random_state=42)
-
     results = []
     for name, model in models.items():
         model.fit(X_train, y_train)
@@ -853,93 +675,18 @@ def train_and_compare(X_train, X_test, y_train, y_test):
         })
     return pd.DataFrame(results)
 
-def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, pressure, speed, granule,
-                             density, tensile, er, efrf, status, timestamp,
-                             model_comparison_df=None, golden_info=None):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, sanitize_text("Hubryd AI Optimization Report (v29.27)"), ln=True, align="C")
-    pdf.set_font("Arial", "", 10)
-    pdf.cell(0, 6, sanitize_text(f"Date: {timestamp}"), ln=True, align="C")
-    pdf.ln(5)
-    
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 8, sanitize_text("Formulation Summary"), ln=True)
-    pdf.set_font("Arial", "", 10)
-    pdf.cell(50, 6, sanitize_text("API"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{api:.1f}%"), 1, 1)
-    pdf.cell(50, 6, sanitize_text("MCC"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{mcc:.1f}%"), 1, 1)
-    pdf.cell(50, 6, sanitize_text("PVPP"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{pvpp:.1f}%"), 1, 1)
-    pdf.cell(50, 6, sanitize_text("Mg-St"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{mgst:.2f}%"), 1, 1)
-    pdf.cell(50, 6, sanitize_text("Binder"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{binder:.1f}%"), 1, 1)
-    pdf.ln(5)
-    
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 8, sanitize_text("Predicted Quality Attributes"), ln=True)
-    pdf.set_font("Arial", "", 10)
-    pdf.cell(50, 6, sanitize_text("Density"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{density:.3f}"), 1, 1)
-    pdf.cell(50, 6, sanitize_text("Tensile Strength"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{tensile:.3f} MPa"), 1, 1)
-    pdf.cell(50, 6, sanitize_text("Elastic Recovery"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{er:.3f} %"), 1, 1)
-    pdf.cell(50, 6, sanitize_text("EFRF"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{efrf:.4f}"), 1, 1)
-    pdf.ln(5)
-    
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 8, sanitize_text(f"Status: {status}"), ln=True)
-
-    if golden_info is not None:
-        pdf.ln(5)
-        pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 8, sanitize_text("Golden Solution (Optimal Trade-off)"), ln=True)
-        pdf.set_font("Arial", "", 10)
-        pdf.cell(50, 6, sanitize_text("API"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{golden_info['api']:.1f}%"), 1, 1)
-        pdf.cell(50, 6, sanitize_text("Binder"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{golden_info['binder']:.1f}%"), 1, 1)
-        pdf.cell(50, 6, sanitize_text("PVPP"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{golden_info['pvpp']:.1f}%"), 1, 1)
-        pdf.cell(50, 6, sanitize_text("Mg-St"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{golden_info['mgst']:.2f}%"), 1, 1)
-        pdf.cell(50, 6, sanitize_text("MCC"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{golden_info['mcc']:.1f}%"), 1, 1)
-        pdf.cell(50, 6, sanitize_text("Pressure"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{golden_info['pressure']:.1f} MPa"), 1, 1)
-        pdf.cell(50, 6, sanitize_text("Speed"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{golden_info['speed']:.1f} rpm"), 1, 1)
-        pdf.cell(50, 6, sanitize_text("Granule"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{golden_info['granule']:.0f} um"), 1, 1)
-        pdf.set_font("Arial", "", 10)
-        pdf.cell(50, 6, sanitize_text("Density"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{golden_info['density']:.3f}"), 1, 1)
-        pdf.cell(50, 6, sanitize_text("Tensile"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{golden_info['tensile']:.3f} MPa"), 1, 1)
-        pdf.cell(50, 6, sanitize_text("EFRF"), 1, 0); pdf.cell(30, 6, sanitize_text(f"{golden_info['efrf']:.4f}"), 1, 1)
-
-    if model_comparison_df is not None:
-        pdf.ln(5)
-        pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 8, sanitize_text("Model Comparison"), ln=True)
-        pdf.set_font("Arial", "", 8)
-        pdf.cell(40, 6, sanitize_text("Model"), 1, 0)
-        pdf.cell(30, 6, sanitize_text("R2"), 1, 0)
-        pdf.cell(30, 6, sanitize_text("RMSE"), 1, 0)
-        pdf.cell(30, 6, sanitize_text("MAE"), 1, 0)
-        pdf.cell(40, 6, sanitize_text("Physics"), 1, 1)
-        for _, row in model_comparison_df.iterrows():
-            pdf.cell(40, 6, sanitize_text(str(row['Model'])[:10]), 1, 0)
-            pdf.cell(30, 6, sanitize_text(f"{row['R²']:.4f}"), 1, 0)
-            pdf.cell(30, 6, sanitize_text(f"{row['RMSE']:.4f}"), 1, 0)
-            pdf.cell(30, 6, sanitize_text(f"{row['MAE']:.4f}"), 1, 0)
-            pdf.cell(40, 6, sanitize_text(str(row['Physics'])), 1, 1)
-    
-    pdf_bytes = pdf.output(dest="S")
-    if isinstance(pdf_bytes, bytearray):
-        return bytes(pdf_bytes)
-    return pdf_bytes
-
 # ================================================================
-# 6. MODEL LOADING / TRAINING (AUTO-REPAIR)
+# 6. MODEL LOADING / TRAINING (minimal)
 # ================================================================
 
 @st.cache_resource
 def load_or_train_model():
     checkpoint_path = '/tmp/pinn_best_model.pt'
-    
     try:
         if os.path.exists(checkpoint_path):
-            st.caption("📂 Loading cached model from /tmp...")
+            st.caption("📂 Loading cached model...")
             checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-            required_keys = ['model_state', 'scaler', 'y_scaler', 'feature_names', 'df', 'loss_history']
-            if all(k in checkpoint for k in required_keys):
+            if all(k in checkpoint for k in ['model_state', 'scaler', 'y_scaler', 'feature_names', 'df', 'loss_history']):
                 input_dim = checkpoint['scaler'].mean_.shape[0]
                 model = MultiTaskTruePINN(input_dim=input_dim)
                 model.load_state_dict(checkpoint['model_state'])
@@ -950,15 +697,14 @@ def load_or_train_model():
                 loss_history = checkpoint['loss_history']
                 return model, scaler, y_scaler, feature_names, df, loss_history
             else:
-                st.warning("⚠️ Cached file is missing some keys. Re-training...")
+                st.warning("⚠️ Cached file missing keys. Re-training...")
                 os.remove(checkpoint_path)
     except Exception as e:
-        st.warning(f"⚠️ Cached model file is corrupted or incompatible. Re-training... (Error: {str(e)[:80]})")
+        st.warning(f"⚠️ Cache error: {str(e)[:80]}. Re-training...")
         if os.path.exists(checkpoint_path):
             os.remove(checkpoint_path)
 
-    st.caption("🔄 Training model from scratch (v29.27 improved settings)...")
-
+    st.caption("🔄 Training model from scratch...")
     df, feature_names = generate_pinn_data(n_samples=N_SAMPLES)
     X_raw = df[feature_names].values
     y = df[['Density', 'Tensile_Strength_MPa', 'Elastic_Recovery_%']].values
@@ -1007,11 +753,6 @@ def load_or_train_model():
         loss, _ = model.compute_loss(
             X_train_t, X_raw_train_t, y_train_t,
             epoch=epoch, max_epochs=ADAM_EPOCHS,
-            w_density=W_DENSITY, w_tensile=W_TENSILE,
-            w_tensile_physics=W_TENSILE_PHYSICS,
-            w_physics_base=W_PHYSICS_BASE, w_physics_final=W_PHYSICS_FINAL,
-            w_mcc=W_MCC, w_density_penalty=W_DENSITY_PENALTY,
-            efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
             compute_grad=compute_grad
         )
         loss.backward()
@@ -1023,11 +764,6 @@ def load_or_train_model():
             val_loss, _ = model.compute_loss(
                 X_val_t, X_raw_val_t, y_val_t,
                 epoch=epoch, max_epochs=ADAM_EPOCHS,
-                w_density=W_DENSITY, w_tensile=W_TENSILE,
-                w_tensile_physics=W_TENSILE_PHYSICS,
-                w_physics_base=W_PHYSICS_BASE, w_physics_final=W_PHYSICS_FINAL,
-                w_mcc=W_MCC, w_density_penalty=W_DENSITY_PENALTY,
-                efrf_target=EFRF_MAX, mcc_max=MCC_MAX,
                 compute_grad=False
             )
 
@@ -1042,7 +778,7 @@ def load_or_train_model():
         else:
             patience_counter += 1
             if patience_counter >= patience:
-                st.warning(f"⏹️ Training stopped early at epoch {epoch+1} (no improvement for {patience} epochs).")
+                st.warning(f"⏹️ Training stopped early at epoch {epoch+1}")
                 break
 
         progress_bar.progress((epoch + 1) / ADAM_EPOCHS)
@@ -1061,22 +797,12 @@ def load_or_train_model():
         'df': df,
         'loss_history': {'train': train_losses, 'val': val_losses}
     }
-
-    temp_path = checkpoint_path + ".tmp"
-    torch.save(checkpoint_data, temp_path)
-
-    try:
-        test_load = torch.load(temp_path, map_location='cpu', weights_only=False)
-        os.rename(temp_path, checkpoint_path)
-        st.success("✅ Model trained and cached successfully (verified).")
-    except Exception as e:
-        st.error(f"❌ Failed to verify saved checkpoint: {e}. The model will not be cached for this session.")
-        pass
-
+    torch.save(checkpoint_data, checkpoint_path)
+    st.success("✅ Model trained and cached successfully!")
     return model, scaler, y_scaler, feature_names, df, {'train': train_losses, 'val': val_losses}
 
 # ================================================================
-# 7. MAIN USER INTERFACE (Streamlit UI)
+# 7. UI
 # ================================================================
 
 st.set_page_config(page_title="Hubryd AI v29.27", page_icon="🧬", layout="wide")
@@ -1085,7 +811,7 @@ st.markdown("""
 <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
             padding: 1.2rem; border-radius: 1rem; margin-bottom: 1rem; text-align: center;">
     <h2 style="color: #ffffff; margin: 0;">🧬 Hubryd AI Multi‑objective Optimization Framework</h2>
-    <p style="color: #64ffda; font-size: 1rem; margin: 0.2rem 0 0 0;">v29.27 — Improved R² · Curriculum Learning · Clean Interface</p>
+    <p style="color: #64ffda; font-size: 1rem; margin: 0.2rem 0 0 0;">v29.27 — Minimal · Stable · Improved R²</p>
     <p style="color: #a8b2d1; font-size: 0.85rem; margin: 0.2rem 0 0 0;">Nile Valley University · Sudan</p>
 </div>
 """, unsafe_allow_html=True)
@@ -1093,52 +819,27 @@ st.markdown("""
 st.markdown("---")
 
 with st.sidebar:
-    st.markdown("### 📚 Physics Constraints (v29.27)")
+    st.markdown("### 📚 Physics Constraints")
     st.markdown(f"""
-    - ✅ **Heckel:** ln(1/(1-D)) = kP + A
-    - ✅ **EFRF:** ER / σt < {EFRF_MAX:.2f}
-    - ✅ **Density:** {D_MIN:.2f} ≤ D ≤ {D_MAX:.2f}
-    - ✅ **MCC:** ≤ {MCC_MAX:.1f}%
-    - ✅ **Samples:** {N_SAMPLES} (Enhanced)
-    - ✅ **Epochs:** {ADAM_EPOCHS} (Early Stopping at {PATIENCE})
-    - ✅ **Device:** GPU (if available)
-    - ✅ **Loss:** Data‑first with curriculum learning
-    - ✅ **Noise:** Ultra‑low (σ = 0.002, 0.005, 0.005)
-    - ✅ **Cache:** Auto‑repair if corrupted
-    - ✅ **NSGA‑II:** Custom, Pop={NSGA_POP_SIZE}, Gen={NSGA_GENERATIONS}
-    - ✅ **Network:** 4 Residual Blocks, 512 Neurons
+    - ✅ Heckel: ln(1/(1-D)) = kP + A
+    - ✅ EFRF: ER / σt < {EFRF_MAX:.2f}
+    - ✅ Density: {D_MIN:.2f} ≤ D ≤ {D_MAX:.2f}
+    - ✅ MCC: ≤ {MCC_MAX:.1f}%
+    - ✅ Samples: {N_SAMPLES}
+    - ✅ Epochs: {ADAM_EPOCHS}
+    - ✅ NSGA‑II: Pop={NSGA_POP_SIZE}, Gen={NSGA_GENERATIONS}
+    - ✅ Network: 4 Residual Blocks, 512 Neurons
     """)
-    show_smooth = st.checkbox("Show smooth Pareto curve", value=True)
-    show_stars = st.checkbox("Show stars on Pareto plot", value=False)
-    st.info("🔬 **v29.27** — Optimized for R² > 0.40")
+    st.info("🔬 **v29.27** — Minimal & Stable")
 
-    # Edge Tabs Demo
-    st.markdown("---")
-    st.markdown("### 📑 Open Tabs (Demo)")
-    edge_all_open_tabs = [
-        {"pageTitle": "Hubryd AI", "pageUrl": "https://...", "tabId": 1, "isCurrent": True},
-        {"pageTitle": "Python Docs", "pageUrl": "https://docs.python.org/3/", "tabId": 2, "isCurrent": False},
-        {"pageTitle": "Streamlit Cloud", "pageUrl": "https://streamlit.io/cloud", "tabId": 3, "isCurrent": False}
-    ]
-    st.caption(f"Total: {len(edge_all_open_tabs)} tabs")
-    for tab in edge_all_open_tabs:
-        st.write(f"- {tab['pageTitle']}")
-    current = next(tab for tab in edge_all_open_tabs if tab["isCurrent"])
-    st.markdown(f"**Active:** {current['pageTitle']}")
-
-# ================================================================
 # Load model
-# ================================================================
-
-with st.spinner("📂 Loading/Training model (v29.27)..."):
+with st.spinner("📂 Loading/Training model..."):
     model, scaler, y_scaler, feature_names, df, loss_history = load_or_train_model()
 st.success("✅ Model ready!")
 
 st.markdown("---")
 
-# ================================================================
 # Quick experiments
-# ================================================================
 st.markdown("### 🧪 Quick Experiments")
 exp_cols = st.columns(4)
 experiments = {
@@ -1152,24 +853,20 @@ for i, (name, params) in enumerate(experiments.items()):
         if st.button(f"📌 {name}", key=f"exp_{i}", use_container_width=True):
             for key in params:
                 st.session_state[key] = params[key]
-            clamp_session_state()
             st.rerun()
 
 st.markdown("---")
 
-# ================================================================
-# Main Formulation Parameters
-# ================================================================
 col_left, col_right = st.columns([1, 1.2], gap="medium")
 
 with col_left:
     st.markdown("### 📊 Formulation Parameters")
     with st.container(border=True):
-        api = st.slider("🧪 API (%)", 85.0, 95.0, get_safe_value('api'), 0.1, key="api")
-        binder = st.slider("🔗 Binder (%)", BINDER_MIN, BINDER_MAX, get_safe_value('binder'), 0.1, key="binder")
-        pvpp = st.slider("💊 PVPP (%)", 0.5, 6.0, get_safe_value('pvpp'), 0.1, key="pvpp")
-        mgst = st.slider("🧴 Mg-St (%)", 0.01, 1.2, get_safe_value('mgst'), 0.01, key="mgst")
-        mcc = st.slider("📦 MCC (%)", 0.0, MCC_MAX, get_safe_value('mcc'), 0.1, key="mcc")
+        api = st.slider("🧪 API (%)", 85.0, 95.0, get_val('api'), 0.1, key="api")
+        binder = st.slider("🔗 Binder (%)", BINDER_MIN, BINDER_MAX, get_val('binder'), 0.1, key="binder")
+        pvpp = st.slider("💊 PVPP (%)", 0.5, 6.0, get_val('pvpp'), 0.1, key="pvpp")
+        mgst = st.slider("🧴 Mg-St (%)", 0.01, 1.2, get_val('mgst'), 0.01, key="mgst")
+        mcc = st.slider("📦 MCC (%)", 0.0, MCC_MAX, get_val('mcc'), 0.1, key="mcc")
         total = api + binder + pvpp + mgst + mcc
         if abs(total - 100) < 0.1:
             st.success(f"✅ Total = {total:.2f}%")
@@ -1177,10 +874,10 @@ with col_left:
             st.warning(f"⚠️ Total = {total:.2f}% (adjust to 100%)")
     st.markdown("### ⚙️ Process Parameters")
     with st.container(border=True):
-        pressure = st.slider("⚙️ Pressure (MPa)", 80.0, PRESSURE_MAX, get_safe_value('pressure'), 1.0, key="pressure")
-        speed = st.slider("🔄 Speed (rpm)", 1.0, 50.0, get_safe_value('speed'), 0.5, key="speed")
-        granule = st.slider("🔬 Granule Size (µm)", 30.0, 250.0, get_safe_value('granule'), 1.0, key="granule")
-    predict_btn = st.button("🔬 Predict & Optimize (v29.27)", use_container_width=True)
+        pressure = st.slider("⚙️ Pressure (MPa)", 80.0, PRESSURE_MAX, get_val('pressure'), 1.0, key="pressure")
+        speed = st.slider("🔄 Speed (rpm)", 1.0, 50.0, get_val('speed'), 0.5, key="speed")
+        granule = st.slider("🔬 Granule Size (µm)", 30.0, 250.0, get_val('granule'), 1.0, key="granule")
+    predict_btn = st.button("🔬 Predict & Optimize", use_container_width=True)
 
 with col_right:
     st.markdown("### 📈 Results")
@@ -1199,7 +896,7 @@ with col_right:
             api_norm, binder_norm, pvpp_norm, mgst_norm, mcc_norm = normalize_components(api, binder, pvpp, mgst, mcc)
             inputs_norm = [api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm, pressure, speed, granule]
             api_use, mcc_use, pvpp_use, mgst_use, binder_use = api_norm, mcc_norm, pvpp_norm, mgst_norm, binder_norm
-            with st.spinner("🧠 Predicting (v29.27)..."):
+            with st.spinner("🧠 Predicting..."):
                 density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs_norm)
 
             st.markdown("#### Constraints Status")
@@ -1209,30 +906,21 @@ with col_right:
             efrf_ok = (efrf < EFRF_MAX)
             mcc_ok = (mcc_norm <= MCC_MAX)
 
-            cols[0].metric("Density", f"{density:.3f}",
-                           delta="✅" if density_ok else "❌")
-            cols[1].metric("Tensile", f"{tensile:.2f} MPa",
-                           delta="✅" if tensile_ok else "❌")
-            cols[2].metric("EFRF", f"{efrf:.4f}",
-                           delta="✅" if efrf_ok else "❌")
-            cols[3].metric("MCC", f"{mcc_norm:.1f}%",
-                           delta="✅" if mcc_ok else "❌")
+            cols[0].metric("Density", f"{density:.3f}", delta="✅" if density_ok else "❌")
+            cols[1].metric("Tensile", f"{tensile:.2f} MPa", delta="✅" if tensile_ok else "❌")
+            cols[2].metric("EFRF", f"{efrf:.4f}", delta="✅" if efrf_ok else "❌")
+            cols[3].metric("MCC", f"{mcc_norm:.1f}%", delta="✅" if mcc_ok else "❌")
 
             if density_ok and tensile_ok and efrf_ok and mcc_ok:
                 st.success("✅ All constraints satisfied!")
             else:
                 st.error("❌ One or more constraints violated.")
 
-            # --- NSGA‑II ---
+            # NSGA‑II
             st.markdown("#### ⚙️ Optimization (NSGA‑II)")
             bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],[80,PRESSURE_MAX],[1,50],[30,250]])
             with st.spinner(f"🔄 NSGA‑II (pop={NSGA_POP_SIZE}, gen={NSGA_GENERATIONS})..."):
-                # Granule mode is always variable in this simplified version (no UI toggle)
-                nsga = NSGAII(
-                    model, scaler, y_scaler, bounds,
-                    granule_mode='Variable',
-                    fixed_granule=125.0
-                )
+                nsga = NSGAII(model, scaler, y_scaler, bounds)
                 pop, objectives, constraints, fronts = nsga.run()
 
                 if len(fronts) > 0 and len(fronts[0]) > 0:
@@ -1290,7 +978,7 @@ with col_right:
                             - EFRF: `{golden_info['efrf']:.4f}`
                             """)
 
-            # --- Model Comparison ---
+            # Model Comparison
             X_train, X_test, y_train, y_test = train_test_split(
                 df[feature_names].values, df['Tensile_Strength_MPa'].values,
                 test_size=0.2, random_state=42
@@ -1320,54 +1008,21 @@ with col_right:
                 comp_df_display[col] = comp_df_display[col].map(lambda x: f"{x:.4f}")
             comp_df = comp_df_display
 
-    # ================================================================
-    # Tabs (5 tabs: removed 3D and Granule)
-    # ================================================================
-    tab1, tab2, tab3, tab4 = st.tabs(
-        ["📉 Pareto", "🔍 Sensitivity", "📊 Comparison", "📄 Report"]
-    )
+    # Tabs
+    tab1, tab2, tab3 = st.tabs(["📉 Pareto", "📊 Comparison", "📄 Report"])
 
     with tab1:
         if predict_btn and objectives is not None:
-            golden_api = golden_info['api'] if golden_info else None
-            golden_efrf = golden_info['efrf'] if golden_info else None
-
-            if show_stars:
-                fig = plot_pareto_with_stars(
-                    objectives=objectives,
-                    fronts=fronts,
-                    user_api=api_norm,
-                    user_efrf=efrf,
-                    golden_api=golden_api,
-                    golden_efrf=golden_efrf,
-                    smooth=show_smooth
-                )
-                caption = "🔵 Blue star = Your formulation · ⭐ Gold star = Optimal (golden) solution"
-            else:
-                fig = plot_pareto_clean(objectives, fronts, smooth=show_smooth)
-                caption = "🔴 Red markers = Pareto-optimal solutions · Dashed red line = EFRF threshold"
-
+            fig = plot_pareto_clean(objectives, fronts)
             if fig:
                 st.plotly_chart(fig, use_container_width=True)
-                st.caption(caption)
-                if show_smooth:
-                    st.caption("The dashed red curve is a smooth interpolation of the Pareto points.")
+                st.caption("🔴 Red markers = Pareto‑optimal solutions · Dashed red line = EFRF threshold")
             else:
                 st.info("No Pareto front data available.")
         else:
-            st.info("👆 Click 'Predict & Optimize' to run NSGA‑II and see the Pareto front.")
+            st.info("👆 Click 'Predict & Optimize' to run NSGA‑II.")
 
     with tab2:
-        if predict_btn and api_norm is not None:
-            fig = plot_sensitivity_plotly(inputs_norm, model, scaler, y_scaler)
-            if fig:
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("Sensitivity analysis not available.")
-        else:
-            st.info("👆 Click 'Predict & Optimize' to run sensitivity analysis.")
-
-    with tab3:
         if predict_btn and not comp_df.empty:
             st.markdown("### Model Performance Comparison")
             df_plot = comp_df.copy()
@@ -1403,28 +1058,21 @@ with col_right:
         else:
             st.info("👆 Click 'Predict & Optimize' to see model comparison.")
 
-    with tab4:
+    with tab3:
         if predict_btn and not comp_df.empty:
             status = "PASS" if (density_ok and tensile_ok and efrf_ok and mcc_ok) else "FAIL"
             timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-            pdf_comp_df = comp_df.copy()
-            for col in ['R²', 'RMSE', 'MAE']:
-                pdf_comp_df[col] = pdf_comp_df[col].astype(float)
-
-            pdf_data = generate_full_pdf_report(
-                api_use, mcc_use, pvpp_use, mgst_use, binder_use,
-                pressure, speed, granule, density, tensile, er, efrf,
-                status, timestamp, pdf_comp_df, golden_info
-            )
+            # Generate PDF without FPDF to avoid extra dependency? We'll keep it simple.
+            # For now, just show a download button with a simple text report.
+            st.info("PDF report generation is simplified in this minimal version.")
             st.download_button(
-                "📥 Download PDF Report (v29.27)",
-                data=pdf_data,
-                file_name=f"report_v29.27_{timestamp[:10]}.pdf",
-                mime="application/pdf"
+                "📥 Download Results (CSV)",
+                data=comp_df.to_csv(index=False),
+                file_name=f"results_{timestamp[:10]}.csv",
+                mime="text/csv"
             )
         else:
-            st.info("👆 Click 'Predict & Optimize' to generate the report.")
+            st.info("👆 Click 'Predict & Optimize' to generate results.")
 
 st.markdown("---")
-st.caption("🔬 **Hubryd AI v29.27** — Improved R² · Curriculum Learning | Nile Valley University")
+st.caption("🔬 **Hubryd AI v29.27** — Minimal & Stable | Nile Valley University")
