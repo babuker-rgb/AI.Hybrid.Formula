@@ -7,3 +7,4 @@ plotly
 fpdf
 scipy
 pymoo
+scipy==1.13.0
