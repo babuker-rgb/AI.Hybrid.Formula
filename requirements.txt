@@ -5,6 +5,5 @@ pandas
 scikit-learn
 plotly
 fpdf
-scipy
-pymoo
 scipy==1.13.0
+pymoo
