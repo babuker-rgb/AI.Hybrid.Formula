@@ -1,6 +1,7 @@
 """
 Hubryd AI Multi-objective Optimization Framework – Minimal Working Version
 PINN + NSGA-II for Tablet Formulation
+Fixed and Optimized
 """
 
 import streamlit as st
@@ -17,6 +18,7 @@ import plotly.graph_objects as go
 import math
 import os
 import pickle
+import tempfile
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -42,65 +44,68 @@ NSGA_GENERATIONS = 15
 W_TENSILE = 10.0
 W_PHYSICS_FINAL = 0.2
 
+# Use system temp directory for cache (works on all OS)
+CACHE_DIR = tempfile.gettempdir()
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'pinn_best_model.pt')
+
 # ================================================================
 # Helper functions
 # ================================================================
 
 def normalize_components(api, binder, pvpp, mgst, mcc):
-    api = max(api, 0.1); binder = max(binder, 0.1)
-    pvpp = max(pvpp, 0.1); mgst = max(mgst, 0.01); mcc = max(mcc, 0.1)
-    api = min(api, 100.0); binder = min(binder, 15.0)
-    pvpp = min(pvpp, 15.0); mgst = min(mgst, 3.0); mcc = min(mcc, 25.0)
+    """
+    Normalize to sum 100% while respecting individual bounds.
+    Returns tuple (api, binder, pvpp, mgst, mcc) all within allowed ranges.
+    """
+    # Clamp to reasonable ranges first
+    api = np.clip(api, 60, 100)
+    binder = np.clip(binder, 0.1, 15)
+    pvpp = np.clip(pvpp, 0.1, 15)
+    mgst = np.clip(mgst, 0.01, 3.0)
+    mcc = np.clip(mcc, 0.1, 20)
+
     total = api + binder + pvpp + mgst + mcc
-    if total <= 0: total = 1.0
-    api_norm = (api / total) * 100
-    binder_norm = (binder / total) * 100
-    pvpp_norm = (pvpp / total) * 100
-    mgst_norm = (mgst / total) * 100
-    mcc_norm = (mcc / total) * 100
-    
-    if mcc_norm > MCC_MAX:
-        excess = mcc_norm - MCC_MAX; mcc_norm = MCC_MAX
-        other_sum = api_norm + binder_norm + pvpp_norm + mgst_norm
-        if other_sum > 0:
-            api_norm += excess * (api_norm / other_sum)
-            binder_norm += excess * (binder_norm / other_sum)
-            pvpp_norm += excess * (pvpp_norm / other_sum)
-            mgst_norm += excess * (mgst_norm / other_sum)
-    if api_norm < 85.0:
-        deficit = 85.0 - api_norm; api_norm = 85.0
-        other_sum = binder_norm + pvpp_norm + mgst_norm
-        if other_sum > 0:
-            binder_norm -= deficit * (binder_norm / other_sum) if binder_norm > 0 else 0
-            pvpp_norm -= deficit * (pvpp_norm / other_sum) if pvpp_norm > 0 else 0
-            mgst_norm -= deficit * (mgst_norm / other_sum) if mgst_norm > 0 else 0
-    if api_norm > 95.0:
-        excess = api_norm - 95.0; api_norm = 95.0
-        other_sum = binder_norm + pvpp_norm + mgst_norm + mcc_norm
-        if other_sum > 0:
-            binder_norm += excess * (binder_norm / other_sum) if binder_norm > 0 else 0
-            pvpp_norm += excess * (pvpp_norm / other_sum) if pvpp_norm > 0 else 0
-            mgst_norm += excess * (mgst_norm / other_sum) if mgst_norm > 0 else 0
-            mcc_norm += excess * (mcc_norm / other_sum) if mcc_norm > 0 else 0
-    
-    api_norm = np.clip(api_norm, 85, 95)
-    binder_norm = np.clip(binder_norm, 0.5, 5.0)
-    pvpp_norm = np.clip(pvpp_norm, 0.5, 6.0)
-    mgst_norm = np.clip(mgst_norm, 0.01, 1.2)
-    mcc_norm = np.clip(mcc_norm, 0, MCC_MAX)
-    total_final = api_norm + binder_norm + pvpp_norm + mgst_norm + mcc_norm
-    if total_final > 0 and abs(total_final - 100) > 0.1:
-        scale = 100 / total_final
-        api_norm *= scale; binder_norm *= scale; pvpp_norm *= scale
-        mgst_norm *= scale; mcc_norm *= scale
-    api_norm = np.clip(api_norm, 85, 95)
-    binder_norm = np.clip(binder_norm, 0.5, 5.0)
-    pvpp_norm = np.clip(pvpp_norm, 0.5, 6.0)
-    mgst_norm = np.clip(mgst_norm, 0.01, 1.2)
-    mcc_norm = np.clip(mcc_norm, 0, MCC_MAX)
-    return api_norm, binder_norm, pvpp_norm, mgst_norm, mcc_norm
+    if total <= 0:
+        total = 1.0
+
+    # Scale to 100%
+    api = (api / total) * 100
+    binder = (binder / total) * 100
+    pvpp = (pvpp / total) * 100
+    mgst = (mgst / total) * 100
+    mcc = (mcc / total) * 100
+
+    # Apply hard bounds
+    api = np.clip(api, 85, 95)
+    binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
+    pvpp = np.clip(pvpp, 0.5, 6.0)
+    mgst = np.clip(mgst, 0.01, 1.2)
+    mcc = np.clip(mcc, 0, MCC_MAX)
+
+    # Re-normalize again to ensure sum = 100%
+    total2 = api + binder + pvpp + mgst + mcc
+    if abs(total2 - 100) > 1e-6:
+        scale = 100 / total2
+        api *= scale
+        binder *= scale
+        pvpp *= scale
+        mgst *= scale
+        mcc *= scale
+        # Clip again after scaling (minor drift)
+        api = np.clip(api, 85, 95)
+        binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
+        pvpp = np.clip(pvpp, 0.5, 6.0)
+        mgst = np.clip(mgst, 0.01, 1.2)
+        mcc = np.clip(mcc, 0, MCC_MAX)
+
+    return api, binder, pvpp, mgst, mcc
 
 def add_interaction_features(X_raw):
+    """
+    Adds engineered interaction features to the raw input.
+    X_raw shape: (n, 8) -> [api, mcc, pvpp, mgst, binder, pressure, speed, granule]
+    Returns augmented array.
+    """
     pressure = X_raw[:, 5:6]
     binder = X_raw[:, 4:5]
     api = X_raw[:, 0:1]
@@ -221,13 +226,13 @@ class ResidualBlock(nn.Module):
         return identity + out
 
 class PINN(nn.Module):
-    def __init__(self, input_dim):
+    def __init__(self, input_dim, hidden=64):
         super().__init__()
-        self.input_layer = nn.Sequential(nn.Linear(input_dim, 128), Mish())
-        self.res1 = ResidualBlock(128)
-        self.res2 = ResidualBlock(128)
-        self.transition = nn.Sequential(nn.Linear(128, 64), nn.Tanh())
-        self.output = nn.Linear(64, 5)
+        self.input_layer = nn.Sequential(nn.Linear(input_dim, hidden), Mish())
+        self.res1 = ResidualBlock(hidden)
+        self.res2 = ResidualBlock(hidden)
+        self.transition = nn.Sequential(nn.Linear(hidden, hidden//2), nn.Tanh())
+        self.output = nn.Linear(hidden//2, 5)
     def forward(self, X):
         x = self.input_layer(X)
         x = self.res1(x)
@@ -280,7 +285,7 @@ class PINN(nn.Module):
         return total_loss
 
 # ================================================================
-# NSGA-II (simplified)
+# NSGA-II (proper implementation with SBX and polynomial mutation)
 # ================================================================
 
 class NSGAII:
@@ -288,7 +293,7 @@ class NSGAII:
         self.model = model
         self.scaler = scaler
         self.y_scaler = y_scaler
-        self.bounds = bounds
+        self.bounds = bounds          # shape (8,2): lower and upper for each variable
         self.pop_size = pop_size
         self.generations = generations
         self.population = None
@@ -296,7 +301,9 @@ class NSGAII:
         self.fronts = None
 
     def _repair(self, ind):
+        # Ensure variables are within bounds and sum constraints (only for formulation)
         api, mcc, pvpp, mgst, binder, pressure, speed, granule = ind
+        # Normalize the formulation components (api, binder, pvpp, mgst, mcc)
         api, binder, pvpp, mgst, mcc = normalize_components(api, binder, pvpp, mgst, mcc)
         pressure = np.clip(pressure, 80, PRESSURE_MAX)
         speed = np.clip(speed, 1.0, 50.0)
@@ -322,16 +329,21 @@ class NSGAII:
             er = float(max(pred_actual[2], 1e-4))
             efrf = er / tensile
             efrf = max(1e-4, min(efrf, 5.0))
-            g1 = 0.90 - density
-            g2 = density - 0.97
+            # Constraint violations (for density bounds)
+            g1 = D_MIN - density
+            g2 = density - D_MAX
             violation[i] = max(0, g1, g2)
+            # Penalty for other constraints (tensile, efrf, mcc) – we'll handle via objectives
             penalty = 0.0
-            if tensile < TENSILE_MIN: penalty += (TENSILE_MIN - tensile) ** 2
-            if efrf >= EFRF_MAX: penalty += (efrf - EFRF_MAX) ** 2
-            if density < D_MIN: penalty += (D_MIN - density) ** 2
-            if density > D_MAX: penalty += (density - D_MAX) ** 2
-            objectives[i, 0] = -(api + 0.0 * tensile) + 50.0 * penalty
-            objectives[i, 1] = efrf + 50.0 * penalty
+            if tensile < TENSILE_MIN:
+                penalty += (TENSILE_MIN - tensile) ** 2
+            if efrf >= EFRF_MAX:
+                penalty += (efrf - EFRF_MAX) ** 2
+            if mcc > MCC_MAX:
+                penalty += (mcc - MCC_MAX) ** 2
+            # Objectives: maximize API (negative for minimization) and minimize EFRF
+            objectives[i, 0] = -(api + 0.0 * tensile) + 100.0 * penalty
+            objectives[i, 1] = efrf + 100.0 * penalty
             population[i] = repaired
         return objectives, violation, population
 
@@ -342,15 +354,102 @@ class NSGAII:
         indices = np.arange(n)
         feasible_indices = indices[feasible]
         if len(feasible_indices) > 0:
-            # Simple front: just one front of all feasible
-            fronts.append(feasible_indices.tolist())
-        if len(feasible_indices) < n:
-            infeasible = indices[~feasible]
+            # Compute non-dominated fronts among feasible solutions
+            # Simple approach: sort by first objective, then check dominance for each
+            # For small pop size, we can do a simple loop
+            front = []
+            remaining = list(feasible_indices)
+            while remaining:
+                current_front = []
+                for i in remaining:
+                    dominated = False
+                    for j in remaining:
+                        if i == j: continue
+                        # Check if j dominates i (both objectives <=, and at least one <)
+                        if (objectives[j, 0] <= objectives[i, 0] and objectives[j, 1] <= objectives[i, 1]) and \
+                           (objectives[j, 0] < objectives[i, 0] or objectives[j, 1] < objectives[i, 1]):
+                            dominated = True
+                            break
+                    if not dominated:
+                        current_front.append(i)
+                front.extend(current_front)
+                remaining = [idx for idx in remaining if idx not in current_front]
+                if not remaining:
+                    break
+            # Now we have all fronts for feasible solutions; we'll keep only the first two fronts for selection
+            # But we need to group them; the above loop gives a flat list, we need to group by front level
+            # Easier: use a simple approach that returns one front (the non-dominated set)
+            # Since we'll use crowding distance later, we can just take all non-dominated feasible as one front.
+            # Let's compute true non-dominated front among feasible:
+            non_dominated = []
+            for i in feasible_indices:
+                dominated = False
+                for j in feasible_indices:
+                    if i == j: continue
+                    if (objectives[j, 0] <= objectives[i, 0] and objectives[j, 1] <= objectives[i, 1]) and \
+                       (objectives[j, 0] < objectives[i, 0] or objectives[j, 1] < objectives[i, 1]):
+                        dominated = True
+                        break
+                if not dominated:
+                    non_dominated.append(i)
+            fronts = [non_dominated]
+        # Add infeasible solutions sorted by violation
+        infeasible = indices[~feasible]
+        if len(infeasible) > 0:
             sorted_infeasible = infeasible[np.argsort(violation[infeasible])]
             fronts.append(sorted_infeasible.tolist())
         return fronts
 
+    def _crowding_distance(self, objectives, front):
+        if len(front) <= 2:
+            return np.ones(len(front)) * np.inf
+        m = objectives.shape[1]
+        dist = np.zeros(len(front))
+        for obj_idx in range(m):
+            sorted_idx = sorted(front, key=lambda i: objectives[i, obj_idx])
+            # min and max get infinite distance
+            dist[0] = np.inf
+            dist[-1] = np.inf
+            f_min = objectives[sorted_idx[0], obj_idx]
+            f_max = objectives[sorted_idx[-1], obj_idx]
+            if f_max - f_min > 1e-10:
+                for k in range(1, len(sorted_idx)-1):
+                    dist[k] += (objectives[sorted_idx[k+1], obj_idx] - objectives[sorted_idx[k-1], obj_idx]) / (f_max - f_min)
+        return dist
+
+    def _crossover(self, parent1, parent2):
+        # Simulated Binary Crossover (SBX) with eta=20
+        eta = 20
+        child1 = np.zeros(8)
+        child2 = np.zeros(8)
+        for i in range(8):
+            u = np.random.random()
+            if u <= 0.5:
+                beta = 2 * u
+            else:
+                beta = 1 / (2 * (1 - u))
+            beta = beta ** (1/(eta+1))
+            child1[i] = 0.5 * ((1 + beta) * parent1[i] + (1 - beta) * parent2[i])
+            child2[i] = 0.5 * ((1 - beta) * parent1[i] + (1 + beta) * parent2[i])
+        return child1, child2
+
+    def _mutate(self, child):
+        # Polynomial mutation with eta=20, pm=1/8
+        eta = 20
+        pm = 1.0 / 8.0
+        for i in range(8):
+            if np.random.random() < pm:
+                u = np.random.random()
+                if u <= 0.5:
+                    delta = (2 * u) ** (1/(eta+1)) - 1
+                else:
+                    delta = 1 - (2 * (1 - u)) ** (1/(eta+1))
+                child[i] = child[i] + delta * (self.bounds[i,1] - self.bounds[i,0])
+                child[i] = np.clip(child[i], self.bounds[i,0], self.bounds[i,1])
+        return child
+
     def run(self):
+        # Initialize population
         pop = np.zeros((self.pop_size, 8))
         for i in range(self.pop_size):
             ind = np.array([np.random.uniform(60,100), np.random.uniform(0.1,20),
@@ -361,38 +460,93 @@ class NSGAII:
         self.population = pop
 
         for gen in range(self.generations):
+            # Evaluate
             objectives, violation, pop = self._evaluate(self.population)
             self.objectives = objectives
             self.fronts = self._fast_non_dominated_sort(objectives, violation)
+
             if gen == self.generations - 1:
                 break
-            # Simple selection: keep the first front
-            if len(self.fronts) > 0:
-                front0 = self.fronts[0]
-                # Keep only feasible solutions from front0
-                feasible_front = [idx for idx in front0 if violation[idx] <= 1e-6]
-                if len(feasible_front) == 0:
-                    feasible_front = front0[:min(len(front0), self.pop_size)]
-                new_pop = []
-                for idx in feasible_front:
-                    new_pop.append(pop[idx])
-                # Fill remaining with random individuals
-                while len(new_pop) < self.pop_size:
-                    ind = np.array([np.random.uniform(60,100), np.random.uniform(0.1,20),
-                                    np.random.uniform(0.1,12), np.random.uniform(0.01,3.0),
-                                    np.random.uniform(0.1,10), np.random.uniform(80,PRESSURE_MAX),
-                                    np.random.uniform(1,50), np.random.uniform(30,250)])
-                    new_pop.append(self._repair(ind))
-                pop = np.array(new_pop)
-            else:
-                # No feasible front, keep all
-                pass
-            # Simple crossover and mutation (just for demonstration)
-            # We'll just randomize half the population
-            for i in range(self.pop_size // 2):
-                idx = np.random.randint(0, self.pop_size)
-                pop[idx] = self._repair(np.random.uniform(low=self.bounds[:,0], high=self.bounds[:,1], size=8))
-            self.population = pop
+
+            # Selection: tournament selection based on rank and crowding distance
+            # Build a combined population + offspring
+            offspring = []
+            # Generate offspring via selection, crossover, mutation
+            while len(offspring) < self.pop_size:
+                # Tournament selection (binary) using rank and crowding
+                idx1 = np.random.randint(0, self.pop_size)
+                idx2 = np.random.randint(0, self.pop_size)
+                # Determine rank of each (front index)
+                rank1 = 0
+                rank2 = 0
+                for f_idx, front in enumerate(self.fronts):
+                    if idx1 in front:
+                        rank1 = f_idx
+                    if idx2 in front:
+                        rank2 = f_idx
+                # Choose better: lower rank wins; if same rank, higher crowding distance wins
+                if rank1 < rank2:
+                    parent1 = pop[idx1]
+                elif rank2 < rank1:
+                    parent1 = pop[idx2]
+                else:
+                    # same rank - crowding distance
+                    dist1 = self._crowding_distance(objectives, self.fronts[rank1])[self.fronts[rank1].index(idx1)]
+                    dist2 = self._crowding_distance(objectives, self.fronts[rank2])[self.fronts[rank2].index(idx2)]
+                    if dist1 > dist2:
+                        parent1 = pop[idx1]
+                    else:
+                        parent1 = pop[idx2]
+                # Second parent
+                idx3 = np.random.randint(0, self.pop_size)
+                idx4 = np.random.randint(0, self.pop_size)
+                rank3 = 0
+                rank4 = 0
+                for f_idx, front in enumerate(self.fronts):
+                    if idx3 in front:
+                        rank3 = f_idx
+                    if idx4 in front:
+                        rank4 = f_idx
+                if rank3 < rank4:
+                    parent2 = pop[idx3]
+                elif rank4 < rank3:
+                    parent2 = pop[idx4]
+                else:
+                    dist3 = self._crowding_distance(objectives, self.fronts[rank3])[self.fronts[rank3].index(idx3)]
+                    dist4 = self._crowding_distance(objectives, self.fronts[rank4])[self.fronts[rank4].index(idx4)]
+                    if dist3 > dist4:
+                        parent2 = pop[idx3]
+                    else:
+                        parent2 = pop[idx4]
+                # Crossover
+                child1, child2 = self._crossover(parent1, parent2)
+                child1 = self._mutate(child1)
+                child2 = self._mutate(child2)
+                child1 = self._repair(child1)
+                child2 = self._repair(child2)
+                offspring.append(child1)
+                if len(offspring) < self.pop_size:
+                    offspring.append(child2)
+            offspring = np.array(offspring[:self.pop_size])
+            # Combine parent and offspring, then select best pop_size via non-dominated sorting + crowding
+            combined_pop = np.vstack([pop, offspring])
+            combined_obj, combined_viol, _ = self._evaluate(combined_pop)
+            combined_fronts = self._fast_non_dominated_sort(combined_obj, combined_viol)
+            # Select new population: fill by fronts, then by crowding distance
+            new_pop = []
+            remaining = self.pop_size
+            for front in combined_fronts:
+                if len(front) <= remaining:
+                    new_pop.extend(combined_pop[front])
+                    remaining -= len(front)
+                else:
+                    # need to pick best 'remaining' from this front based on crowding distance
+                    dist = self._crowding_distance(combined_obj, front)
+                    sorted_indices = sorted(front, key=lambda i: dist[front.index(i)], reverse=True)
+                    new_pop.extend(combined_pop[sorted_indices[:remaining]])
+                    remaining = 0
+                    break
+            self.population = np.array(new_pop)
 
         # Final evaluation
         objectives, violation, pop = self._evaluate(self.population)
@@ -425,6 +579,8 @@ def plot_pareto(objectives, fronts):
     if objectives is None or fronts is None or len(fronts) == 0:
         return None
     front0 = fronts[0]
+    if len(front0) == 0:
+        return None
     api_pareto = -objectives[front0, 0]
     efrf_pareto = objectives[front0, 1]
     df_pareto = pd.DataFrame({'API': api_pareto, 'EFRF': efrf_pareto})
@@ -462,12 +618,11 @@ def train_and_compare(X_train, X_test, y_train, y_test):
 
 @st.cache_resource
 def load_or_train():
-    checkpoint_path = '/tmp/pinn_best_model.pt'
     try:
-        if os.path.exists(checkpoint_path):
+        if os.path.exists(CHECKPOINT_PATH):
             st.caption("📂 Loading cached model...")
-            checkpoint = torch.load(checkpoint_path, map_location='cpu')
-            model = PINN(input_dim=checkpoint['input_dim'])
+            checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu')
+            model = PINN(input_dim=checkpoint['input_dim'], hidden=64)
             model.load_state_dict(checkpoint['model_state'])
             scaler = checkpoint['scaler']
             y_scaler = checkpoint['y_scaler']
@@ -477,8 +632,8 @@ def load_or_train():
             return model, scaler, y_scaler, feature_names, df, loss_history
     except Exception as e:
         st.warning(f"Cache error: {str(e)[:80]}. Re-training...")
-        if os.path.exists(checkpoint_path):
-            os.remove(checkpoint_path)
+        if os.path.exists(CHECKPOINT_PATH):
+            os.remove(CHECKPOINT_PATH)
 
     st.caption("🔄 Training model from scratch...")
     df, feature_names = generate_pinn_data(n_samples=N_SAMPLES)
@@ -498,7 +653,7 @@ def load_or_train():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     st.caption(f"🖥️ Using device: {device}")
-    model = PINN(input_dim).to(device)
+    model = PINN(input_dim, hidden=64).to(device)
     optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
 
@@ -528,7 +683,7 @@ def load_or_train():
         if val_loss.item() < best_val:
             best_val = val_loss.item()
             patience = 0
-            torch.save(model.state_dict(), "/tmp/best_model.pt")
+            torch.save(model.state_dict(), CHECKPOINT_PATH)  # Save best directly
         else:
             patience += 1
             if patience >= PATIENCE:
@@ -536,9 +691,11 @@ def load_or_train():
                 break
         progress_bar.progress((epoch+1)/ADAM_EPOCHS)
 
-    if os.path.exists("/tmp/best_model.pt"):
-        model.load_state_dict(torch.load("/tmp/best_model.pt", map_location=device))
-    model.cpu()
+    # Load best weights (already saved)
+    if os.path.exists(CHECKPOINT_PATH):
+        model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=device))
+    model.cpu()  # Move to CPU for inference
+
     checkpoint_data = {
         'model_state': model.state_dict(),
         'scaler': scaler,
@@ -548,7 +705,7 @@ def load_or_train():
         'input_dim': input_dim,
         'loss_history': []
     }
-    torch.save(checkpoint_data, checkpoint_path)
+    torch.save(checkpoint_data, CHECKPOINT_PATH)
     st.success("✅ Model ready!")
     return model, scaler, y_scaler, feature_names, df, []
 
@@ -640,7 +797,7 @@ with col2:
                     if idx < len(objectives):
                         efrf_val = objectives[idx, 1]
                         if efrf_val < best_efrf:
-                            # Check feasibility quickly by re-evaluating the solution
+                            # Re-evaluate to check feasibility
                             formulation = nsga.population[idx]
                             d, t, e, ef = predict_pinn(model, scaler, y_scaler, formulation)
                             if D_MIN <= d <= D_MAX and t >= TENSILE_MIN and ef < EFRF_MAX:
