@@ -1,7 +1,7 @@
 """
-Hybrid AI Multi Objective Optimization Framework  
-v29.29 – Enhanced UI with v29.18 Core Multi‑Task True PINN · 
-Nile Valley University · Postgraduate College · Sudan
+Hubryd AI v29.27 – Minimal · Stable · Free Tier
+Enhanced with Particle Size Toggle (Variable / Fixed)
+Nile Valley University · Sudan
 """
 
 import streamlit as st
@@ -17,11 +17,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 import os
 import tempfile
+import datetime          # <-- FIX: added for report timestamp
 import warnings
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# Physics Constants (unchanged)
+# Physics Constants
 # ================================================================
 D_MIN = 0.40
 D_MAX = 0.97
@@ -33,14 +34,14 @@ BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
 # ================================================================
-# Training Parameters (unchanged)
+# Training Parameters (v29.27 – minimal)
 # ================================================================
-N_SAMPLES = 12000
-ADAM_EPOCHS = 1000
-LBFGS_EPOCHS = 3
-PATIENCE = 150
-NSGA_POP = 80
-NSGA_GENS = 60
+N_SAMPLES = 5000
+ADAM_EPOCHS = 200
+PATIENCE = 30
+NSGA_POP = 40
+NSGA_GENS = 30
+HIDDEN_SIZE = 256
 
 W_DENSITY = 1.0
 W_TENSILE = 30.0
@@ -161,7 +162,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# PINN Model (unchanged – MultiTaskPINN with 384-384-192)
+# PINN Model (v29.27 – 256 neurons)
 # ================================================================
 class Mish(nn.Module):
     def forward(self, x):
@@ -185,7 +186,7 @@ class ResidualBlock(nn.Module):
         return identity + out
 
 class MultiTaskPINN(nn.Module):
-    def __init__(self, input_dim, hidden=384):
+    def __init__(self, input_dim, hidden=HIDDEN_SIZE):
         super().__init__()
         self.input_layer = nn.Sequential(nn.Linear(input_dim, hidden), Mish())
         self.res1 = ResidualBlock(hidden)
@@ -258,23 +259,28 @@ class MultiTaskPINN(nn.Module):
         return total_loss
 
 # ================================================================
-# NSGA-II (unchanged – with SBX, smart seeding)
+# NSGA-II (with variable granule option)
 # ================================================================
 class NSGAII:
-    def __init__(self, model, scaler, y_scaler, bounds, pop=80, gens=60):
+    def __init__(self, model, scaler, y_scaler, bounds, pop=40, gens=30, granule_fixed=True, granule_fixed_val=125.0):
         self.model = model
         self.scaler = scaler
         self.y_scaler = y_scaler
         self.bounds = bounds
         self.pop_size = pop
         self.generations = gens
+        self.granule_fixed = granule_fixed
+        self.granule_fixed_val = granule_fixed_val
 
     def _repair(self, ind):
         api, mcc, pvpp, mgst, binder, pressure, speed, granule = ind
         api, binder, pvpp, mgst, mcc = normalize_components(api, binder, pvpp, mgst, mcc)
         pressure = np.clip(pressure, 80, PRESSURE_MAX)
         speed = np.clip(speed, 1, 50)
-        granule = np.clip(granule, 30, 250)
+        if self.granule_fixed:
+            granule = self.granule_fixed_val
+        else:
+            granule = np.clip(granule, 30, 250)
         return np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule])
 
     def _evaluate(self, population):
@@ -313,7 +319,6 @@ class NSGAII:
 
     def _non_dominated_sort(self, objectives, violation):
         n = objectives.shape[0]
-        feasible = violation <= 1e-6
         fronts = []
         remaining = list(range(n))
         while remaining:
@@ -447,7 +452,7 @@ class NSGAII:
         return pop, objectives, fronts
 
 # ================================================================
-# Prediction and Plotting Helpers (unchanged)
+# Prediction and Plotting Helpers
 # ================================================================
 def predict_pinn(model, scaler, y_scaler, inputs):
     try:
@@ -474,7 +479,7 @@ def plot_pareto(objectives, fronts):
         'API': -objectives[front, 0],
         'EFRF': objectives[front, 1]
     })
-    fig = px.scatter(df_plot, x='API', y='EFRF', title='Pareto Front (v29.18 Core)')
+    fig = px.scatter(df_plot, x='API', y='EFRF', title='Pareto Front (v29.27)')
     fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='red',
                   annotation_text=f'EFRF threshold {EFRF_MAX}')
     fig.update_layout(height=450, template='plotly_white')
@@ -502,17 +507,17 @@ def train_benchmark(X_train, X_test, y_train, y_test):
     return pd.DataFrame(results)
 
 # ================================================================
-# Cached Training (unchanged)
+# Cached Training (v29.27)
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_18.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27.pt')
 
 @st.cache_resource
 def load_or_train():
     if os.path.exists(CHECKPOINT_PATH):
         try:
             ckpt = torch.load(CHECKPOINT_PATH, map_location='cpu')
-            model = MultiTaskPINN(ckpt['input_dim'], hidden=384)
+            model = MultiTaskPINN(ckpt['input_dim'], hidden=HIDDEN_SIZE)
             model.load_state_dict(ckpt['model_state'])
             scaler = ckpt['scaler']
             y_scaler = ckpt['y_scaler']
@@ -522,7 +527,7 @@ def load_or_train():
         except Exception as e:
             st.warning(f"Cache load failed: {e}. Retraining...")
 
-    st.caption("🔄 Training Multi‑Task True PINN (v29.18 core) ... this may take 2-3 minutes.")
+    st.caption("🔄 Training model from scratch...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%']].values
@@ -535,15 +540,16 @@ def load_or_train():
     X_train, X_test, X_raw_train, X_raw_test, y_train, y_test = train_test_split(
         X_scaled, X_raw, y_scaled, test_size=0.2, random_state=42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = MultiTaskPINN(input_dim, hidden=384).to(device)
+    st.caption(f"🖥️ Using device: {device}")
+    model = MultiTaskPINN(input_dim, hidden=HIDDEN_SIZE).to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=30, factor=0.5)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=15, factor=0.5)
     X_train_t = torch.tensor(X_train, dtype=torch.float32).to(device)
     X_raw_train_t = torch.tensor(X_raw_train, dtype=torch.float32).to(device)
     y_train_t = torch.tensor(y_train, dtype=torch.float32).to(device)
     best_loss = float('inf')
     patience_counter = 0
-    progress = st.progress(0)
+    progress_bar = st.progress(0)
     for epoch in range(ADAM_EPOCHS):
         model.train()
         optimizer.zero_grad()
@@ -555,25 +561,16 @@ def load_or_train():
         if loss.item() < best_loss:
             best_loss = loss.item()
             patience_counter = 0
-            torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_adam.pt'))
+            torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_adam_v29_27.pt'))
         else:
             patience_counter += 1
             if patience_counter >= PATIENCE:
-                st.info(f"Early stopping at Adam epoch {epoch+1}")
+                st.info(f"Training stopped early at epoch {epoch+1}")
                 break
-        progress.progress((epoch+1)/ADAM_EPOCHS)
-    if os.path.exists(os.path.join(CACHE_DIR, 'best_adam.pt')):
-        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_adam.pt'), map_location=device))
-    st.caption("⚙️ Fine‑tuning with LBFGS ...")
-    optimizer_lbfgs = optim.LBFGS(model.parameters(), lr=0.01, max_iter=5, history_size=10)
-    model.train()
-    def closure():
-        optimizer_lbfgs.zero_grad()
-        loss = model.compute_loss(X_train_t, X_raw_train_t, y_train_t, total_epochs=ADAM_EPOCHS)
-        loss.backward()
-        return loss
-    for _ in range(LBFGS_EPOCHS):
-        optimizer_lbfgs.step(closure)
+        progress_bar.progress((epoch+1)/ADAM_EPOCHS)
+    st.success(f"✅ Best validation loss: {best_loss:.4f}")
+    if os.path.exists(os.path.join(CACHE_DIR, 'best_adam_v29_27.pt')):
+        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_adam_v29_27.pt'), map_location=device))
     model.cpu()
     checkpoint = {
         'model_state': model.state_dict(),
@@ -584,39 +581,38 @@ def load_or_train():
         'input_dim': input_dim
     }
     torch.save(checkpoint, CHECKPOINT_PATH)
-    st.success("✅ Model ready and cached!")
+    st.success("✅ Model trained and cached successfully!")
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# ENHANCED UI – v29.29 STYLE
+# Streamlit UI – v29.27 Style + Particle Size Toggle
 # ================================================================
-st.set_page_config(page_title="Hubryd AI v29.29", layout="wide")
+st.set_page_config(page_title="Hubryd AI v29.27", layout="wide")
 
 # Header
 st.markdown("""
 <div style="background: linear-gradient(135deg, #0b1a33, #1a2a4a, #0f3460); padding:1.5rem; border-radius:1rem; text-align:center; margin-bottom:1rem;">
-    <h1 style="color:#fff; margin:0;">🧬 Hubryd AI – v29.29</h1>
-    <p style="color:#64ffda; margin:0;">Multi‑Task True PINN · Real‑Space Loss + Monotonicity</p>
-    <p style="color:#8899aa; font-size:0.9rem;">Nile Valley University · Postgraduate College · Sudan</p>
+    <h1 style="color:#fff; margin:0;">🧬 Hubryd AI – v29.27</h1>
+    <p style="color:#64ffda; margin:0;">Multi‑Task True PINN · Minimal · Stable · Free Tier</p>
+    <p style="color:#8899aa; font-size:0.9rem;">Nile Valley University · Sudan</p>
 </div>
 """, unsafe_allow_html=True)
 
-# Sidebar – Physics info with expander
+# Sidebar – Physics constraints
 with st.sidebar:
     st.markdown("### 📚 Physics Constraints")
-    with st.expander("View details", expanded=True):
-        st.markdown("""
-        - **Heckel:** ln(1/(1-D)) = kP + A  
-        - **EFRF:** ER/σt < 0.40  
-        - **Monotonicity:** ∂D/∂P > 0, ∂σt/∂P > 0  
-        - **Density:** 0.40 – 0.97  
-        - **MCC:** ≤ 8.0%  
-        - **Tensile:** ≥ 1.90 MPa
-        """)
+    st.markdown("""
+    ✅ Heckel: ln(1/(1-D)) = kP + A  
+    ✅ EFRF: ER / σt < 0.40  
+    ✅ Density: 0.40 ≤ D ≤ 0.97  
+    ✅ MCC: ≤ 8.0%  
+    ✅ Samples: 5000  
+    ✅ Epochs: 200  
+    ✅ NSGA‑II: Pop=40, Gen=30  
+    ✅ Network: 256 Neurons
+    """)
     st.markdown("---")
-    st.markdown("### ⚙️ Core Settings")
-    st.caption(f"Hidden size: 384 · Dropout: 0.1 · Weight decay: 1e-4")
-    st.caption(f"NSGA‑II: pop={NSGA_POP}, gen={NSGA_GENS}, ηc=40")
+    st.caption("🔬 v29.27 — Minimal & Stable")
 
 # Load model
 try:
@@ -628,16 +624,16 @@ except Exception as e:
 # Session state for presets
 if 'api' not in st.session_state:
     st.session_state.update({
-        'api':90.5, 'binder':2.7, 'pvpp':3.0, 'mgst':0.20, 'mcc':3.6,
-        'pressure':230, 'speed':12, 'granule':125
+        'api':90.5, 'binder':3.0, 'pvpp':3.0, 'mgst':0.15, 'mcc':3.35,
+        'pressure':235, 'speed':10, 'granule':125
     })
 
-# Main layout: two columns
+# Main layout
 col_left, col_right = st.columns([1, 1.2], gap="medium")
 
 with col_left:
-    # ---- Formulation Section ----
-    with st.expander("📊 Formulation Parameters", expanded=True):
+    st.markdown("### 📊 Formulation Parameters")
+    with st.container(border=True):
         c1, c2 = st.columns(2)
         with c1:
             api = st.slider("API (%)", 85.0, 95.0, st.session_state.api, 0.1, key="api_slider")
@@ -652,158 +648,192 @@ with col_left:
         else:
             st.warning(f"⚠️ Total = {total:.2f}% (should be 100%)")
 
-        # Preset buttons (knobs)
-        st.markdown("**Quick presets:**")
-        cols = st.columns(4)
-        if cols[0].button("High API"):
-            st.session_state.api = 94.0
-            st.session_state.binder = 1.5
-            st.session_state.pvpp = 2.0
-            st.session_state.mgst = 0.10
-            st.session_state.mcc = 2.4
-            st.rerun()
-        if cols[1].button("Low EFRF"):
-            st.session_state.api = 89.0
-            st.session_state.binder = 4.0
-            st.session_state.pvpp = 4.5
-            st.session_state.mgst = 0.05
-            st.session_state.mcc = 2.0
-            st.rerun()
-        if cols[2].button("Balanced"):
-            st.session_state.api = 90.5
-            st.session_state.binder = 2.7
-            st.session_state.pvpp = 3.0
-            st.session_state.mgst = 0.20
-            st.session_state.mcc = 3.6
-            st.rerun()
-        if cols[3].button("Reset"):
-            for k in ['api','binder','pvpp','mgst','mcc','pressure','speed','granule']:
-                st.session_state[k] = st.session_state.get(f'default_{k}', st.session_state[k])
-            st.rerun()
-
-    # ---- Process Section ----
-    with st.expander("⚙️ Process Parameters", expanded=True):
-        col1, col2 = st.columns(2)
-        with col1:
-            pressure = st.slider("Pressure (MPa)", 80.0, PRESSURE_MAX, st.session_state.pressure, 1.0, key="pressure_slider")
-            speed = st.slider("Speed (rpm)", 1.0, 50.0, st.session_state.speed, 0.5, key="speed_slider")
-        with col2:
+    st.markdown("### ⚙️ Process Parameters")
+    with st.container(border=True):
+        pressure = st.slider("Pressure (MPa)", 80.0, PRESSURE_MAX, st.session_state.pressure, 1.0, key="pressure_slider")
+        speed = st.slider("Speed (rpm)", 1.0, 50.0, st.session_state.speed, 0.5, key="speed_slider")
+        # ---- Particle Size Toggle ----
+        granule_mode = st.radio(
+            "Granule Size",
+            options=["Variable (optimized)", "Fixed (use slider)"],
+            index=1,  # default to Fixed
+            horizontal=True,
+            key="granule_mode"
+        )
+        if granule_mode == "Fixed (use slider)":
             granule = st.slider("Granule Size (µm)", 30.0, 250.0, st.session_state.granule, 1.0, key="granule_slider")
+            granule_fixed = True
+        else:
+            granule = st.session_state.granule  # placeholder, will be optimized
+            granule_fixed = False
+            st.info("Granule size will be optimized by NSGA‑II (30–250 µm)")
 
-    # Predict button
     predict_btn = st.button("🔬 Predict & Optimize", use_container_width=True, type="primary")
 
-# ---- Right Column - Results ----
 with col_right:
     st.markdown("### 📈 Results")
-
     if predict_btn:
         if abs(total-100) > 0.1:
             st.warning("Formulation must sum to 100%")
         else:
-            # Normalize and predict
+            # Normalize formulation
             api_n, binder_n, pvpp_n, mgst_n, mcc_n = normalize_components(api, binder, pvpp, mgst, mcc)
-            inputs = [api_n, mcc_n, pvpp_n, mgst_n, binder_n, pressure, speed, granule]
+            # Use granule from slider if fixed, else use a default value (will be optimized later)
+            if granule_fixed:
+                granule_use = granule
+            else:
+                granule_use = 125.0  # placeholder, not used in prediction for variable mode? Actually prediction is for a single point, we can use the slider value for display
+                # For prediction we still need a value; we'll use the slider value as a starting point
+                granule_use = granule  # we keep the slider value for preview
+            inputs = [api_n, mcc_n, pvpp_n, mgst_n, binder_n, pressure, speed, granule_use]
+
             if model is not None:
                 density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs)
             else:
                 density, tensile, er, efrf = 0.7, 2.0, 0.5, 0.25
 
-            # Constraint cards
-            st.markdown("#### ✅ Constraint Check")
-            con_cols = st.columns(4)
-            con_cols[0].metric("Density", f"{density:.3f}", f"[{D_MIN}, {D_MAX}]")
-            con_cols[1].metric("Tensile", f"{tensile:.2f} MPa", "✅ PASS" if tensile >= TENSILE_MIN else "❌ FAIL")
-            con_cols[2].metric("EFRF", f"{efrf:.4f}", "✅ PASS" if efrf < EFRF_MAX else "❌ FAIL")
-            con_cols[3].metric("MCC", f"{mcc_n:.1f}%", "✅ PASS" if mcc_n <= MCC_MAX else "❌ FAIL")
+            st.markdown("#### Constraints Status")
+            col_metrics = st.columns(4)
+            col_metrics[0].metric("Density", f"{density:.3f}", "✅" if D_MIN <= density <= D_MAX else "❌")
+            col_metrics[1].metric("Tensile", f"{tensile:.2f} MPa", "✅" if tensile >= TENSILE_MIN else "❌")
+            col_metrics[2].metric("EFRF", f"{efrf:.4f}", "✅" if efrf < EFRF_MAX else "❌")
+            col_metrics[3].metric("MCC", f"{mcc_n:.1f}%", "✅" if mcc_n <= MCC_MAX else "❌")
 
             if all([D_MIN <= density <= D_MAX, tensile >= TENSILE_MIN, efrf < EFRF_MAX, mcc_n <= MCC_MAX]):
-                st.success("✅ All constraints satisfied! Formulation is feasible.")
+                st.success("✅ All constraints satisfied!")
             else:
-                st.error("❌ Formulation violates one or more constraints")
+                st.error("❌ Violates constraints")
 
-            # Tabs for detailed results
-            tab1, tab2, tab3 = st.tabs(["📈 Pareto Front", "⭐ Best Solution", "📊 Benchmark"])
+            # ---- NSGA-II Optimization ----
+            st.markdown("### ⚙️ Optimization (NSGA‑II)")
+            bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],
+                               [80,PRESSURE_MAX],[1,50],[30,250]])
+            with st.spinner(f"Running NSGA‑II (pop={NSGA_POP}, gen={NSGA_GENS})..."):
+                nsga = NSGAII(model, scaler, y_scaler, bounds,
+                              pop=NSGA_POP, gens=NSGA_GENS,
+                              granule_fixed=granule_fixed,
+                              granule_fixed_val=granule if granule_fixed else 125.0)
+                pop, objectives, fronts = nsga.run()
 
-            with tab1:
-                st.markdown("#### NSGA‑II Optimization")
-                bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],
-                                   [80,PRESSURE_MAX],[1,50],[30,250]])
-                with st.spinner(f"Running NSGA‑II (pop={NSGA_POP}, gen={NSGA_GENS})..."):
-                    nsga = NSGAII(model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS)
-                    pop, objectives, fronts = nsga.run()
-
-                if len(fronts) > 0 and len(fronts[0]) > 0:
-                    st.success(f"✅ Pareto front: {len(fronts[0])} solutions")
-                    fig = plot_pareto(objectives, fronts)
-                    if fig:
-                        st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.warning("No Pareto front found.")
-
-            with tab2:
+            if len(fronts) > 0 and len(fronts[0]) > 0:
+                st.success(f"✅ Pareto front found: {len(fronts[0])} optimal solutions")
                 # Find best feasible (lowest EFRF)
-                if len(fronts) > 0 and len(fronts[0]) > 0:
-                    best_idx = None
-                    best_ef = 1e9
-                    for idx in fronts[0]:
-                        if objectives[idx, 1] < best_ef:
-                            ind = pop[idx]
-                            d2, t2, e2, ef2 = predict_pinn(model, scaler, y_scaler, ind)
-                            if D_MIN <= d2 <= D_MAX and t2 >= TENSILE_MIN and ef2 < EFRF_MAX:
-                                best_ef = objectives[idx, 1]
-                                best_idx = idx
-                    if best_idx is not None:
-                        golden = pop[best_idx]
-                        d2, t2, e2, ef2 = predict_pinn(model, scaler, y_scaler, golden)
-                        st.markdown("**Golden Formulation**")
-                        colA, colB = st.columns(2)
-                        with colA:
-                            st.write(f"API: {golden[0]:.1f}%")
-                            st.write(f"MCC: {golden[1]:.1f}%")
-                            st.write(f"PVPP: {golden[2]:.1f}%")
-                            st.write(f"MgSt: {golden[3]:.2f}%")
-                            st.write(f"Binder: {golden[4]:.1f}%")
-                        with colB:
-                            st.write(f"Pressure: {golden[5]:.1f} MPa")
-                            st.write(f"Speed: {golden[6]:.1f} rpm")
-                            st.write(f"Granule: {golden[7]:.0f} µm")
-                            st.write(f"Density: {d2:.3f}")
-                            st.write(f"Tensile: {t2:.2f} MPa")
-                            st.write(f"EFRF: {ef2:.4f}")
-                    else:
-                        st.info("No fully feasible solution found in Pareto front.")
+                best_idx = None
+                best_ef = 1e9
+                for idx in fronts[0]:
+                    if objectives[idx, 1] < best_ef:
+                        ind = pop[idx]
+                        d2, t2, e2, ef2 = predict_pinn(model, scaler, y_scaler, ind)
+                        if D_MIN <= d2 <= D_MAX and t2 >= TENSILE_MIN and ef2 < EFRF_MAX:
+                            best_ef = objectives[idx, 1]
+                            best_idx = idx
+                if best_idx is not None:
+                    golden = pop[best_idx]
+                    d2, t2, e2, ef2 = predict_pinn(model, scaler, y_scaler, golden)
+                    st.markdown("#### ⭐ Golden Solution (Suggested)")
+                    colA, colB = st.columns(2)
+                    with colA:
+                        st.write("**Formulation:**")
+                        st.write(f"API: {golden[0]:.1f}%")
+                        st.write(f"MCC: {golden[1]:.1f}%")
+                        st.write(f"PVPP: {golden[2]:.1f}%")
+                        st.write(f"Mg-St: {golden[3]:.2f}%")
+                        st.write(f"Binder: {golden[4]:.1f}%")
+                    with colB:
+                        st.write("**Process:**")
+                        st.write(f"Pressure: {golden[5]:.1f} MPa")
+                        st.write(f"Speed: {golden[6]:.1f} rpm")
+                        st.write(f"Granule: {golden[7]:.0f} µm")
+                        st.write("**Predicted:**")
+                        st.write(f"Density: {d2:.3f}")
+                        st.write(f"Tensile: {t2:.3f} MPa")
+                        st.write(f"EFRF: {ef2:.4f}")
+                else:
+                    st.info("No fully feasible solution found in Pareto front.")
+            else:
+                st.warning("No Pareto front found.")
 
-            with tab3:
-                st.markdown("#### Model Comparison (Tensile Strength)")
-                X_train, X_test, y_train, y_test = train_test_split(
-                    df[features].values, df['Tensile_Strength_MPa'].values,
-                    test_size=0.2, random_state=42
+            # ---- Pareto Plot ----
+            st.markdown("### 📉 Pareto Front")
+            fig = plot_pareto(objectives, fronts)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No Pareto front to display.")
+
+            # ---- Comparison ----
+            st.markdown("### 📊 Comparison (Tensile R²)")
+            X_train, X_test, y_train, y_test = train_test_split(
+                df[features].values, df['Tensile_Strength_MPa'].values,
+                test_size=0.2, random_state=42
+            )
+            X_train_aug = add_interaction_features(X_train)
+            X_test_aug = add_interaction_features(X_test)
+            X_train_scaled = scaler.transform(X_train_aug)
+            X_test_scaled = scaler.transform(X_test_aug)
+
+            pinn_pred_scaled = model.predict(torch.tensor(X_test_scaled, dtype=torch.float32))
+            pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
+            pinn_r2 = r2_score(y_test, pinn_pred)
+            pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
+            pinn_mae = mean_absolute_error(y_test, pinn_pred)
+
+            bench_df = train_benchmark(X_train_scaled, X_test_scaled, y_train, y_test)
+            pinn_row = pd.DataFrame([{
+                'Model': 'PINN (Proposed)',
+                'R²': pinn_r2,
+                'RMSE': pinn_rmse,
+                'MAE': pinn_mae
+            }])
+            bench_df = pd.concat([pinn_row, bench_df], ignore_index=True)
+            st.dataframe(bench_df.style.background_gradient(subset=['R²'], cmap='RdYlGn', vmin=-1, vmax=1),
+                         use_container_width=True)
+
+            # ---- Report ----
+            st.markdown("### 📄 Report")
+            if st.button("Generate Report"):
+                timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                report = f"""
+                # Hubryd AI v29.27 Report
+                **Generated:** {timestamp}
+
+                ## Current Formulation
+                - API: {api_n:.1f}%
+                - MCC: {mcc_n:.1f}%
+                - PVPP: {pvpp_n:.1f}%
+                - Mg-St: {mgst_n:.2f}%
+                - Binder: {binder_n:.1f}%
+                - Pressure: {pressure:.1f} MPa
+                - Speed: {speed:.1f} rpm
+                - Granule: {granule_use:.0f} µm (mode: {'Fixed' if granule_fixed else 'Variable'})
+
+                ## Predicted Properties
+                - Density: {density:.3f}
+                - Tensile: {tensile:.2f} MPa
+                - EFRF: {efrf:.4f}
+
+                ## Constraints
+                - Density: {'PASS' if D_MIN <= density <= D_MAX else 'FAIL'}
+                - Tensile: {'PASS' if tensile >= TENSILE_MIN else 'FAIL'}
+                - EFRF: {'PASS' if efrf < EFRF_MAX else 'FAIL'}
+                - MCC: {'PASS' if mcc_n <= MCC_MAX else 'FAIL'}
+
+                ## NSGA-II Results
+                - Pareto solutions: {len(fronts[0]) if fronts else 0}
+                - Golden solution (if any): {', '.join([f'{k}: {v:.2f}' for k,v in zip(['API','MCC','PVPP','MgSt','Binder','Pressure','Speed','Granule'], golden)]) if best_idx is not None else 'None'}
+
+                ## Model Performance (Tensile)
+                - PINN R²: {pinn_r2:.4f}
+                - Best competitor R²: {bench_df[bench_df['Model']!='PINN (Proposed)']['R²'].max():.4f}
+                """
+                st.download_button(
+                    label="Download Report (Markdown)",
+                    data=report,
+                    file_name=f"hubryd_report_{timestamp[:10]}.md",
+                    mime="text/markdown"
                 )
-                X_train_aug = add_interaction_features(X_train)
-                X_test_aug = add_interaction_features(X_test)
-                X_train_scaled = scaler.transform(X_train_aug)
-                X_test_scaled = scaler.transform(X_test_aug)
-
-                pinn_pred_scaled = model.predict(torch.tensor(X_test_scaled, dtype=torch.float32))
-                pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
-                pinn_r2 = r2_score(y_test, pinn_pred)
-                pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
-                pinn_mae = mean_absolute_error(y_test, pinn_pred)
-
-                bench_df = train_benchmark(X_train_scaled, X_test_scaled, y_train, y_test)
-                pinn_row = pd.DataFrame([{
-                    'Model': 'PINN (Proposed)',
-                    'R²': pinn_r2,
-                    'RMSE': pinn_rmse,
-                    'MAE': pinn_mae
-                }])
-                bench_df = pd.concat([pinn_row, bench_df], ignore_index=True)
-                st.dataframe(bench_df.style.background_gradient(subset=['R²'], cmap='RdYlGn', vmin=-1, vmax=1),
-                             use_container_width=True)
 
     else:
         st.info("Adjust sliders and click 'Predict & Optimize' to see results.")
 
-# Footer
-st.caption("📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Postgraduate College, Sudan")
+st.caption("📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Sudan")
