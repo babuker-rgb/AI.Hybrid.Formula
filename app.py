@@ -1,6 +1,6 @@
 """
 Hubryd AI v29.27 – Minimal · Stable · Free Tier
-Enhanced with Particle Size Toggle (Variable / Fixed)
+Enhanced with Toggle Knobs: Pareto, Sensitivity, Comparison, Particle Size, Report
 Nile Valley University · Sudan
 """
 
@@ -17,7 +17,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import os
 import tempfile
-import datetime          # <-- FIX: added for report timestamp
+import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -259,7 +259,7 @@ class MultiTaskPINN(nn.Module):
         return total_loss
 
 # ================================================================
-# NSGA-II (with variable granule option)
+# NSGA-II (with granule toggle)
 # ================================================================
 class NSGAII:
     def __init__(self, model, scaler, y_scaler, bounds, pop=40, gens=30, granule_fixed=True, granule_fixed_val=125.0):
@@ -585,7 +585,7 @@ def load_or_train():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# Streamlit UI – v29.27 Style + Particle Size Toggle
+# Streamlit UI – v29.27 with Toggle Knobs
 # ================================================================
 st.set_page_config(page_title="Hubryd AI v29.27", layout="wide")
 
@@ -621,11 +621,16 @@ except Exception as e:
     st.error(f"❌ Training failed: {e}. Using dummy model.")
     model = None
 
-# Session state for presets
+# Session state for presets and knobs
 if 'api' not in st.session_state:
     st.session_state.update({
         'api':90.5, 'binder':3.0, 'pvpp':3.0, 'mgst':0.15, 'mcc':3.35,
-        'pressure':235, 'speed':10, 'granule':125
+        'pressure':235, 'speed':10, 'granule':125,
+        'show_pareto': True,
+        'show_sensitivity': False,
+        'show_comparison': True,
+        'show_particle': False,
+        'granule_mode': 'Fixed'
     })
 
 # Main layout
@@ -652,39 +657,68 @@ with col_left:
     with st.container(border=True):
         pressure = st.slider("Pressure (MPa)", 80.0, PRESSURE_MAX, st.session_state.pressure, 1.0, key="pressure_slider")
         speed = st.slider("Speed (rpm)", 1.0, 50.0, st.session_state.speed, 0.5, key="speed_slider")
-        # ---- Particle Size Toggle ----
+        # Particle size toggle (also controlled by knob)
         granule_mode = st.radio(
             "Granule Size",
-            options=["Variable (optimized)", "Fixed (use slider)"],
-            index=1,  # default to Fixed
+            options=["Fixed (slider)", "Variable (optimized)"],
+            index=0,
             horizontal=True,
-            key="granule_mode"
+            key="granule_mode_radio"
         )
-        if granule_mode == "Fixed (use slider)":
+        if granule_mode == "Fixed (slider)":
             granule = st.slider("Granule Size (µm)", 30.0, 250.0, st.session_state.granule, 1.0, key="granule_slider")
             granule_fixed = True
+            st.session_state.granule_mode = 'Fixed'
         else:
-            granule = st.session_state.granule  # placeholder, will be optimized
+            granule = st.session_state.granule  # placeholder
             granule_fixed = False
             st.info("Granule size will be optimized by NSGA‑II (30–250 µm)")
+            st.session_state.granule_mode = 'Variable'
 
     predict_btn = st.button("🔬 Predict & Optimize", use_container_width=True, type="primary")
 
 with col_right:
     st.markdown("### 📈 Results")
+
+    # ---------- KNOBS (toggles) ----------
+    st.markdown("**🔘 Knobs:**")
+    knob_cols = st.columns(5)
+    with knob_cols[0]:
+        show_pareto = st.toggle("📉 Pareto", value=st.session_state.show_pareto, key="knob_pareto")
+        st.session_state.show_pareto = show_pareto
+    with knob_cols[1]:
+        show_sensitivity = st.toggle("🔬 Sensitivity", value=st.session_state.show_sensitivity, key="knob_sensitivity")
+        st.session_state.show_sensitivity = show_sensitivity
+    with knob_cols[2]:
+        show_comparison = st.toggle("📊 Comparison", value=st.session_state.show_comparison, key="knob_comparison")
+        st.session_state.show_comparison = show_comparison
+    with knob_cols[3]:
+        # Particle size knob – sync with radio button
+        particle_fixed = st.toggle("🧪 Particle Size", value=(st.session_state.granule_mode == 'Fixed'), key="knob_particle")
+        # If toggled, update the radio button accordingly
+        if particle_fixed and st.session_state.granule_mode != 'Fixed':
+            st.session_state.granule_mode = 'Fixed'
+            st.rerun()
+        elif not particle_fixed and st.session_state.granule_mode != 'Variable':
+            st.session_state.granule_mode = 'Variable'
+            st.rerun()
+    with knob_cols[4]:
+        generate_report = st.button("📄 Report", key="knob_report")
+
+    st.markdown("---")
+
+    # Execute prediction & optimization if button clicked
     if predict_btn:
         if abs(total-100) > 0.1:
             st.warning("Formulation must sum to 100%")
         else:
             # Normalize formulation
             api_n, binder_n, pvpp_n, mgst_n, mcc_n = normalize_components(api, binder, pvpp, mgst, mcc)
-            # Use granule from slider if fixed, else use a default value (will be optimized later)
+            # Use granule from slider if fixed, else placeholder
             if granule_fixed:
                 granule_use = granule
             else:
-                granule_use = 125.0  # placeholder, not used in prediction for variable mode? Actually prediction is for a single point, we can use the slider value for display
-                # For prediction we still need a value; we'll use the slider value as a starting point
-                granule_use = granule  # we keep the slider value for preview
+                granule_use = granule  # still use slider value for preview
             inputs = [api_n, mcc_n, pvpp_n, mgst_n, binder_n, pressure, speed, granule_use]
 
             if model is not None:
@@ -692,6 +726,7 @@ with col_right:
             else:
                 density, tensile, er, efrf = 0.7, 2.0, 0.5, 0.25
 
+            # Constraint status
             st.markdown("#### Constraints Status")
             col_metrics = st.columns(4)
             col_metrics[0].metric("Density", f"{density:.3f}", "✅" if D_MIN <= density <= D_MAX else "❌")
@@ -704,8 +739,7 @@ with col_right:
             else:
                 st.error("❌ Violates constraints")
 
-            # ---- NSGA-II Optimization ----
-            st.markdown("### ⚙️ Optimization (NSGA‑II)")
+            # ---- Run NSGA-II always (so we have data for Pareto & Sensitivity) ----
             bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],
                                [80,PRESSURE_MAX],[1,50],[30,250]])
             with st.spinner(f"Running NSGA‑II (pop={NSGA_POP}, gen={NSGA_GENS})..."):
@@ -715,83 +749,116 @@ with col_right:
                               granule_fixed_val=granule if granule_fixed else 125.0)
                 pop, objectives, fronts = nsga.run()
 
-            if len(fronts) > 0 and len(fronts[0]) > 0:
-                st.success(f"✅ Pareto front found: {len(fronts[0])} optimal solutions")
-                # Find best feasible (lowest EFRF)
-                best_idx = None
-                best_ef = 1e9
-                for idx in fronts[0]:
-                    if objectives[idx, 1] < best_ef:
-                        ind = pop[idx]
-                        d2, t2, e2, ef2 = predict_pinn(model, scaler, y_scaler, ind)
-                        if D_MIN <= d2 <= D_MAX and t2 >= TENSILE_MIN and ef2 < EFRF_MAX:
-                            best_ef = objectives[idx, 1]
-                            best_idx = idx
-                if best_idx is not None:
-                    golden = pop[best_idx]
-                    d2, t2, e2, ef2 = predict_pinn(model, scaler, y_scaler, golden)
-                    st.markdown("#### ⭐ Golden Solution (Suggested)")
-                    colA, colB = st.columns(2)
-                    with colA:
-                        st.write("**Formulation:**")
-                        st.write(f"API: {golden[0]:.1f}%")
-                        st.write(f"MCC: {golden[1]:.1f}%")
-                        st.write(f"PVPP: {golden[2]:.1f}%")
-                        st.write(f"Mg-St: {golden[3]:.2f}%")
-                        st.write(f"Binder: {golden[4]:.1f}%")
-                    with colB:
-                        st.write("**Process:**")
-                        st.write(f"Pressure: {golden[5]:.1f} MPa")
-                        st.write(f"Speed: {golden[6]:.1f} rpm")
-                        st.write(f"Granule: {golden[7]:.0f} µm")
-                        st.write("**Predicted:**")
-                        st.write(f"Density: {d2:.3f}")
-                        st.write(f"Tensile: {t2:.3f} MPa")
-                        st.write(f"EFRF: {ef2:.4f}")
+            # ---- Show sections based on knobs ----
+
+            # 1. Pareto
+            if show_pareto:
+                st.markdown("### 📉 Pareto Front")
+                if len(fronts) > 0 and len(fronts[0]) > 0:
+                    st.success(f"✅ Pareto front found: {len(fronts[0])} optimal solutions")
+                    fig = plot_pareto(objectives, fronts)
+                    if fig:
+                        st.plotly_chart(fig, use_container_width=True)
+                    # Show golden solution
+                    best_idx = None
+                    best_ef = 1e9
+                    for idx in fronts[0]:
+                        if objectives[idx, 1] < best_ef:
+                            ind = pop[idx]
+                            d2, t2, e2, ef2 = predict_pinn(model, scaler, y_scaler, ind)
+                            if D_MIN <= d2 <= D_MAX and t2 >= TENSILE_MIN and ef2 < EFRF_MAX:
+                                best_ef = objectives[idx, 1]
+                                best_idx = idx
+                    if best_idx is not None:
+                        golden = pop[best_idx]
+                        d2, t2, e2, ef2 = predict_pinn(model, scaler, y_scaler, golden)
+                        st.markdown("#### ⭐ Golden Solution (Suggested)")
+                        colA, colB = st.columns(2)
+                        with colA:
+                            st.write("**Formulation:**")
+                            st.write(f"API: {golden[0]:.1f}%")
+                            st.write(f"MCC: {golden[1]:.1f}%")
+                            st.write(f"PVPP: {golden[2]:.1f}%")
+                            st.write(f"Mg-St: {golden[3]:.2f}%")
+                            st.write(f"Binder: {golden[4]:.1f}%")
+                        with colB:
+                            st.write("**Process:**")
+                            st.write(f"Pressure: {golden[5]:.1f} MPa")
+                            st.write(f"Speed: {golden[6]:.1f} rpm")
+                            st.write(f"Granule: {golden[7]:.0f} µm")
+                            st.write("**Predicted:**")
+                            st.write(f"Density: {d2:.3f}")
+                            st.write(f"Tensile: {t2:.3f} MPa")
+                            st.write(f"EFRF: {ef2:.4f}")
+                    else:
+                        st.info("No fully feasible solution found in Pareto front.")
                 else:
-                    st.info("No fully feasible solution found in Pareto front.")
-            else:
-                st.warning("No Pareto front found.")
+                    st.warning("No Pareto front found.")
 
-            # ---- Pareto Plot ----
-            st.markdown("### 📉 Pareto Front")
-            fig = plot_pareto(objectives, fronts)
-            if fig:
+            # 2. Sensitivity
+            if show_sensitivity:
+                st.markdown("### 🔬 Sensitivity Analysis")
+                st.info("Varying API and Pressure (others fixed) – EFRF contours")
+                # Create grid over API and Pressure
+                api_range = np.linspace(85, 95, 10)
+                pressure_range = np.linspace(80, PRESSURE_MAX, 10)
+                efrf_grid = np.zeros((len(api_range), len(pressure_range)))
+                for i, api_val in enumerate(api_range):
+                    for j, press_val in enumerate(pressure_range):
+                        # use current formulation but vary API and pressure
+                        inp = [api_val, mcc_n, pvpp_n, mgst_n, binder_n, press_val, speed, granule_use]
+                        d, t, e, ef = predict_pinn(model, scaler, y_scaler, inp)
+                        efrf_grid[i, j] = ef
+                fig = go.Figure(data=go.Contour(
+                    z=efrf_grid,
+                    x=pressure_range,
+                    y=api_range,
+                    colorscale='RdYlGn_r',
+                    contours=dict(coloring='heatmap'),
+                    hovertemplate='Pressure: %{x:.0f} MPa<br>API: %{y:.1f}%<br>EFRF: %{z:.4f}<extra></extra>'
+                ))
+                fig.update_layout(
+                    title='EFRF Sensitivity to API and Pressure',
+                    xaxis_title='Pressure (MPa)',
+                    yaxis_title='API (%)',
+                    height=400
+                )
+                # Add threshold line
+                fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='red',
+                              annotation_text=f'EFRF max {EFRF_MAX}')
                 st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("No Pareto front to display.")
 
-            # ---- Comparison ----
-            st.markdown("### 📊 Comparison (Tensile R²)")
-            X_train, X_test, y_train, y_test = train_test_split(
-                df[features].values, df['Tensile_Strength_MPa'].values,
-                test_size=0.2, random_state=42
-            )
-            X_train_aug = add_interaction_features(X_train)
-            X_test_aug = add_interaction_features(X_test)
-            X_train_scaled = scaler.transform(X_train_aug)
-            X_test_scaled = scaler.transform(X_test_aug)
+            # 3. Comparison
+            if show_comparison:
+                st.markdown("### 📊 Comparison (Tensile R²)")
+                X_train, X_test, y_train, y_test = train_test_split(
+                    df[features].values, df['Tensile_Strength_MPa'].values,
+                    test_size=0.2, random_state=42
+                )
+                X_train_aug = add_interaction_features(X_train)
+                X_test_aug = add_interaction_features(X_test)
+                X_train_scaled = scaler.transform(X_train_aug)
+                X_test_scaled = scaler.transform(X_test_aug)
 
-            pinn_pred_scaled = model.predict(torch.tensor(X_test_scaled, dtype=torch.float32))
-            pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
-            pinn_r2 = r2_score(y_test, pinn_pred)
-            pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
-            pinn_mae = mean_absolute_error(y_test, pinn_pred)
+                pinn_pred_scaled = model.predict(torch.tensor(X_test_scaled, dtype=torch.float32))
+                pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
+                pinn_r2 = r2_score(y_test, pinn_pred)
+                pinn_rmse = np.sqrt(mean_squared_error(y_test, pinn_pred))
+                pinn_mae = mean_absolute_error(y_test, pinn_pred)
 
-            bench_df = train_benchmark(X_train_scaled, X_test_scaled, y_train, y_test)
-            pinn_row = pd.DataFrame([{
-                'Model': 'PINN (Proposed)',
-                'R²': pinn_r2,
-                'RMSE': pinn_rmse,
-                'MAE': pinn_mae
-            }])
-            bench_df = pd.concat([pinn_row, bench_df], ignore_index=True)
-            st.dataframe(bench_df.style.background_gradient(subset=['R²'], cmap='RdYlGn', vmin=-1, vmax=1),
-                         use_container_width=True)
+                bench_df = train_benchmark(X_train_scaled, X_test_scaled, y_train, y_test)
+                pinn_row = pd.DataFrame([{
+                    'Model': 'PINN (Proposed)',
+                    'R²': pinn_r2,
+                    'RMSE': pinn_rmse,
+                    'MAE': pinn_mae
+                }])
+                bench_df = pd.concat([pinn_row, bench_df], ignore_index=True)
+                st.dataframe(bench_df.style.background_gradient(subset=['R²'], cmap='RdYlGn', vmin=-1, vmax=1),
+                             use_container_width=True)
 
-            # ---- Report ----
-            st.markdown("### 📄 Report")
-            if st.button("Generate Report"):
+            # 4. Report (button triggered)
+            if generate_report:
                 timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 report = f"""
                 # Hubryd AI v29.27 Report
