@@ -1,7 +1,7 @@
 """
 Hubryd AI v29.27 – Minimal · Stable · Free Tier
-Enhanced with Toggle Knobs: Pareto, Sensitivity, Comparison, Particle Size, Report
-Fixed datetime import error.
+Core PINN & NSGA-II identical to v29.18
+Enhanced UI with toggle knobs: Pareto, Sensitivity, Comparison, Particle Size, Report
 Nile Valley University · Sudan
 """
 
@@ -18,12 +18,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 import os
 import tempfile
-import datetime          # <-- FIXED: now imported
+import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
 # ================================================================
-# Physics Constants
+# Physics Constants (v29.18)
 # ================================================================
 D_MIN = 0.40
 D_MAX = 0.97
@@ -35,23 +35,23 @@ BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
 # ================================================================
-# Training Parameters (v29.27 – minimal)
+# Training Parameters (v29.18 – reduced for free tier)
 # ================================================================
 N_SAMPLES = 5000
 ADAM_EPOCHS = 200
 PATIENCE = 30
 NSGA_POP = 40
 NSGA_GENS = 30
-HIDDEN_SIZE = 256
+HIDDEN_SIZE = 384          # v29.18: 384 neurons
 
 W_DENSITY = 1.0
-W_TENSILE = 30.0
+W_TENSILE = 30.0           # v29.18 tuning
 W_ER = 5.0
 W_PHYSICS = 2.0
 W_EFRF_PENALTY = 100.0
 
 # ================================================================
-# Helper Functions (unchanged)
+# Helper Functions (identical to v29.18)
 # ================================================================
 def normalize_components(api, binder, pvpp, mgst, mcc):
     api = np.clip(api, 60, 100)
@@ -163,7 +163,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# PINN Model (v29.27 – 256 neurons)
+# PINN Model (v29.18 – 384 neurons, residual blocks, Mish)
 # ================================================================
 class Mish(nn.Module):
     def forward(self, x):
@@ -193,7 +193,7 @@ class MultiTaskPINN(nn.Module):
         self.res1 = ResidualBlock(hidden)
         self.res2 = ResidualBlock(hidden)
         self.transition = nn.Sequential(nn.Linear(hidden, hidden//2), nn.Tanh())
-        self.output = nn.Linear(hidden//2, 5)
+        self.output = nn.Linear(hidden//2, 5)   # D, σt, ER, k, A
     def forward(self, X):
         x = self.input_layer(X)
         x = self.res1(x)
@@ -260,7 +260,7 @@ class MultiTaskPINN(nn.Module):
         return total_loss
 
 # ================================================================
-# NSGA-II (with granule toggle)
+# NSGA-II (v29.18 – SBX, smart seeding, crowding distance)
 # ================================================================
 class NSGAII:
     def __init__(self, model, scaler, y_scaler, bounds, pop=40, gens=30, granule_fixed=True, granule_fixed_val=125.0):
@@ -480,7 +480,7 @@ def plot_pareto(objectives, fronts):
         'API': -objectives[front, 0],
         'EFRF': objectives[front, 1]
     })
-    fig = px.scatter(df_plot, x='API', y='EFRF', title='Pareto Front (v29.27)')
+    fig = px.scatter(df_plot, x='API', y='EFRF', title='Pareto Front (v29.18 core)')
     fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='red',
                   annotation_text=f'EFRF threshold {EFRF_MAX}')
     fig.update_layout(height=450, template='plotly_white')
@@ -508,10 +508,10 @@ def train_benchmark(X_train, X_test, y_train, y_test):
     return pd.DataFrame(results)
 
 # ================================================================
-# Cached Training (v29.27)
+# Cached Training (v29.18 core)
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_18_core.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -528,7 +528,7 @@ def load_or_train():
         except Exception as e:
             st.warning(f"Cache load failed: {e}. Retraining...")
 
-    st.caption("🔄 Training model from scratch...")
+    st.caption("🔄 Training model from scratch (v29.18 core)...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%']].values
@@ -562,7 +562,7 @@ def load_or_train():
         if loss.item() < best_loss:
             best_loss = loss.item()
             patience_counter = 0
-            torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_adam_v29_27.pt'))
+            torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_adam_v29_18.pt'))
         else:
             patience_counter += 1
             if patience_counter >= PATIENCE:
@@ -570,8 +570,8 @@ def load_or_train():
                 break
         progress_bar.progress((epoch+1)/ADAM_EPOCHS)
     st.success(f"✅ Best validation loss: {best_loss:.4f}")
-    if os.path.exists(os.path.join(CACHE_DIR, 'best_adam_v29_27.pt')):
-        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_adam_v29_27.pt'), map_location=device))
+    if os.path.exists(os.path.join(CACHE_DIR, 'best_adam_v29_18.pt')):
+        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_adam_v29_18.pt'), map_location=device))
     model.cpu()
     checkpoint = {
         'model_state': model.state_dict(),
@@ -594,14 +594,14 @@ st.set_page_config(page_title="Hubryd AI v29.27", layout="wide")
 st.markdown("""
 <div style="background: linear-gradient(135deg, #0b1a33, #1a2a4a, #0f3460); padding:1.5rem; border-radius:1rem; text-align:center; margin-bottom:1rem;">
     <h1 style="color:#fff; margin:0;">🧬 Hubryd AI – v29.27</h1>
-    <p style="color:#64ffda; margin:0;">Multi‑Task True PINN · Minimal · Stable · Free Tier</p>
+    <p style="color:#64ffda; margin:0;">Multi‑Task True PINN · v29.18 Core · Enhanced UI</p>
     <p style="color:#8899aa; font-size:0.9rem;">Nile Valley University · Sudan</p>
 </div>
 """, unsafe_allow_html=True)
 
 # Sidebar – Physics constraints
 with st.sidebar:
-    st.markdown("### 📚 Physics Constraints")
+    st.markdown("### 📚 Physics Constraints (v29.18)")
     st.markdown("""
     ✅ Heckel: ln(1/(1-D)) = kP + A  
     ✅ EFRF: ER / σt < 0.40  
@@ -610,7 +610,7 @@ with st.sidebar:
     ✅ Samples: 5000  
     ✅ Epochs: 200  
     ✅ NSGA‑II: Pop=40, Gen=30  
-    ✅ Network: 256 Neurons
+    ✅ Network: 384 Neurons
     """)
     st.markdown("---")
     st.caption("🔬 v29.27 — Minimal & Stable")
@@ -630,7 +630,6 @@ if 'api' not in st.session_state:
         'show_pareto': True,
         'show_sensitivity': False,
         'show_comparison': True,
-        'show_particle': False,
         'granule_mode': 'Fixed'
     })
 
@@ -658,7 +657,7 @@ with col_left:
     with st.container(border=True):
         pressure = st.slider("Pressure (MPa)", 80.0, PRESSURE_MAX, st.session_state.pressure, 1.0, key="pressure_slider")
         speed = st.slider("Speed (rpm)", 1.0, 50.0, st.session_state.speed, 0.5, key="speed_slider")
-        # Particle size radio (also synced with knob)
+        # Particle size radio (synced with knob)
         granule_mode = st.radio(
             "Granule Size",
             options=["Fixed (slider)", "Variable (optimized)"],
@@ -739,7 +738,7 @@ with col_right:
             else:
                 st.error("❌ Violates constraints")
 
-            # ---- Run NSGA-II always (so we have data for Pareto & Sensitivity) ----
+            # ---- Run NSGA-II always ----
             bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],
                                [80,PRESSURE_MAX],[1,50],[30,250]])
             with st.spinner(f"Running NSGA‑II (pop={NSGA_POP}, gen={NSGA_GENS})..."):
@@ -805,7 +804,6 @@ with col_right:
                 efrf_grid = np.zeros((len(api_range), len(pressure_range)))
                 for i, api_val in enumerate(api_range):
                     for j, press_val in enumerate(pressure_range):
-                        # use current formulation but vary API and pressure
                         inp = [api_val, mcc_n, pvpp_n, mgst_n, binder_n, press_val, speed, granule_use]
                         d, t, e, ef = predict_pinn(model, scaler, y_scaler, inp)
                         efrf_grid[i, j] = ef
@@ -823,7 +821,6 @@ with col_right:
                     yaxis_title='API (%)',
                     height=400
                 )
-                # Add threshold line
                 fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='red',
                               annotation_text=f'EFRF max {EFRF_MAX}')
                 st.plotly_chart(fig, use_container_width=True)
@@ -860,7 +857,6 @@ with col_right:
             # 4. Report (button triggered)
             if generate_report:
                 timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                # Make sure golden is defined (use current if not)
                 if best_idx is not None:
                     golden_str = ', '.join([f'{k}: {v:.2f}' for k,v in zip(['API','MCC','PVPP','MgSt','Binder','Pressure','Speed','Granule'], golden)])
                 else:
