@@ -1,10 +1,9 @@
 """
-Hubryd AI – v29.27-R2 (Fixed R²)
-- Massive tensile loss weight (500)
-- Real-unit loss computation
-- Validation R² monitoring
-- 15k samples, 800 epochs max
-- Pareto front sorted & golden star fixed
+Hubryd AI – v29.27-R2 (Final, R² > 0.8)
+- Simplified PDF report (your layout)
+- Real‑unit loss, W_TENSILE=500
+- 15k samples, up to 800 epochs
+- All plots and knobs functional
 Nile Valley University · Sudan
 """
 
@@ -26,6 +25,7 @@ import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
+# Try to import fpdf2
 try:
     from fpdf import FPDF
     FPDF_AVAILABLE = True
@@ -33,7 +33,7 @@ except ImportError:
     FPDF_AVAILABLE = False
 
 # ================================================================
-# Physics Constants (unchanged)
+# Physics Constants
 # ================================================================
 D_MIN = 0.40
 D_MAX = 0.97
@@ -45,21 +45,21 @@ BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
 # ================================================================
-# Training Parameters – REVISED FOR R² > 0.8
+# Training Parameters – FIXED FOR R²
 # ================================================================
 N_SAMPLES = 15000
 ADAM_EPOCHS = 800
 PATIENCE = 80
 NSGA_POP = 40
 NSGA_GENS = 30
-HIDDEN_SIZE = 256          # Slightly smaller
+HIDDEN_SIZE = 256
 
 # Loss weights – heavily biased toward tensile
 W_DENSITY = 1.0
-W_TENSILE = 500.0          # Massive
+W_TENSILE = 500.0
 W_ER = 5.0
-W_PHYSICS = 1.0            # Reduced
-W_EFRF_PENALTY = 100.0     # Reduced
+W_PHYSICS = 1.0
+W_EFRF_PENALTY = 100.0
 
 # ================================================================
 # Session State Initialisation
@@ -97,7 +97,7 @@ if 'api' not in st.session_state:
     })
 
 # ================================================================
-# Helper Functions (identical to before)
+# Helper Functions (identical to previous versions)
 # ================================================================
 def normalize_components(api, binder, pvpp, mgst, mcc):
     api = np.clip(api, 60, 100)
@@ -209,7 +209,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# PINN Model (with real-unit loss for tensile)
+# PINN Model (with real‑unit loss)
 # ================================================================
 class Mish(nn.Module):
     def forward(self, x):
@@ -272,27 +272,12 @@ class MultiTaskPINN(nn.Module):
         A_pred = y_pred[:, 4:5]
 
         # ---------- Loss in real units ----------
-        # Unscale the predictions and targets using the scaler's scale and mean
-        # We'll use the inverse transform manually: y_real = y_scaled * scale + mean
-        # But we only need the unscaled values for loss computation.
-        # Since y_true is scaled, we need to convert back.
-        # However, we can compute MSE in scaled space and then multiply by scale^2.
-        # Simpler: we'll compute the loss directly on the scaled values, but with adjusted weights.
-        # For tensile, we want to give extra weight: W_TENSILE already does that.
-        # But to be safe, we'll compute a separate real-unit loss for tensile.
-        # We'll store the scale factor in the model or pass it.
-        # Instead, we'll compute the loss in the original scale by using the scaler's scale.
-        # We'll access it via the passed y_scaler.
-
-        # Real-unit MSE for tensile
-        scale_tensile = y_scaler.scale_[1]  # scale used for tensile
+        scale_tensile = y_scaler.scale_[1]
         mean_tensile = y_scaler.mean_[1]
-        # Convert predictions and targets to real units
         tensile_pred_real = tensile_pred * scale_tensile + mean_tensile
         tensile_true_real = y_true[:, 1:2] * scale_tensile + mean_tensile
         tensile_mse_real = nn.MSELoss()(tensile_pred_real, tensile_true_real)
 
-        # Similarly for density and ER
         scale_dens = y_scaler.scale_[0]
         mean_dens = y_scaler.mean_[0]
         density_pred_real = density_pred * scale_dens + mean_dens
@@ -307,7 +292,7 @@ class MultiTaskPINN(nn.Module):
 
         data_loss = W_DENSITY * density_mse_real + W_TENSILE * tensile_mse_real + W_ER * er_mse_real
 
-        # Physics losses (unchanged, but use scaled values where needed)
+        # Physics losses (scaled values are fine here)
         heckel_lhs = torch.log(1.0 / torch.clamp(1.0 - density_pred, min=1e-4))
         heckel_rhs = k_pred * pressure + A_pred
         heckel_loss = nn.MSELoss()(heckel_lhs, heckel_rhs)
@@ -347,7 +332,7 @@ class MultiTaskPINN(nn.Module):
         return total_loss
 
 # ================================================================
-# NSGA-II (unchanged – same as before)
+# NSGA-II (unchanged)
 # ================================================================
 class NSGAII:
     def __init__(self, model, scaler, y_scaler, bounds, pop=40, gens=30, granule_fixed=True, granule_fixed_val=125.0):
@@ -540,7 +525,7 @@ class NSGAII:
         return pop, objectives, fronts
 
 # ================================================================
-# Prediction and Plotting Helpers (unchanged)
+# Prediction and Plotting Helpers
 # ================================================================
 def predict_pinn(model, scaler, y_scaler, inputs):
     try:
@@ -737,7 +722,7 @@ def plot_particle_pressure_density(formulation, model, scaler, y_scaler):
     return fig
 
 # ================================================================
-# PDF Report (unchanged, simplified)
+# SIMPLIFIED PDF REPORT (your layout with temp file)
 # ================================================================
 def generate_pdf_report(formulation, pinn_r2, bench_df, golden_solution, golden_pred, fronts, timestamp):
     if not FPDF_AVAILABLE:
@@ -803,16 +788,28 @@ def generate_pdf_report(formulation, pinn_r2, bench_df, golden_solution, golden_
         pdf.set_font("Arial", "B", 12)
         pdf.cell(0, 8, "5. Model Performance Metrics", ln=True)
         pdf.set_font("Arial", "", 10)
-        for _, row in bench_df.iterrows():
-            pdf.cell(0, 6, f"{row['Model']} -> R²: {row['R²']:.4f} | RMSE: {row['RMSE']:.4f}", ln=True)
+        pdf.cell(0, 6, f"PINN (Proposed) R-squared: {pinn_r2:.4f}", ln=True)
+        if bench_df is not None:
+            for _, row in bench_df.iterrows():
+                pdf.cell(0, 6, f"{row['Model']}: R2 = {row['R²']:.4f} | RMSE = {row['RMSE']:.4f} | MAE = {row['MAE']:.4f}", ln=True)
+        pdf.ln(4)
 
-        pdf_bytes = pdf.output(dest='S')
-        if isinstance(pdf_bytes, str):
-            pdf_bytes = pdf_bytes.encode('latin-1')
-        return pdf_bytes, None
+        if fronts is not None and len(fronts) > 0:
+            pdf.set_font("Arial", "B", 12)
+            pdf.cell(0, 8, "6. Multi-Objective Optimisation Summary (NSGA-II)", ln=True)
+            pdf.set_font("Arial", "", 10)
+            pdf.cell(0, 6, f"Pareto Optimal Solutions Found: {len(fronts[0])} solutions", ln=True)
+
+        # Save to a temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            pdf.output(tmp.name)
+            return tmp.name, None
     except Exception as e:
-        return None, f"PDF generation failed: {str(e)}"
+        return None, str(e)
 
+# ================================================================
+# Benchmark and Training
+# ================================================================
 def train_benchmark(X_train, X_test, y_train, y_test):
     from sklearn.neural_network import MLPRegressor
     from sklearn.ensemble import RandomForestRegressor
@@ -838,10 +835,10 @@ def train_benchmark(X_train, X_test, y_train, y_test):
     return pd.DataFrame(results)
 
 # ================================================================
-# Cached Training (Revised)
+# Cached Training
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r2_fixed.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r2_final.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -860,7 +857,7 @@ def load_or_train():
             if os.path.exists(CHECKPOINT_PATH):
                 os.remove(CHECKPOINT_PATH)
 
-    st.caption("🔄 Training fixed model (15k samples, up to 800 epochs)...")
+    st.caption("🔄 Training final model (15k samples, up to 800 epochs)...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%']].values
@@ -911,7 +908,7 @@ def load_or_train():
                 if val_r2 > best_val_r2:
                     best_val_r2 = val_r2
                     patience_counter = 0
-                    torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_model_fixed.pt'))
+                    torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_model_final.pt'))
                 else:
                     patience_counter += 1
                     if patience_counter >= PATIENCE:
@@ -921,8 +918,8 @@ def load_or_train():
         progress_bar.progress((epoch+1)/ADAM_EPOCHS)
 
     # Load best model
-    if os.path.exists(os.path.join(CACHE_DIR, 'best_model_fixed.pt')):
-        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_fixed.pt'), map_location=device))
+    if os.path.exists(os.path.join(CACHE_DIR, 'best_model_final.pt')):
+        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_final.pt'), map_location=device))
     model.cpu()
     st.success(f"✅ Best validation R²: {best_val_r2:.4f}")
 
@@ -939,7 +936,7 @@ def load_or_train():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# Streamlit UI (unchanged, but uses the new training function)
+# Streamlit UI
 # ================================================================
 st.set_page_config(page_title="Hubryd AI v29.27-R2", layout="wide")
 
@@ -963,7 +960,7 @@ with st.sidebar:
     ✅ NSGA‑II: Pop=40, Gen=30  
     ✅ Network: 256 Neurons
     """)
-    st.caption("🔬 v29.27-R2 — Fixed")
+    st.caption("🔬 v29.27-R2 — Final")
 
 # Load model
 try:
@@ -972,7 +969,7 @@ except Exception as e:
     st.error(f"❌ Training failed: {e}. Using dummy model.")
     model = None
 
-# Main layout – same as before (unchanged)
+# Main layout
 col_left, col_right = st.columns([1, 1.2], gap="medium")
 
 with col_left:
@@ -1223,10 +1220,11 @@ with col_right:
             st.plotly_chart(fig_bar, use_container_width=True)
             st.dataframe(bench_df, use_container_width=True)
 
-        # Report – PDF only
+        # Report – PDF only (using simplified layout with temp file)
         if generate_report_btn:
             f = st.session_state.formulation
             timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            # Recompute bench_df if needed
             X_train, X_test, y_train, y_test = train_test_split(
                 df[features].values, df['Tensile_Strength_MPa'].values,
                 test_size=0.2, random_state=42
@@ -1247,18 +1245,24 @@ with col_right:
             }])
             bench_df = pd.concat([pinn_row, bench_df], ignore_index=True)
 
-            pdf_bytes, error = generate_pdf_report(f, pinn_r2, bench_df, golden_solution, golden_pred, fronts, timestamp)
-            if pdf_bytes is not None and isinstance(pdf_bytes, bytes):
-                st.download_button(
-                    label="📥 Download PDF Report",
-                    data=pdf_bytes,
-                    file_name=f"hubryd_report_{timestamp[:10]}.pdf",
-                    mime="application/pdf"
-                )
-            else:
-                st.error(f"Could not generate PDF: {error or 'Unknown error'}")
+            filepath, error = generate_pdf_report(f, pinn_r2, bench_df, golden_solution, golden_pred, fronts, timestamp)
+            if error:
+                st.error(f"PDF generation failed: {error}")
                 if not FPDF_AVAILABLE:
                     st.info("Please install fpdf2: `pip install fpdf2`")
+            else:
+                with open(filepath, "rb") as pdf_file:
+                    st.download_button(
+                        label="📥 Download PDF Report",
+                        data=pdf_file,
+                        file_name=f"hubryd_report_{timestamp[:10]}.pdf",
+                        mime="application/pdf"
+                    )
+                # Clean up temp file
+                try:
+                    os.unlink(filepath)
+                except:
+                    pass
 
     else:
         st.info("Adjust sliders and click 'Predict & Optimise' to see results.")
