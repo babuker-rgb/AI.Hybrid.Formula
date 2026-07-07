@@ -610,11 +610,11 @@ def load_or_train():
 # ================================================================
 # Streamlit UI – v29.27 with Knobs after NSGA-II
 # ================================================================
-st.set_page_config(page_title="Hubryd AI v29.27-R2", layout="wide")
+st.set_page_config(page_title="Hubryd AI v29.27", layout="wide")
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #0b1a33, #1a2a4a, #0f3460); padding:1.5rem; border-radius:1rem; text-align:center; margin-bottom:1rem;">
-    <h1 style="color:#fff; margin:0;">🧬 Hybrid AI Multi-Objective Optimisation – v29.27-R2</h1>
+    <h1 style="color:#fff; margin:0;">🧬 Hybrid AI Multi-Objective Optimisation–v29.27 </h1>
     <p style="color:#64ffda; margin:0;">Balanced for R² · Fast training on free tier</p>
     <p style="color:#8899aa; font-size:0.9rem;">Nile Valley University · Sudan</p>
 </div>
