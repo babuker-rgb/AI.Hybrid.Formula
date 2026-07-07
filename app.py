@@ -2,6 +2,7 @@
 Hubryd AI – v29.27-R2 (Fully Functional)
 - Clean Pareto plot (lines + markers + golden star)
 - Enhanced sensitivity grid (all 8 parameters vs EFRF)
+- Sensitivity bar chart (comparative parameter impact)
 - Comparison bar chart
 - Cached NSGA-II results
 - All knobs working properly
@@ -589,23 +590,16 @@ def plot_sensitivity_grid(formulation, model, scaler, y_scaler, efrf_max=0.40):
         efrf_vals = []
         base_input = [api0, mcc0, pvpp0, mgst0, binder0, press0, speed0, granule0]
         for val in x_vals:
-            # Create copy of base_input and replace the variable
             input_vals = base_input.copy()
-            # Map index: API=0, MCC=1, PVPP=2, MgSt=3, Binder=4, Pressure=5, Speed=6, Granule=7
             input_vals[idx] = val
             d, t, e, ef = predict_pinn(model, scaler, y_scaler, input_vals)
             efrf_vals.append(ef)
-        # Add line trace
         fig.add_trace(go.Scatter(x=x_vals, y=efrf_vals, mode='lines+markers',
                                  marker=dict(size=5), line=dict(width=2),
                                  name=p['name'], showlegend=False),
                       row=row, col=col)
-        # Add threshold line
         fig.add_hline(y=efrf_max, line_dash='dash', line_color='red',
                       row=row, col=col)
-        # Mark current value
-        current_efrf = base_input[idx]  # not used for marker, we'll add a vertical line
-        # We'll add a vertical line at current value using shape
         fig.add_vline(x=p['var'], line_dash='dash', line_color='blue',
                       row=row, col=col)
 
@@ -620,6 +614,82 @@ def plot_sensitivity_grid(formulation, model, scaler, y_scaler, efrf_max=0.40):
 
     return fig
 
+# ================================================================
+# NEW: Sensitivity Bar Chart
+# ================================================================
+def plot_sensitivity_bars(formulation, model, scaler, y_scaler, efrf_max=0.40):
+    """
+    Horizontal bar chart showing the absolute change in EFRF when each parameter
+    varies across its allowed range (or ±20% around current value).
+    """
+    api0 = formulation['api_n']
+    mcc0 = formulation['mcc_n']
+    pvpp0 = formulation['pvpp_n']
+    mgst0 = formulation['mgst_n']
+    binder0 = formulation['binder_n']
+    press0 = formulation['pressure']
+    speed0 = formulation['speed']
+    granule0 = formulation['granule_use']
+
+    # Define parameter ranges (use full physical bounds)
+    param_defs = [
+        {'name': 'API', 'current': api0, 'min': 85, 'max': 95, 'unit': '%'},
+        {'name': 'MCC', 'current': mcc0, 'min': 0, 'max': MCC_MAX, 'unit': '%'},
+        {'name': 'PVPP', 'current': pvpp0, 'min': 0.5, 'max': 6.0, 'unit': '%'},
+        {'name': 'Mg-St', 'current': mgst0, 'min': 0.01, 'max': 1.2, 'unit': '%'},
+        {'name': 'Binder', 'current': binder0, 'min': BINDER_MIN, 'max': BINDER_MAX, 'unit': '%'},
+        {'name': 'Pressure', 'current': press0, 'min': 80, 'max': PRESSURE_MAX, 'unit': 'MPa'},
+        {'name': 'Speed', 'current': speed0, 'min': 1, 'max': 50, 'unit': 'rpm'},
+        {'name': 'Granule', 'current': granule0, 'min': 30, 'max': 250, 'unit': 'µm'}
+    ]
+
+    base_input = [api0, mcc0, pvpp0, mgst0, binder0, press0, speed0, granule0]
+    # Compute EFRF at current point
+    _, _, _, efrf_base = predict_pinn(model, scaler, y_scaler, base_input)
+
+    sensitivities = []
+    for idx, p in enumerate(param_defs):
+        # Compute EFRF at lower and upper bounds
+        low_input = base_input.copy()
+        low_input[idx] = p['min']
+        high_input = base_input.copy()
+        high_input[idx] = p['max']
+        _, _, _, efrf_low = predict_pinn(model, scaler, y_scaler, low_input)
+        _, _, _, efrf_high = predict_pinn(model, scaler, y_scaler, high_input)
+        delta = abs(efrf_high - efrf_low)
+        sensitivities.append({
+            'Parameter': f"{p['name']} ({p['unit']})",
+            'Delta EFRF': delta,
+            'Current': p['current'],
+            'Min': p['min'],
+            'Max': p['max']
+        })
+
+    df_sens = pd.DataFrame(sensitivities).sort_values('Delta EFRF', ascending=True)
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        y=df_sens['Parameter'],
+        x=df_sens['Delta EFRF'],
+        orientation='h',
+        marker_color='steelblue',
+        text=df_sens['Delta EFRF'].round(4),
+        textposition='outside',
+        hovertemplate='%{y}<br>ΔEFRF: %{x:.4f}<extra></extra>'
+    ))
+    fig.add_vline(x=efrf_max, line_dash='dash', line_color='red',
+                  annotation_text=f'EFRF threshold {efrf_max}')
+    fig.update_layout(
+        title='Parameter Impact on EFRF (absolute change across full range)',
+        xaxis_title='Absolute change in EFRF',
+        yaxis_title='Parameter',
+        height=350,
+        template='plotly_white',
+        margin=dict(l=10, r=10, t=60, b=10)
+    )
+    return fig
+
+# ================================================================
 def train_benchmark(X_train, X_test, y_train, y_test):
     from sklearn.neural_network import MLPRegressor
     from sklearn.ensemble import RandomForestRegressor
@@ -964,11 +1034,15 @@ with col_right:
                 st.info("Please run optimisation first to see sensitivity.")
             else:
                 st.markdown("### 🔬 Sensitivity Analysis (All Parameters vs EFRF)")
-                fig = plot_sensitivity_grid(f, model, scaler, y_scaler, EFRF_MAX)
-                if fig:
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.info("Could not generate sensitivity plot.")
+                # Grid of subplots
+                fig_grid = plot_sensitivity_grid(f, model, scaler, y_scaler, EFRF_MAX)
+                if fig_grid:
+                    st.plotly_chart(fig_grid, use_container_width=True)
+                # Horizontal bar chart – NEW
+                st.markdown("#### Parameter Impact Comparison")
+                fig_bars = plot_sensitivity_bars(f, model, scaler, y_scaler, EFRF_MAX)
+                if fig_bars:
+                    st.plotly_chart(fig_bars, use_container_width=True)
 
         # ---- Comparison (if knob ON) ----
         if show_comparison:
@@ -997,15 +1071,12 @@ with col_right:
             }])
             bench_df = pd.concat([pinn_row, bench_df], ignore_index=True)
 
-            # Bar chart
             fig_bar = px.bar(bench_df, x='Model', y='R²', color='Model',
                              title='R² Comparison (Tensile)',
                              labels={'R²': 'R² Score'},
                              text='R²')
             fig_bar.update_layout(height=400, template='plotly_white')
             st.plotly_chart(fig_bar, use_container_width=True)
-
-            # Table
             st.dataframe(bench_df, use_container_width=True)
 
         # ---- Report ----
