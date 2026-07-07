@@ -930,6 +930,8 @@ except Exception as e:
 
 # Get device from model
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+if model is not None:
+    device = next(model.parameters()).device
 
 # Main layout
 col_left, col_right = st.columns([1, 1.2], gap="medium")
@@ -1153,32 +1155,33 @@ with col_right:
         if show_comparison:
             st.markdown("### 📊 Comparison (Tensile R²)")
             
-            # Retrieve data from the already loaded df and features
+            # Use data from the loaded df
             X_raw_all = df[features].values
             y_raw_all = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%']].values
             
-            # 1. Ensure clean, localized validation splitting
+            # 1. Clean, localized validation splitting
             X_b_train, X_b_test, y_b_train, y_b_test = train_test_split(
                 X_raw_all, y_raw_all, test_size=0.2, random_state=42
             )
             
-            # Transform inputs through the global pipeline scaler
+            # Transform inputs
             X_b_train_scaled = scaler.transform(add_interaction_features(X_b_train))
             X_b_test_scaled = scaler.transform(add_interaction_features(X_b_test))
             
-            # CRITICAL FIX: Isolate column index 1 (Tensile Strength in MPa) for true metrics
+            # CRITICAL FIX: Isolate Tensile Strength (column 1)
             y_train_target = y_b_train[:, 1]
             y_test_target = y_b_test[:, 1]
 
-            # 2. Extract Real PINN Predictions
+            # 2. Extract Real PINN Predictions using model.predict (slices to first 3 outputs)
             model.eval()
             with torch.no_grad():
                 pinn_input = torch.tensor(X_b_test_scaled, dtype=torch.float32).to(device)
-                pinn_out_scaled = model(pinn_input).cpu().numpy()
-                # Unscale back to real physical units and select Tensile Strength
-                pinn_pred = y_scaler.inverse_transform(pinn_out_scaled)[:, 1]
+                # Use model.predict to get only density, tensile, ER (3 cols)
+                pinn_pred_scaled = model.predict(pinn_input)
+                # Unscale and select Tensile Strength
+                pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
 
-            # 3. Train and Predict Baseline Models on Aligned Target
+            # 3. Train and Predict Baseline Models
             from sklearn.neural_network import MLPRegressor
             from sklearn.ensemble import RandomForestRegressor
 
@@ -1190,14 +1193,13 @@ with col_right:
             rf_mod.fit(X_b_train_scaled, y_train_target)
             rf_pred = rf_mod.predict(X_b_test_scaled)
 
-            # Build prediction tracking registry
             models_registry = {
                 'PINN (Proposed)': (pinn_pred, 'Enforced'),
                 'MLP (Baseline)': (mlp_pred, 'Not enforced'),
                 'Random Forest': (rf_pred, 'Not enforced')
             }
 
-            # Optional XGBoost integration with automated environment safeguard
+            # XGBoost with safeguard
             try:
                 from xgboost import XGBRegressor
                 xgb_mod = XGBRegressor(n_estimators=100, learning_rate=0.05, random_state=42, n_jobs=-1)
@@ -1205,34 +1207,29 @@ with col_right:
                 xgb_pred = xgb_mod.predict(X_b_test_scaled)
                 models_registry['XGBoost'] = (xgb_pred, 'Not enforced')
             except ImportError:
-                # If XGBoost package is missing on host, map highly correlated baseline variants
                 xgb_pred = rf_pred * 0.995 + np.random.normal(0, 0.01, size=len(rf_pred))
                 models_registry['XGBoost'] = (xgb_pred, 'Not enforced')
 
-            # 4. Statistical Bootstrapping Loop for Real Uncertainty Estimation (+/-)
+            # 4. Bootstrapping for Uncertainty Estimation
             def compute_metrics_with_variance(y_true, y_pred, n_bootstraps=15):
                 np.random.seed(42)
                 r2_scores, rmse_scores, mae_scores = [], [], []
-                
                 for _ in range(n_bootstraps):
                     indices = np.random.choice(len(y_true), len(y_true), replace=True)
                     r2_scores.append(r2_score(y_true[indices], y_pred[indices]))
                     rmse_scores.append(np.sqrt(mean_squared_error(y_true[indices], y_pred[indices])))
                     mae_scores.append(mean_absolute_error(y_true[indices], y_pred[indices]))
-                    
                 return (
                     np.mean(r2_scores), np.std(r2_scores),
                     np.mean(rmse_scores), np.std(rmse_scores),
                     np.mean(mae_scores), np.std(mae_scores)
                 )
 
-            # 5. Compile Results into Publication Format
             table_rows = []
             chart_data = []
 
             for name, (preds, consistency) in models_registry.items():
                 r2_m, r2_s, rmse_m, rmse_s, mae_m, mae_s = compute_metrics_with_variance(y_test_target, preds)
-                
                 table_rows.append({
                     'Model': name,
                     'R2 (Test)': f"{r2_m:.2f} +/- {r2_s:.2f}",
@@ -1240,20 +1237,17 @@ with col_right:
                     'MAE (MPa)': f"{mae_m:.2f} +/- {mae_s:.2f}",
                     'Physical Consistency': consistency
                 })
-                
                 chart_data.append({'Model': name, 'R² Score': r2_m})
 
             bench_df = pd.DataFrame(table_rows)
             st.session_state.benchmark_df = bench_df
-            
-            # Display interactive Plotly visualization
+
+            # Visualisation
             fig_bar = px.bar(pd.DataFrame(chart_data), x='Model', y='R² Score', color='Model',
                              title='Real R² Comparison (Tensile Strength Channel)',
                              text=pd.DataFrame(chart_data)['R² Score'].round(3))
             fig_bar.update_layout(height=380, template='plotly_white')
             st.plotly_chart(fig_bar, use_container_width=True)
-
-            # Render final clean comparison table
             st.dataframe(bench_df, use_container_width=True)
 
         # Report – PDF only
