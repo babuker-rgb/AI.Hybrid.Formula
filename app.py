@@ -1,6 +1,6 @@
 """
 Hubryd AI – v29.27-R2 (Final)
-- Particle effect: Density & Tensile vs Particle Size at multiple pressures
+- Particle effect: Particle Size vs Pressure vs Density (contour plot)
 - Sensitivity: single bar chart (8 parameters vs EFRF)
 - Feasible region + tested point on Pareto plot
 - PDF report (fixed bytes output)
@@ -655,10 +655,12 @@ def plot_sensitivity_bars(formulation, model, scaler, y_scaler, efrf_max=0.40):
     )
     return fig
 
-def plot_particle_effect_with_pressure(formulation, model, scaler, y_scaler):
+# ================================================================
+# Particle Size vs Pressure vs Density (Contour Plot)
+# ================================================================
+def plot_particle_pressure_density(formulation, model, scaler, y_scaler):
     """
-    Two plots: Density vs Particle Size at different pressures,
-    and Tensile vs Particle Size at different pressures.
+    Contour plot: Granule Size vs Pressure vs Density.
     """
     api0 = formulation['api_n']
     mcc0 = formulation['mcc_n']
@@ -667,56 +669,34 @@ def plot_particle_effect_with_pressure(formulation, model, scaler, y_scaler):
     binder0 = formulation['binder_n']
     speed0 = formulation['speed']
 
-    pressures = [80, 150, 220, 300]
     granule_range = np.linspace(30, 250, 20)
-    colors = ['blue', 'green', 'orange', 'red']
+    pressure_range = np.linspace(80, PRESSURE_MAX, 20)
 
-    fig_density = go.Figure()
-    fig_tensile = go.Figure()
-
-    for idx, press in enumerate(pressures):
-        density_vals = []
-        tensile_vals = []
-        for g in granule_range:
+    density_grid = np.zeros((len(pressure_range), len(granule_range)))
+    for i, press in enumerate(pressure_range):
+        for j, g in enumerate(granule_range):
             inputs = [api0, mcc0, pvpp0, mgst0, binder0, press, speed0, g]
             d, t, e, ef = predict_pinn(model, scaler, y_scaler, inputs)
-            density_vals.append(d)
-            tensile_vals.append(t)
-        fig_density.add_trace(go.Scatter(
-            x=granule_range, y=density_vals,
-            mode='lines+markers',
-            name=f'{press} MPa',
-            line=dict(color=colors[idx], width=2),
-            marker=dict(size=5)
-        ))
-        fig_tensile.add_trace(go.Scatter(
-            x=granule_range, y=tensile_vals,
-            mode='lines+markers',
-            name=f'{press} MPa',
-            line=dict(color=colors[idx], width=2),
-            marker=dict(size=5)
-        ))
+            density_grid[i, j] = d
 
-    fig_density.update_layout(
-        title='Density vs Particle Size at Different Pressures',
+    fig = go.Figure(data=go.Contour(
+        z=density_grid,
+        x=granule_range,
+        y=pressure_range,
+        colorscale='Viridis',
+        hovertemplate='Granule: %{x:.0f} µm<br>Pressure: %{y:.0f} MPa<br>Density: %{z:.3f}<extra></extra>'
+    ))
+    fig.update_layout(
+        title='Density vs Particle Size and Pressure',
         xaxis_title='Granule Size (µm)',
-        yaxis_title='Density',
-        height=400,
-        template='plotly_white',
-        legend=dict(x=0.02, y=0.98)
+        yaxis_title='Pressure (MPa)',
+        height=450,
+        template='plotly_white'
     )
-    fig_tensile.update_layout(
-        title='Tensile Strength vs Particle Size at Different Pressures',
-        xaxis_title='Granule Size (µm)',
-        yaxis_title='Tensile (MPa)',
-        height=400,
-        template='plotly_white',
-        legend=dict(x=0.02, y=0.98)
-    )
-    return fig_density, fig_tensile
+    return fig
 
 # ================================================================
-# PDF Report Generator (FIXED: returns bytes)
+# PDF Report Generator (FIXED: ensures bytes)
 # ================================================================
 def generate_pdf_report(formulation, pinn_r2, bench_df, golden_solution, golden_pred, fronts, timestamp):
     try:
@@ -796,7 +776,7 @@ def generate_pdf_report(formulation, pinn_r2, bench_df, golden_solution, golden_
             pdf.cell(30, 6, f"{row['RMSE']:.4f}", border=1)
             pdf.cell(30, 6, f"{row['MAE']:.4f}", border=1, ln=True)
 
-        # Return bytes – ensure it's bytes
+        # Ensure we return bytes
         pdf_bytes = pdf.output(dest='S')
         if isinstance(pdf_bytes, str):
             pdf_bytes = pdf_bytes.encode('latin-1')
@@ -1142,17 +1122,13 @@ with col_right:
         with knob_cols[4]:
             generate_report = st.button("📄 Report", key="knob_report")
 
-        # Particle Effect
+        # Particle Effect – contour plot
         if show_particle:
             f = st.session_state.formulation
             if f['api_n'] is not None:
                 st.markdown("### 📊 Particle Size Effect with Pressure Variation")
-                fig_dens, fig_tens = plot_particle_effect_with_pressure(f, model, scaler, y_scaler)
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.plotly_chart(fig_dens, use_container_width=True)
-                with col2:
-                    st.plotly_chart(fig_tens, use_container_width=True)
+                fig = plot_particle_pressure_density(f, model, scaler, y_scaler)
+                st.plotly_chart(fig, use_container_width=True)
 
         # Sensitivity
         if show_sensitivity:
@@ -1223,7 +1199,7 @@ with col_right:
             bench_df = pd.concat([pinn_row, bench_df], ignore_index=True)
 
             pdf_bytes = generate_pdf_report(f, pinn_r2, bench_df, golden_solution, golden_pred, fronts, timestamp)
-            if pdf_bytes is not None:
+            if pdf_bytes is not None and isinstance(pdf_bytes, bytes):
                 st.download_button(
                     label="📥 Download PDF Report",
                     data=pdf_bytes,
