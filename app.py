@@ -1,10 +1,10 @@
 """
 Hubryd AI – v29.27-R2 (Fully Functional)
-- R² > 0.8
-- Pareto curve + golden star (balanced)
-- Sensitivity analysis
+- Clean Pareto plot (lines + markers + golden star)
+- Enhanced sensitivity grid (all 8 parameters vs EFRF)
 - Comparison bar chart
 - Cached NSGA-II results
+- All knobs working properly
 Nile Valley University · Sudan
 """
 
@@ -19,6 +19,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import os
 import tempfile
 import datetime
@@ -509,47 +510,114 @@ def predict_pinn(model, scaler, y_scaler, inputs):
         st.error(f"Prediction error: {e}")
         return 0.7, 2.0, 0.5, 0.25
 
-def plot_pareto_with_golden(objectives, fronts, golden_solution=None, golden_pred=None):
+def plot_pareto_clean(objectives, fronts, golden_solution=None, golden_pred=None, efrf_max=0.40):
     if fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
     front = fronts[0]
-    # Sort by API (x-axis) to connect points as a curve
     df_front = pd.DataFrame({
         'API': -objectives[front, 0],
         'EFRF': objectives[front, 1]
     }).sort_values('API')
-    
     fig = go.Figure()
-    # Pareto curve (line + markers)
     fig.add_trace(go.Scatter(
         x=df_front['API'],
         y=df_front['EFRF'],
         mode='lines+markers',
         name='Pareto Front',
         line=dict(color='red', width=2),
-        marker=dict(size=6, color='red'),
+        marker=dict(size=7, color='red'),
         hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
     ))
-    # Golden solution if available
     if golden_solution is not None and golden_pred is not None:
         fig.add_trace(go.Scatter(
-            x=[golden_solution[0]],  # API
-            y=[golden_pred[2] / golden_pred[1]],  # EFRF (ER / Tensile)
+            x=[golden_solution[0]],
+            y=[golden_pred[2] / golden_pred[1]],
             mode='markers',
             name='⭐ Golden Solution',
             marker=dict(size=14, color='gold', symbol='star', line=dict(width=2, color='black')),
             hovertemplate='Golden: API %{x:.1f}%, EFRF %{y:.4f}<extra></extra>'
         ))
-    fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='gray',
-                  annotation_text=f'EFRF threshold {EFRF_MAX}')
+    fig.add_hline(y=efrf_max, line_dash='dash', line_color='gray',
+                  annotation_text=f'EFRF threshold {efrf_max}')
     fig.update_layout(
-        title='Pareto Front (v29.27-R2)',
+        title='Pareto Front (Clean Version)',
         xaxis_title='API (%)',
         yaxis_title='EFRF',
         height=450,
         template='plotly_white',
         legend=dict(x=0.8, y=0.95)
     )
+    return fig
+
+def plot_sensitivity_grid(formulation, model, scaler, y_scaler, efrf_max=0.40):
+    """
+    Create a grid of subplots showing EFRF vs each variable.
+    """
+    # Extract current values
+    api0 = formulation['api_n']
+    mcc0 = formulation['mcc_n']
+    pvpp0 = formulation['pvpp_n']
+    mgst0 = formulation['mgst_n']
+    binder0 = formulation['binder_n']
+    press0 = formulation['pressure']
+    speed0 = formulation['speed']
+    granule0 = formulation['granule_use']
+
+    # Define parameter ranges and labels
+    params = [
+        {'name': 'API (%)', 'var': api0, 'range': np.linspace(85, 95, 15), 'unit': '%'},
+        {'name': 'MCC (%)', 'var': mcc0, 'range': np.linspace(0, MCC_MAX, 15), 'unit': '%'},
+        {'name': 'PVPP (%)', 'var': pvpp0, 'range': np.linspace(0.5, 6.0, 15), 'unit': '%'},
+        {'name': 'Mg-St (%)', 'var': mgst0, 'range': np.linspace(0.01, 1.2, 15), 'unit': '%'},
+        {'name': 'Binder (%)', 'var': binder0, 'range': np.linspace(BINDER_MIN, BINDER_MAX, 15), 'unit': '%'},
+        {'name': 'Pressure (MPa)', 'var': press0, 'range': np.linspace(80, PRESSURE_MAX, 15), 'unit': 'MPa'},
+        {'name': 'Speed (rpm)', 'var': speed0, 'range': np.linspace(1, 50, 15), 'unit': 'rpm'},
+        {'name': 'Granule (µm)', 'var': granule0, 'range': np.linspace(30, 250, 15), 'unit': 'µm'}
+    ]
+
+    # Create subplot grid: 2 rows x 4 columns
+    fig = make_subplots(rows=2, cols=4,
+                        subplot_titles=[p['name'] for p in params],
+                        shared_yaxes=True,
+                        horizontal_spacing=0.08,
+                        vertical_spacing=0.12)
+
+    for idx, p in enumerate(params):
+        row = idx // 4 + 1
+        col = idx % 4 + 1
+        x_vals = p['range']
+        efrf_vals = []
+        base_input = [api0, mcc0, pvpp0, mgst0, binder0, press0, speed0, granule0]
+        for val in x_vals:
+            # Create copy of base_input and replace the variable
+            input_vals = base_input.copy()
+            # Map index: API=0, MCC=1, PVPP=2, MgSt=3, Binder=4, Pressure=5, Speed=6, Granule=7
+            input_vals[idx] = val
+            d, t, e, ef = predict_pinn(model, scaler, y_scaler, input_vals)
+            efrf_vals.append(ef)
+        # Add line trace
+        fig.add_trace(go.Scatter(x=x_vals, y=efrf_vals, mode='lines+markers',
+                                 marker=dict(size=5), line=dict(width=2),
+                                 name=p['name'], showlegend=False),
+                      row=row, col=col)
+        # Add threshold line
+        fig.add_hline(y=efrf_max, line_dash='dash', line_color='red',
+                      row=row, col=col)
+        # Mark current value
+        current_efrf = base_input[idx]  # not used for marker, we'll add a vertical line
+        # We'll add a vertical line at current value using shape
+        fig.add_vline(x=p['var'], line_dash='dash', line_color='blue',
+                      row=row, col=col)
+
+    fig.update_layout(height=600, width=900, title_text="EFRF Sensitivity to Each Parameter",
+                      template='plotly_white')
+    fig.update_xaxes(title_text="Value", row=2, col=1)
+    fig.update_xaxes(title_text="Value", row=2, col=2)
+    fig.update_xaxes(title_text="Value", row=2, col=3)
+    fig.update_xaxes(title_text="Value", row=2, col=4)
+    fig.update_yaxes(title_text="EFRF", row=1, col=1)
+    fig.update_yaxes(title_text="EFRF", row=2, col=1)
+
     return fig
 
 def train_benchmark(X_train, X_test, y_train, y_test):
@@ -662,7 +730,7 @@ st.set_page_config(page_title="Hubryd AI v29.27-R2", layout="wide")
 st.markdown("""
 <div style="background: linear-gradient(135deg, #0b1a33, #1a2a4a, #0f3460); padding:1.5rem; border-radius:1rem; text-align:center; margin-bottom:1rem;">
     <h1 style="color:#fff; margin:0;">🧬 Hybrid AI Multi-Objective Optimisation – v29.27</h1>
-    <p style="color:#64ffda; margin:0;">Enhanced R² · Pareto curve · Golden star</p>
+    <p style="color:#64ffda; margin:0;">Enhanced R² · Clean Pareto · Golden star</p>
     <p style="color:#8899aa; font-size:0.9rem;">Nile Valley University · Sudan</p>
 </div>
 """, unsafe_allow_html=True)
@@ -799,16 +867,12 @@ with col_right:
             best_idx = None
             if len(fronts) > 0 and len(fronts[0]) > 0:
                 front_indices = fronts[0]
-                # Ideal point: max API, min EFRF
                 max_api = max(-objectives[i, 0] for i in front_indices)
                 min_efrf = min(objectives[i, 1] for i in front_indices)
-                # Find the point with minimum normalized distance to ideal
                 best_dist = np.inf
                 for idx in front_indices:
-                    # Check feasibility (should be already feasible)
                     api_val = -objectives[idx, 0]
                     efrf_val = objectives[idx, 1]
-                    # Normalize distances
                     norm_api = (max_api - api_val) / (max_api - 85) if max_api > 85 else 0
                     norm_efrf = (efrf_val - min_efrf) / (EFRF_MAX - min_efrf) if EFRF_MAX > min_efrf else 0
                     dist = np.sqrt(norm_api**2 + norm_efrf**2)
@@ -838,7 +902,7 @@ with col_right:
             st.markdown("### 📉 Pareto Front")
             if len(fronts) > 0 and len(fronts[0]) > 0:
                 st.success(f"✅ Pareto front found: {len(fronts[0])} optimal solutions")
-                fig = plot_pareto_with_golden(objectives, fronts, golden_solution, golden_pred)
+                fig = plot_pareto_clean(objectives, fronts, golden_solution, golden_pred, EFRF_MAX)
                 if fig:
                     st.plotly_chart(fig, use_container_width=True)
                 if golden_solution is not None:
@@ -893,36 +957,20 @@ with col_right:
         with knob_cols[4]:
             generate_report = st.button("📄 Report", key="knob_report")
 
-        # ---- Sensitivity ----
+        # ---- Sensitivity (if knob ON) ----
         if show_sensitivity:
             f = st.session_state.formulation
             if f['api_n'] is None:
                 st.info("Please run optimisation first to see sensitivity.")
             else:
-                st.markdown("### 🔬 Sensitivity Analysis")
-                api_range = np.linspace(85, 95, 10)
-                pressure_range = np.linspace(80, PRESSURE_MAX, 10)
-                efrf_grid = np.zeros((len(api_range), len(pressure_range)))
-                with st.spinner("Computing sensitivity grid..."):
-                    for i, api_val in enumerate(api_range):
-                        for j, press_val in enumerate(pressure_range):
-                            inp = [api_val, f['mcc_n'], f['pvpp_n'], f['mgst_n'], f['binder_n'],
-                                   press_val, f['speed'], f['granule_use']]
-                            d, t, e, ef = predict_pinn(model, scaler, y_scaler, inp)
-                            efrf_grid[i, j] = ef
-                fig = go.Figure(data=go.Contour(
-                    z=efrf_grid,
-                    x=pressure_range,
-                    y=api_range,
-                    colorscale='RdYlGn_r',
-                    contours=dict(coloring='heatmap'),
-                    hovertemplate='Pressure: %{x:.0f} MPa<br>API: %{y:.1f}%<br>EFRF: %{z:.4f}<extra></extra>'
-                ))
-                fig.update_layout(title='EFRF Sensitivity', xaxis_title='Pressure (MPa)', yaxis_title='API (%)', height=400)
-                fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='red')
-                st.plotly_chart(fig, use_container_width=True)
+                st.markdown("### 🔬 Sensitivity Analysis (All Parameters vs EFRF)")
+                fig = plot_sensitivity_grid(f, model, scaler, y_scaler, EFRF_MAX)
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("Could not generate sensitivity plot.")
 
-        # ---- Comparison ----
+        # ---- Comparison (if knob ON) ----
         if show_comparison:
             st.markdown("### 📊 Comparison (Tensile R²)")
             X_train, X_test, y_train, y_test = train_test_split(
@@ -949,7 +997,7 @@ with col_right:
             }])
             bench_df = pd.concat([pinn_row, bench_df], ignore_index=True)
 
-            # Display bar chart
+            # Bar chart
             fig_bar = px.bar(bench_df, x='Model', y='R²', color='Model',
                              title='R² Comparison (Tensile)',
                              labels={'R²': 'R² Score'},
@@ -957,7 +1005,7 @@ with col_right:
             fig_bar.update_layout(height=400, template='plotly_white')
             st.plotly_chart(fig_bar, use_container_width=True)
 
-            # Also show table
+            # Table
             st.dataframe(bench_df, use_container_width=True)
 
         # ---- Report ----
