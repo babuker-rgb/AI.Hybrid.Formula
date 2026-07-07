@@ -4,4 +4,4 @@ pandas
 torch
 scikit-learn
 plotly
-fpdf2
+fpdf2   # optional – if missing, text report will be used
