@@ -3,7 +3,8 @@ Hubryd AI – v29.27-R2 (Final)
 - Particle effect: Density & Tensile vs Particle Size at multiple pressures
 - Sensitivity: single bar chart (8 parameters vs EFRF)
 - Feasible region + tested point on Pareto plot
-- PDF report, caching, all knobs working
+- PDF report (fixed bytes output)
+- Cached training, all knobs working
 Nile Valley University · Sudan
 """
 
@@ -715,7 +716,7 @@ def plot_particle_effect_with_pressure(formulation, model, scaler, y_scaler):
     return fig_density, fig_tensile
 
 # ================================================================
-# PDF Report Generator
+# PDF Report Generator (FIXED: returns bytes)
 # ================================================================
 def generate_pdf_report(formulation, pinn_r2, bench_df, golden_solution, golden_pred, fronts, timestamp):
     try:
@@ -795,7 +796,11 @@ def generate_pdf_report(formulation, pinn_r2, bench_df, golden_solution, golden_
             pdf.cell(30, 6, f"{row['RMSE']:.4f}", border=1)
             pdf.cell(30, 6, f"{row['MAE']:.4f}", border=1, ln=True)
 
-        return pdf.output(dest='S')
+        # Return bytes – ensure it's bytes
+        pdf_bytes = pdf.output(dest='S')
+        if isinstance(pdf_bytes, str):
+            pdf_bytes = pdf_bytes.encode('latin-1')
+        return pdf_bytes
     except Exception as e:
         st.error(f"PDF generation failed: {e}")
         return None
@@ -1137,7 +1142,7 @@ with col_right:
         with knob_cols[4]:
             generate_report = st.button("📄 Report", key="knob_report")
 
-        # Particle Effect (two plots side by side)
+        # Particle Effect
         if show_particle:
             f = st.session_state.formulation
             if f['api_n'] is not None:
@@ -1149,7 +1154,7 @@ with col_right:
                 with col2:
                     st.plotly_chart(fig_tens, use_container_width=True)
 
-        # Sensitivity (only bar chart)
+        # Sensitivity
         if show_sensitivity:
             f = st.session_state.formulation
             if f['api_n'] is not None:
