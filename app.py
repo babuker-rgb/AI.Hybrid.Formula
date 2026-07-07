@@ -928,6 +928,9 @@ except Exception as e:
     st.error(f"❌ Training failed: {e}. Using dummy model.")
     model = None
 
+# Get device from model
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 # Main layout
 col_left, col_right = st.columns([1, 1.2], gap="medium")
 
@@ -1150,9 +1153,13 @@ with col_right:
         if show_comparison:
             st.markdown("### 📊 Comparison (Tensile R²)")
             
+            # Retrieve data from the already loaded df and features
+            X_raw_all = df[features].values
+            y_raw_all = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%']].values
+            
             # 1. Ensure clean, localized validation splitting
             X_b_train, X_b_test, y_b_train, y_b_test = train_test_split(
-                X_raw, y_raw, test_size=0.2, random_state=42
+                X_raw_all, y_raw_all, test_size=0.2, random_state=42
             )
             
             # Transform inputs through the global pipeline scaler
