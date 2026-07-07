@@ -5,3 +5,4 @@ torch
 scikit-learn
 plotly
 fpdf2
+xgboost   # optional
