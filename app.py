@@ -3,7 +3,7 @@ Hubryd AI – v29.27-R2 (Final)
 - Particle effect: Particle Size vs Pressure vs Density (contour plot)
 - Sensitivity: single bar chart (8 parameters vs EFRF)
 - Feasible region + tested point on Pareto plot
-- PDF report (fixed bytes output)
+- PDF report with fallback to text report
 - Cached training, all knobs working
 Nile Valley University · Sudan
 """
@@ -24,8 +24,15 @@ import os
 import tempfile
 import datetime
 import warnings
-from fpdf import FPDF
 warnings.filterwarnings('ignore')
+
+# Try to import fpdf2; if not available, we'll use a text fallback
+try:
+    from fpdf import FPDF
+    FPDF_AVAILABLE = True
+except ImportError:
+    FPDF_AVAILABLE = False
+    st.warning("fpdf2 not installed. PDF reports will be replaced by text reports.")
 
 # ================================================================
 # Physics Constants
@@ -655,13 +662,7 @@ def plot_sensitivity_bars(formulation, model, scaler, y_scaler, efrf_max=0.40):
     )
     return fig
 
-# ================================================================
-# Particle Size vs Pressure vs Density (Contour Plot)
-# ================================================================
 def plot_particle_pressure_density(formulation, model, scaler, y_scaler):
-    """
-    Contour plot: Granule Size vs Pressure vs Density.
-    """
     api0 = formulation['api_n']
     mcc0 = formulation['mcc_n']
     pvpp0 = formulation['pvpp_n']
@@ -696,9 +697,56 @@ def plot_particle_pressure_density(formulation, model, scaler, y_scaler):
     return fig
 
 # ================================================================
-# PDF Report Generator (FIXED: ensures bytes)
+# PDF / Text Report Generator (with fallback)
 # ================================================================
+def generate_report(formulation, pinn_r2, bench_df, golden_solution, golden_pred, fronts, timestamp):
+    # Build a text representation of the report (used for both PDF and fallback)
+    f = formulation
+    report_lines = []
+    report_lines.append("Hubryd AI v29.27-R2 Report")
+    report_lines.append(f"Generated: {timestamp}\n")
+    report_lines.append("1. Formulation Parameters")
+    report_lines.append(f"API: {f['api_n']:.1f}%")
+    report_lines.append(f"MCC: {f['mcc_n']:.1f}%")
+    report_lines.append(f"PVPP: {f['pvpp_n']:.1f}%")
+    report_lines.append(f"Mg-St: {f['mgst_n']:.2f}%")
+    report_lines.append(f"Binder: {f['binder_n']:.1f}%")
+    report_lines.append(f"Pressure: {f['pressure']:.1f} MPa")
+    report_lines.append(f"Speed: {f['speed']:.1f} rpm")
+    report_lines.append(f"Granule: {f['granule_use']:.0f} µm\n")
+    report_lines.append("2. Predicted Properties")
+    report_lines.append(f"Density: {f['density']:.3f}")
+    report_lines.append(f"Tensile: {f['tensile']:.2f} MPa")
+    report_lines.append(f"EFRF: {f['efrf']:.4f}")
+    report_lines.append(f"ER: {f['er']:.4f}\n")
+    report_lines.append("3. Constraints Status")
+    report_lines.append(f"Density: {'PASS' if D_MIN <= f['density'] <= D_MAX else 'FAIL'}")
+    report_lines.append(f"Tensile: {'PASS' if f['tensile'] >= TENSILE_MIN else 'FAIL'}")
+    report_lines.append(f"EFRF: {'PASS' if f['efrf'] < EFRF_MAX else 'FAIL'}")
+    report_lines.append(f"MCC: {'PASS' if f['mcc_n'] <= MCC_MAX else 'FAIL'}\n")
+    if golden_solution is not None and golden_pred is not None:
+        report_lines.append("4. Golden Solution (NSGA-II)")
+        report_lines.append(f"API: {golden_solution[0]:.1f}%")
+        report_lines.append(f"MCC: {golden_solution[1]:.1f}%")
+        report_lines.append(f"PVPP: {golden_solution[2]:.1f}%")
+        report_lines.append(f"Mg-St: {golden_solution[3]:.2f}%")
+        report_lines.append(f"Binder: {golden_solution[4]:.1f}%")
+        report_lines.append(f"Pressure: {golden_solution[5]:.1f} MPa")
+        report_lines.append(f"Speed: {golden_solution[6]:.1f} rpm")
+        report_lines.append(f"Granule: {golden_solution[7]:.0f} µm")
+        report_lines.append(f"Density: {golden_pred[0]:.3f}")
+        report_lines.append(f"Tensile: {golden_pred[1]:.3f} MPa")
+        report_lines.append(f"EFRF: {golden_pred[3]:.4f}")
+        report_lines.append(f"ER: {golden_pred[2]:.4f}\n")
+    report_lines.append("5. Model Performance (Tensile R²)")
+    report_lines.append("Model\tR²\tRMSE\tMAE")
+    for _, row in bench_df.iterrows():
+        report_lines.append(f"{row['Model']}\t{row['R²']:.4f}\t{row['RMSE']:.4f}\t{row['MAE']:.4f}")
+    return "\n".join(report_lines)
+
 def generate_pdf_report(formulation, pinn_r2, bench_df, golden_solution, golden_pred, fronts, timestamp):
+    if not FPDF_AVAILABLE:
+        return None
     try:
         pdf = FPDF()
         pdf.add_page()
@@ -708,10 +756,11 @@ def generate_pdf_report(formulation, pinn_r2, bench_df, golden_solution, golden_
         pdf.cell(0, 6, f"Generated: {timestamp}", ln=True, align='C')
         pdf.ln(5)
 
+        # Same content as the text report but formatted with PDF
+        f = formulation
         pdf.set_font("Arial", "B", 12)
         pdf.cell(0, 8, "1. Formulation Parameters", ln=True)
         pdf.set_font("Arial", "", 10)
-        f = formulation
         pdf.cell(60, 6, f"API: {f['api_n']:.1f}%", border=0)
         pdf.cell(60, 6, f"MCC: {f['mcc_n']:.1f}%", ln=True)
         pdf.cell(60, 6, f"PVPP: {f['pvpp_n']:.1f}%", border=0)
@@ -744,9 +793,9 @@ def generate_pdf_report(formulation, pinn_r2, bench_df, golden_solution, golden_
         pdf.cell(60, 6, f"MCC: {status}", ln=True)
         pdf.ln(3)
 
-        pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 8, "4. Golden Solution (NSGA-II)", ln=True)
         if golden_solution is not None and golden_pred is not None:
+            pdf.set_font("Arial", "B", 12)
+            pdf.cell(0, 8, "4. Golden Solution (NSGA-II)", ln=True)
             pdf.set_font("Arial", "", 10)
             pdf.cell(60, 6, f"API: {golden_solution[0]:.1f}%", border=0)
             pdf.cell(60, 6, f"MCC: {golden_solution[1]:.1f}%", ln=True)
@@ -776,7 +825,6 @@ def generate_pdf_report(formulation, pinn_r2, bench_df, golden_solution, golden_
             pdf.cell(30, 6, f"{row['RMSE']:.4f}", border=1)
             pdf.cell(30, 6, f"{row['MAE']:.4f}", border=1, ln=True)
 
-        # Ensure we return bytes
         pdf_bytes = pdf.output(dest='S')
         if isinstance(pdf_bytes, str):
             pdf_bytes = pdf_bytes.encode('latin-1')
@@ -1120,9 +1168,9 @@ with col_right:
                                       key="knob_particle_plot")
             st.session_state.show_particle_plot = show_particle
         with knob_cols[4]:
-            generate_report = st.button("📄 Report", key="knob_report")
+            generate_report_btn = st.button("📄 Report", key="knob_report")
 
-        # Particle Effect – contour plot
+        # Particle Effect
         if show_particle:
             f = st.session_state.formulation
             if f['api_n'] is not None:
@@ -1174,10 +1222,11 @@ with col_right:
             st.plotly_chart(fig_bar, use_container_width=True)
             st.dataframe(bench_df, use_container_width=True)
 
-        # Report
-        if generate_report:
+        # Report – try PDF first, fallback to text
+        if generate_report_btn:
             f = st.session_state.formulation
             timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            # Recompute bench_df if needed (or use existing)
             X_train, X_test, y_train, y_test = train_test_split(
                 df[features].values, df['Tensile_Strength_MPa'].values,
                 test_size=0.2, random_state=42
@@ -1198,6 +1247,7 @@ with col_right:
             }])
             bench_df = pd.concat([pinn_row, bench_df], ignore_index=True)
 
+            # Try PDF
             pdf_bytes = generate_pdf_report(f, pinn_r2, bench_df, golden_solution, golden_pred, fronts, timestamp)
             if pdf_bytes is not None and isinstance(pdf_bytes, bytes):
                 st.download_button(
@@ -1207,7 +1257,15 @@ with col_right:
                     mime="application/pdf"
                 )
             else:
-                st.error("Could not generate PDF. Check logs for details.")
+                # Fallback to text report
+                text_report = generate_report(f, pinn_r2, bench_df, golden_solution, golden_pred, fronts, timestamp)
+                st.warning("PDF generation failed. Downloading text report instead.")
+                st.download_button(
+                    label="📥 Download Text Report",
+                    data=text_report,
+                    file_name=f"hubryd_report_{timestamp[:10]}.txt",
+                    mime="text/plain"
+                )
 
     else:
         st.info("Adjust sliders and click 'Predict & Optimise' to see results.")
