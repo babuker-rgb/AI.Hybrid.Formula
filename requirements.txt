@@ -1,6 +1,7 @@
 streamlit
-torch
 numpy
 pandas
+torch
 scikit-learn
 plotly
+fpdf2
