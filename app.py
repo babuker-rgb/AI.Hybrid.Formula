@@ -1,8 +1,7 @@
 """
 Hubryd AI – v29.27-R2 (Balanced)
 Optimised for R² · Fast training on free tier
-NSGA-II unchanged from v29.18
-No matplotlib dependency – clean table only.
+NSGA-II unchanged · Knobs appear after NSGA-II results.
 Nile Valley University · Sudan
 """
 
@@ -513,13 +512,11 @@ def train_benchmark(X_train, X_test, y_train, y_test):
         'MLP': MLPRegressor(hidden_layer_sizes=(64,32), max_iter=300, random_state=42),
         'Random Forest': RandomForestRegressor(n_estimators=50, random_state=42)
     }
-    # Optional XGBoost – skip if not installed
     try:
         from xgboost import XGBRegressor
         models['XGBoost'] = XGBRegressor(n_estimators=50, random_state=42, verbosity=0)
     except ImportError:
         pass
-
     results = []
     for name, model in models.items():
         model.fit(X_train, y_train)
@@ -611,7 +608,7 @@ def load_or_train():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# Streamlit UI – v29.27 with Knobs
+# Streamlit UI – v29.27 with Knobs after NSGA-II
 # ================================================================
 st.set_page_config(page_title="Hubryd AI v29.27-R2", layout="wide")
 
@@ -696,30 +693,6 @@ with col_left:
 
 with col_right:
     st.markdown("### 📈 Results")
-    knob_cols = st.columns(5)
-    with knob_cols[0]:
-        show_pareto = st.toggle("📉 Pareto", value=st.session_state.get('show_pareto', True),
-                                key="knob_pareto")
-        st.session_state.show_pareto = show_pareto
-    with knob_cols[1]:
-        show_sensitivity = st.toggle("🔬 Sensitivity", value=st.session_state.get('show_sensitivity', False),
-                                     key="knob_sensitivity")
-        st.session_state.show_sensitivity = show_sensitivity
-    with knob_cols[2]:
-        show_comparison = st.toggle("📊 Comparison", value=st.session_state.get('show_comparison', True),
-                                    key="knob_comparison")
-        st.session_state.show_comparison = show_comparison
-    with knob_cols[3]:
-        particle_fixed = st.toggle("🧪 Particle Size", value=(st.session_state.get('granule_mode', 'Fixed') == 'Fixed'),
-                                   key="knob_particle")
-        if particle_fixed and st.session_state.granule_mode != 'Fixed':
-            st.session_state.granule_mode = 'Fixed'
-            st.rerun()
-        elif not particle_fixed and st.session_state.granule_mode != 'Variable':
-            st.session_state.granule_mode = 'Variable'
-            st.rerun()
-    with knob_cols[4]:
-        generate_report = st.button("📄 Report", key="knob_report")
 
     if predict_btn:
         if abs(total-100) > 0.1:
@@ -737,6 +710,7 @@ with col_right:
             else:
                 density, tensile, er, efrf = 0.7, 2.0, 0.5, 0.25
 
+            # ---- 1. Constraints Status ----
             st.markdown("#### Constraints Status")
             col_metrics = st.columns(4)
             col_metrics[0].metric("Density", f"{density:.3f}", "✅" if D_MIN <= density <= D_MAX else "❌")
@@ -749,7 +723,7 @@ with col_right:
             else:
                 st.error("❌ Violates constraints")
 
-            # NSGA-II
+            # ---- 2. Run NSGA-II ----
             bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],
                                [80,PRESSURE_MAX],[1,50],[30,250]])
             with st.spinner(f"Running NSGA‑II (pop={NSGA_POP}, gen={NSGA_GENS})..."):
@@ -759,7 +733,23 @@ with col_right:
                               granule_fixed_val=granule if granule_fixed else 125.0)
                 pop, objectives, fronts = nsga.run()
 
-            # Pareto
+            # ---- 3. Pareto Front and Golden Solution (shown if show_pareto is True) ----
+            # We'll still compute best_idx even if show_pareto is False, for use later.
+            best_idx = None
+            best_ef = 1e9
+            if len(fronts) > 0 and len(fronts[0]) > 0:
+                for idx in fronts[0]:
+                    if objectives[idx, 1] < best_ef:
+                        ind = pop[idx]
+                        d2, t2, e2, ef2 = predict_pinn(model, scaler, y_scaler, ind)
+                        if D_MIN <= d2 <= D_MAX and t2 >= TENSILE_MIN and ef2 < EFRF_MAX:
+                            best_ef = objectives[idx, 1]
+                            best_idx = idx
+                if best_idx is not None:
+                    golden = pop[best_idx]
+                    d2, t2, e2, ef2 = predict_pinn(model, scaler, y_scaler, golden)
+
+            # Now display the Pareto section (only if show_pareto is True)
             if show_pareto:
                 st.markdown("### 📉 Pareto Front")
                 if len(fronts) > 0 and len(fronts[0]) > 0:
@@ -767,18 +757,7 @@ with col_right:
                     fig = plot_pareto(objectives, fronts)
                     if fig:
                         st.plotly_chart(fig, use_container_width=True)
-                    best_idx = None
-                    best_ef = 1e9
-                    for idx in fronts[0]:
-                        if objectives[idx, 1] < best_ef:
-                            ind = pop[idx]
-                            d2, t2, e2, ef2 = predict_pinn(model, scaler, y_scaler, ind)
-                            if D_MIN <= d2 <= D_MAX and t2 >= TENSILE_MIN and ef2 < EFRF_MAX:
-                                best_ef = objectives[idx, 1]
-                                best_idx = idx
                     if best_idx is not None:
-                        golden = pop[best_idx]
-                        d2, t2, e2, ef2 = predict_pinn(model, scaler, y_scaler, golden)
                         st.markdown("#### ⭐ Golden Solution (Suggested)")
                         colA, colB = st.columns(2)
                         with colA:
@@ -802,7 +781,37 @@ with col_right:
                 else:
                     st.warning("No Pareto front found.")
 
-            # Sensitivity
+            # ---- 4. Knobs Row (appears after NSGA-II results) ----
+            st.markdown("---")
+            st.markdown("**🔘 Toggle additional sections:**")
+            knob_cols = st.columns(5)
+            with knob_cols[0]:
+                # Pareto knob already used above; we'll keep it here for consistency, but it's already applied.
+                # We'll just display a disabled indicator or reuse the existing toggle.
+                # We'll simply show the current state.
+                st.write(f"📉 Pareto: {'ON' if show_pareto else 'OFF'}")
+            with knob_cols[1]:
+                show_sensitivity = st.toggle("🔬 Sensitivity", value=st.session_state.get('show_sensitivity', False),
+                                             key="knob_sensitivity")
+                st.session_state.show_sensitivity = show_sensitivity
+            with knob_cols[2]:
+                show_comparison = st.toggle("📊 Comparison", value=st.session_state.get('show_comparison', True),
+                                            key="knob_comparison")
+                st.session_state.show_comparison = show_comparison
+            with knob_cols[3]:
+                # Particle size knob – synced with radio
+                particle_fixed = st.toggle("🧪 Particle Size", value=(st.session_state.get('granule_mode', 'Fixed') == 'Fixed'),
+                                           key="knob_particle")
+                if particle_fixed and st.session_state.granule_mode != 'Fixed':
+                    st.session_state.granule_mode = 'Fixed'
+                    st.rerun()
+                elif not particle_fixed and st.session_state.granule_mode != 'Variable':
+                    st.session_state.granule_mode = 'Variable'
+                    st.rerun()
+            with knob_cols[4]:
+                generate_report = st.button("📄 Report", key="knob_report")
+
+            # ---- 5. Sensitivity (if knob ON) ----
             if show_sensitivity:
                 st.markdown("### 🔬 Sensitivity Analysis")
                 api_range = np.linspace(85, 95, 10)
@@ -825,7 +834,7 @@ with col_right:
                 fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='red')
                 st.plotly_chart(fig, use_container_width=True)
 
-            # Comparison
+            # ---- 6. Comparison (if knob ON) ----
             if show_comparison:
                 st.markdown("### 📊 Comparison (Tensile R²)")
                 X_train, X_test, y_train, y_test = train_test_split(
@@ -851,15 +860,13 @@ with col_right:
                     'MAE': pinn_mae
                 }])
                 bench_df = pd.concat([pinn_row, bench_df], ignore_index=True)
-
-                # Display table without gradient (avoids matplotlib dependency)
                 st.dataframe(bench_df, use_container_width=True)
 
-            # Report
+            # ---- 7. Report (button triggered) ----
             if generate_report:
                 timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 try:
-                    if 'best_idx' in locals() and best_idx is not None:
+                    if best_idx is not None:
                         golden_str = ', '.join([f'{k}: {v:.2f}' for k,v in zip(['API','MCC','PVPP','MgSt','Binder','Pressure','Speed','Granule'], golden)])
                     else:
                         golden_str = 'None'
