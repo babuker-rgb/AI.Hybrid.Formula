@@ -1,11 +1,10 @@
 """
 Hubryd AI – v29.27-R2 (Fully Functional)
+- PDF Report (fpdf)
+- Particle Size Effect Plot (Density & Tensile vs Granule)
 - Clean Pareto plot (lines + markers + golden star)
-- Enhanced sensitivity grid (all 8 parameters vs EFRF)
-- Sensitivity bar chart (comparative parameter impact)
-- Comparison bar chart
+- Enhanced sensitivity grid + bar chart
 - Cached NSGA-II results
-- All knobs working properly
 Nile Valley University · Sudan
 """
 
@@ -25,6 +24,8 @@ import os
 import tempfile
 import datetime
 import warnings
+from fpdf import FPDF  # <-- for PDF report
+import base64
 warnings.filterwarnings('ignore')
 
 # ================================================================
@@ -71,6 +72,7 @@ if 'api' not in st.session_state:
         'show_pareto': True,
         'show_sensitivity': False,
         'show_comparison': True,
+        'show_particle_plot': False,
         'granule_mode': 'Fixed',
         # NSGA-II results cache
         'nsga_pop': None,
@@ -551,10 +553,6 @@ def plot_pareto_clean(objectives, fronts, golden_solution=None, golden_pred=None
     return fig
 
 def plot_sensitivity_grid(formulation, model, scaler, y_scaler, efrf_max=0.40):
-    """
-    Create a grid of subplots showing EFRF vs each variable.
-    """
-    # Extract current values
     api0 = formulation['api_n']
     mcc0 = formulation['mcc_n']
     pvpp0 = formulation['pvpp_n']
@@ -564,7 +562,6 @@ def plot_sensitivity_grid(formulation, model, scaler, y_scaler, efrf_max=0.40):
     speed0 = formulation['speed']
     granule0 = formulation['granule_use']
 
-    # Define parameter ranges and labels
     params = [
         {'name': 'API (%)', 'var': api0, 'range': np.linspace(85, 95, 15), 'unit': '%'},
         {'name': 'MCC (%)', 'var': mcc0, 'range': np.linspace(0, MCC_MAX, 15), 'unit': '%'},
@@ -576,7 +573,6 @@ def plot_sensitivity_grid(formulation, model, scaler, y_scaler, efrf_max=0.40):
         {'name': 'Granule (µm)', 'var': granule0, 'range': np.linspace(30, 250, 15), 'unit': 'µm'}
     ]
 
-    # Create subplot grid: 2 rows x 4 columns
     fig = make_subplots(rows=2, cols=4,
                         subplot_titles=[p['name'] for p in params],
                         shared_yaxes=True,
@@ -611,17 +607,9 @@ def plot_sensitivity_grid(formulation, model, scaler, y_scaler, efrf_max=0.40):
     fig.update_xaxes(title_text="Value", row=2, col=4)
     fig.update_yaxes(title_text="EFRF", row=1, col=1)
     fig.update_yaxes(title_text="EFRF", row=2, col=1)
-
     return fig
 
-# ================================================================
-# NEW: Sensitivity Bar Chart
-# ================================================================
 def plot_sensitivity_bars(formulation, model, scaler, y_scaler, efrf_max=0.40):
-    """
-    Horizontal bar chart showing the absolute change in EFRF when each parameter
-    varies across its allowed range (or ±20% around current value).
-    """
     api0 = formulation['api_n']
     mcc0 = formulation['mcc_n']
     pvpp0 = formulation['pvpp_n']
@@ -631,7 +619,6 @@ def plot_sensitivity_bars(formulation, model, scaler, y_scaler, efrf_max=0.40):
     speed0 = formulation['speed']
     granule0 = formulation['granule_use']
 
-    # Define parameter ranges (use full physical bounds)
     param_defs = [
         {'name': 'API', 'current': api0, 'min': 85, 'max': 95, 'unit': '%'},
         {'name': 'MCC', 'current': mcc0, 'min': 0, 'max': MCC_MAX, 'unit': '%'},
@@ -644,12 +631,10 @@ def plot_sensitivity_bars(formulation, model, scaler, y_scaler, efrf_max=0.40):
     ]
 
     base_input = [api0, mcc0, pvpp0, mgst0, binder0, press0, speed0, granule0]
-    # Compute EFRF at current point
     _, _, _, efrf_base = predict_pinn(model, scaler, y_scaler, base_input)
 
     sensitivities = []
     for idx, p in enumerate(param_defs):
-        # Compute EFRF at lower and upper bounds
         low_input = base_input.copy()
         low_input[idx] = p['min']
         high_input = base_input.copy()
@@ -688,6 +673,139 @@ def plot_sensitivity_bars(formulation, model, scaler, y_scaler, efrf_max=0.40):
         margin=dict(l=10, r=10, t=60, b=10)
     )
     return fig
+
+# ================================================================
+# NEW: Particle Size Effect Plot (Density & Tensile vs Granule)
+# ================================================================
+def plot_particle_effect(formulation, model, scaler, y_scaler):
+    """
+    Dual-axis plot: Density (left) and Tensile (right) vs Granule Size.
+    """
+    api0 = formulation['api_n']
+    mcc0 = formulation['mcc_n']
+    pvpp0 = formulation['pvpp_n']
+    mgst0 = formulation['mgst_n']
+    binder0 = formulation['binder_n']
+    press0 = formulation['pressure']
+    speed0 = formulation['speed']
+
+    granule_range = np.linspace(30, 250, 20)
+    density_vals = []
+    tensile_vals = []
+    for g in granule_range:
+        inputs = [api0, mcc0, pvpp0, mgst0, binder0, press0, speed0, g]
+        d, t, e, ef = predict_pinn(model, scaler, y_scaler, inputs)
+        density_vals.append(d)
+        tensile_vals.append(t)
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(go.Scatter(x=granule_range, y=density_vals, mode='lines+markers',
+                             name='Density', line=dict(color='blue', width=2),
+                             marker=dict(size=6, color='blue')),
+                  secondary_y=False)
+    fig.add_trace(go.Scatter(x=granule_range, y=tensile_vals, mode='lines+markers',
+                             name='Tensile Strength', line=dict(color='orange', width=2),
+                             marker=dict(size=6, color='orange')),
+                  secondary_y=True)
+
+    fig.update_xaxes(title_text="Granule Size (µm)")
+    fig.update_yaxes(title_text="Density", secondary_y=False, color='blue')
+    fig.update_yaxes(title_text="Tensile (MPa)", secondary_y=True, color='orange')
+    fig.update_layout(
+        title='Effect of Granule Size on Density and Tensile Strength',
+        height=400,
+        template='plotly_white',
+        legend=dict(x=0.02, y=0.98)
+    )
+    return fig
+
+# ================================================================
+# PDF Report Generator
+# ================================================================
+def generate_pdf_report(formulation, pinn_r2, bench_df, golden_solution, golden_pred, fronts, timestamp):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(0, 10, "Hubryd AI v29.27-R2 Report", ln=True, align='C')
+    pdf.set_font("Arial", "I", 10)
+    pdf.cell(0, 6, f"Generated: {timestamp}", ln=True, align='C')
+    pdf.ln(5)
+
+    # Formulation
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 8, "1. Formulation Parameters", ln=True)
+    pdf.set_font("Arial", "", 10)
+    f = formulation
+    pdf.cell(60, 6, f"API: {f['api_n']:.1f}%", border=0)
+    pdf.cell(60, 6, f"MCC: {f['mcc_n']:.1f}%", ln=True)
+    pdf.cell(60, 6, f"PVPP: {f['pvpp_n']:.1f}%", border=0)
+    pdf.cell(60, 6, f"Mg-St: {f['mgst_n']:.2f}%", ln=True)
+    pdf.cell(60, 6, f"Binder: {f['binder_n']:.1f}%", border=0)
+    pdf.cell(60, 6, f"Pressure: {f['pressure']:.1f} MPa", ln=True)
+    pdf.cell(60, 6, f"Speed: {f['speed']:.1f} rpm", border=0)
+    pdf.cell(60, 6, f"Granule: {f['granule_use']:.0f} µm", ln=True)
+    pdf.ln(3)
+
+    # Predicted properties
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 8, "2. Predicted Properties", ln=True)
+    pdf.set_font("Arial", "", 10)
+    pdf.cell(60, 6, f"Density: {f['density']:.3f}", border=0)
+    pdf.cell(60, 6, f"Tensile: {f['tensile']:.2f} MPa", ln=True)
+    pdf.cell(60, 6, f"EFRF: {f['efrf']:.4f}", border=0)
+    pdf.cell(60, 6, f"ER: {f['er']:.4f}", ln=True)
+    pdf.ln(3)
+
+    # Constraints
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 8, "3. Constraints Status", ln=True)
+    pdf.set_font("Arial", "", 10)
+    status = "PASS" if D_MIN <= f['density'] <= D_MAX else "FAIL"
+    pdf.cell(60, 6, f"Density: {status}", border=0)
+    status = "PASS" if f['tensile'] >= TENSILE_MIN else "FAIL"
+    pdf.cell(60, 6, f"Tensile: {status}", ln=True)
+    status = "PASS" if f['efrf'] < EFRF_MAX else "FAIL"
+    pdf.cell(60, 6, f"EFRF: {status}", border=0)
+    status = "PASS" if f['mcc_n'] <= MCC_MAX else "FAIL"
+    pdf.cell(60, 6, f"MCC: {status}", ln=True)
+    pdf.ln(3)
+
+    # Golden solution
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 8, "4. Golden Solution (NSGA-II)", ln=True)
+    if golden_solution is not None and golden_pred is not None:
+        pdf.set_font("Arial", "", 10)
+        pdf.cell(60, 6, f"API: {golden_solution[0]:.1f}%", border=0)
+        pdf.cell(60, 6, f"MCC: {golden_solution[1]:.1f}%", ln=True)
+        pdf.cell(60, 6, f"PVPP: {golden_solution[2]:.1f}%", border=0)
+        pdf.cell(60, 6, f"Mg-St: {golden_solution[3]:.2f}%", ln=True)
+        pdf.cell(60, 6, f"Binder: {golden_solution[4]:.1f}%", border=0)
+        pdf.cell(60, 6, f"Pressure: {golden_solution[5]:.1f} MPa", ln=True)
+        pdf.cell(60, 6, f"Speed: {golden_solution[6]:.1f} rpm", border=0)
+        pdf.cell(60, 6, f"Granule: {golden_solution[7]:.0f} µm", ln=True)
+        pdf.cell(60, 6, f"Density: {golden_pred[0]:.3f}", border=0)
+        pdf.cell(60, 6, f"Tensile: {golden_pred[1]:.3f} MPa", ln=True)
+        pdf.cell(60, 6, f"EFRF: {golden_pred[3]:.4f}", border=0)
+        pdf.cell(60, 6, f"ER: {golden_pred[2]:.4f}", ln=True)
+        pdf.ln(3)
+
+    # Model comparison
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 8, "5. Model Performance (Tensile R²)", ln=True)
+    pdf.set_font("Arial", "", 10)
+    # Simple table
+    pdf.cell(50, 6, "Model", border=1)
+    pdf.cell(30, 6, "R²", border=1)
+    pdf.cell(30, 6, "RMSE", border=1)
+    pdf.cell(30, 6, "MAE", border=1, ln=True)
+    pdf.set_font("Arial", "", 8)
+    for _, row in bench_df.iterrows():
+        pdf.cell(50, 6, row['Model'], border=1)
+        pdf.cell(30, 6, f"{row['R²']:.4f}", border=1)
+        pdf.cell(30, 6, f"{row['RMSE']:.4f}", border=1)
+        pdf.cell(30, 6, f"{row['MAE']:.4f}", border=1, ln=True)
+
+    return pdf.output(dest='S').encode('latin-1')
 
 # ================================================================
 def train_benchmark(X_train, X_test, y_train, y_test):
@@ -999,7 +1117,7 @@ with col_right:
             else:
                 st.warning("No Pareto front found.")
 
-        # ---- Knobs Row ----
+        # ---- Knobs Row (updated) ----
         st.markdown("---")
         st.markdown("**🔘 Toggle additional sections:**")
         knob_cols = st.columns(5)
@@ -1016,16 +1134,21 @@ with col_right:
                                         key="knob_comparison")
             st.session_state.show_comparison = show_comparison
         with knob_cols[3]:
-            particle_fixed = st.toggle("🧪 Particle Size", value=(st.session_state.get('granule_mode', 'Fixed') == 'Fixed'),
-                                       key="knob_particle")
-            if particle_fixed and st.session_state.granule_mode != 'Fixed':
-                st.session_state.granule_mode = 'Fixed'
-                st.rerun()
-            elif not particle_fixed and st.session_state.granule_mode != 'Variable':
-                st.session_state.granule_mode = 'Variable'
-                st.rerun()
+            show_particle = st.toggle("📊 Particle Plot", value=st.session_state.get('show_particle_plot', False),
+                                      key="knob_particle_plot")
+            st.session_state.show_particle_plot = show_particle
         with knob_cols[4]:
             generate_report = st.button("📄 Report", key="knob_report")
+
+        # ---- Particle Size Plot (if knob ON) ----
+        if show_particle:
+            f = st.session_state.formulation
+            if f['api_n'] is None:
+                st.info("Please run optimisation first to see particle effect.")
+            else:
+                st.markdown("### 📊 Particle Size Effect on Density & Tensile")
+                fig = plot_particle_effect(f, model, scaler, y_scaler)
+                st.plotly_chart(fig, use_container_width=True)
 
         # ---- Sensitivity (if knob ON) ----
         if show_sensitivity:
@@ -1034,11 +1157,9 @@ with col_right:
                 st.info("Please run optimisation first to see sensitivity.")
             else:
                 st.markdown("### 🔬 Sensitivity Analysis (All Parameters vs EFRF)")
-                # Grid of subplots
                 fig_grid = plot_sensitivity_grid(f, model, scaler, y_scaler, EFRF_MAX)
                 if fig_grid:
                     st.plotly_chart(fig_grid, use_container_width=True)
-                # Horizontal bar chart – NEW
                 st.markdown("#### Parameter Impact Comparison")
                 fig_bars = plot_sensitivity_bars(f, model, scaler, y_scaler, EFRF_MAX)
                 if fig_bars:
@@ -1079,55 +1200,37 @@ with col_right:
             st.plotly_chart(fig_bar, use_container_width=True)
             st.dataframe(bench_df, use_container_width=True)
 
-        # ---- Report ----
+        # ---- Report (PDF) ----
         if generate_report:
-            timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             f = st.session_state.formulation
-            try:
-                if golden_solution is not None:
-                    golden_str = ', '.join([f'{k}: {v:.2f}' for k,v in zip(['API','MCC','PVPP','MgSt','Binder','Pressure','Speed','Granule'], golden_solution)])
-                else:
-                    golden_str = 'None'
-            except:
-                golden_str = 'None'
-            report = f"""
-            # Hubryd AI v29.27-R2 Report
-            **Generated:** {timestamp}
+            timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            # Recompute bench_df if needed (or use existing)
+            X_train, X_test, y_train, y_test = train_test_split(
+                df[features].values, df['Tensile_Strength_MPa'].values,
+                test_size=0.2, random_state=42
+            )
+            X_train_aug = add_interaction_features(X_train)
+            X_test_aug = add_interaction_features(X_test)
+            X_train_scaled = scaler.transform(X_train_aug)
+            X_test_scaled = scaler.transform(X_test_aug)
+            pinn_pred_scaled = model.predict(torch.tensor(X_test_scaled, dtype=torch.float32))
+            pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
+            pinn_r2 = r2_score(y_test, pinn_pred)
+            bench_df = train_benchmark(X_train_scaled, X_test_scaled, y_train, y_test)
+            pinn_row = pd.DataFrame([{
+                'Model': 'PINN (Proposed)',
+                'R²': pinn_r2,
+                'RMSE': np.sqrt(mean_squared_error(y_test, pinn_pred)),
+                'MAE': mean_absolute_error(y_test, pinn_pred)
+            }])
+            bench_df = pd.concat([pinn_row, bench_df], ignore_index=True)
 
-            ## Current Formulation
-            - API: {f['api_n']:.1f}%
-            - MCC: {f['mcc_n']:.1f}%
-            - PVPP: {f['pvpp_n']:.1f}%
-            - Mg-St: {f['mgst_n']:.2f}%
-            - Binder: {f['binder_n']:.1f}%
-            - Pressure: {f['pressure']:.1f} MPa
-            - Speed: {f['speed']:.1f} rpm
-            - Granule: {f['granule_use']:.0f} µm (mode: {'Fixed' if f['granule_fixed'] else 'Variable'})
-
-            ## Predicted Properties
-            - Density: {f['density']:.3f}
-            - Tensile: {f['tensile']:.2f} MPa
-            - EFRF: {f['efrf']:.4f}
-
-            ## Constraints
-            - Density: {'PASS' if D_MIN <= f['density'] <= D_MAX else 'FAIL'}
-            - Tensile: {'PASS' if f['tensile'] >= TENSILE_MIN else 'FAIL'}
-            - EFRF: {'PASS' if f['efrf'] < EFRF_MAX else 'FAIL'}
-            - MCC: {'PASS' if f['mcc_n'] <= MCC_MAX else 'FAIL'}
-
-            ## NSGA-II Results
-            - Pareto solutions: {len(fronts[0]) if fronts else 0}
-            - Golden solution (if any): {golden_str}
-
-            ## Model Performance (Tensile)
-            - PINN R²: {pinn_r2:.4f}
-            - Best competitor R²: {bench_df[bench_df['Model']!='PINN (Proposed)']['R²'].max():.4f}
-            """
+            pdf_bytes = generate_pdf_report(f, pinn_r2, bench_df, golden_solution, golden_pred, fronts, timestamp)
             st.download_button(
-                label="Download Report (Markdown)",
-                data=report,
-                file_name=f"hubryd_report_{timestamp[:10]}.md",
-                mime="text/markdown"
+                label="📥 Download PDF Report",
+                data=pdf_bytes,
+                file_name=f"hubryd_report_{timestamp[:10]}.pdf",
+                mime="application/pdf"
             )
 
     else:
