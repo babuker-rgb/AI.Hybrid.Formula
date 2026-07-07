@@ -1,8 +1,9 @@
 """
 Hubryd AI – v29.27-R2 (Enhanced)
-- Optimised for R² > 0.8
+- R² > 0.8
+- Pareto curve + golden star
 - NSGA-II results cached in session_state
-- Pareto front as a curve + golden star
+- All formulation values stored for sensitivity / comparison
 Nile Valley University · Sudan
 """
 
@@ -38,15 +39,15 @@ BINDER_MAX = 5.0
 # ================================================================
 # Training Parameters – ENHANCED for R² > 0.8
 # ================================================================
-N_SAMPLES = 10000          # More data
-ADAM_EPOCHS = 400          # Longer training
+N_SAMPLES = 10000
+ADAM_EPOCHS = 400
 PATIENCE = 30
 NSGA_POP = 40
 NSGA_GENS = 30
 HIDDEN_SIZE = 384
 
 W_DENSITY = 1.0
-W_TENSILE = 120.0          # Heavy weight on tensile
+W_TENSILE = 120.0
 W_ER = 20.0
 W_PHYSICS = 5.0
 W_EFRF_PENALTY = 200.0
@@ -75,7 +76,15 @@ if 'api' not in st.session_state:
         'golden_idx': None,
         'golden_solution': None,
         'golden_pred': None,
-        'run_optimized': False
+        'run_optimized': False,
+        # Formulation cache (for sensitivity / comparison)
+        'formulation': {
+            'api_n': None, 'binder_n': None, 'pvpp_n': None,
+            'mgst_n': None, 'mcc_n': None,
+            'pressure': None, 'speed': None, 'granule_use': None,
+            'granule_fixed': None,
+            'density': None, 'tensile': None, 'er': None, 'efrf': None
+        }
     })
 
 # ================================================================
@@ -525,7 +534,7 @@ def plot_pareto_with_golden(objectives, fronts, golden_idx=None, golden_solution
     if golden_idx is not None and golden_solution is not None and golden_pred is not None:
         fig.add_trace(go.Scatter(
             x=[golden_solution[0]],  # API
-            y=[golden_pred[2] / golden_pred[1]],  # EFRF
+            y=[golden_pred[2] / golden_pred[1]],  # EFRF (ER / Tensile)
             mode='markers',
             name='⭐ Golden Solution',
             marker=dict(size=14, color='gold', symbol='star', line=dict(width=2, color='black')),
@@ -646,7 +655,7 @@ def load_or_train():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# Streamlit UI – with session cache for NSGA-II
+# Streamlit UI – with session cache for NSGA-II and formulation
 # ================================================================
 st.set_page_config(page_title="Hubryd AI v29.27-R2", layout="wide")
 
@@ -748,6 +757,15 @@ with col_right:
                 density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs)
             else:
                 density, tensile, er, efrf = 0.7, 2.0, 0.5, 0.25
+
+            # ---- Store formulation in session_state for later use ----
+            st.session_state.formulation = {
+                'api_n': api_n, 'binder_n': binder_n, 'pvpp_n': pvpp_n,
+                'mgst_n': mgst_n, 'mcc_n': mcc_n,
+                'pressure': pressure, 'speed': speed, 'granule_use': granule_use,
+                'granule_fixed': granule_fixed,
+                'density': density, 'tensile': tensile, 'er': er, 'efrf': efrf
+            }
 
             # ---- 1. Constraints Status ----
             st.markdown("#### Constraints Status")
@@ -872,27 +890,32 @@ with col_right:
 
         # ---- Sensitivity (if knob ON) ----
         if show_sensitivity:
-            st.markdown("### 🔬 Sensitivity Analysis")
-            # Use current inputs from sliders (still available)
-            api_range = np.linspace(85, 95, 10)
-            pressure_range = np.linspace(80, PRESSURE_MAX, 10)
-            efrf_grid = np.zeros((len(api_range), len(pressure_range)))
-            for i, api_val in enumerate(api_range):
-                for j, press_val in enumerate(pressure_range):
-                    inp = [api_val, mcc_n, pvpp_n, mgst_n, binder_n, press_val, speed, granule_use]
-                    d, t, e, ef = predict_pinn(model, scaler, y_scaler, inp)
-                    efrf_grid[i, j] = ef
-            fig = go.Figure(data=go.Contour(
-                z=efrf_grid,
-                x=pressure_range,
-                y=api_range,
-                colorscale='RdYlGn_r',
-                contours=dict(coloring='heatmap'),
-                hovertemplate='Pressure: %{x:.0f} MPa<br>API: %{y:.1f}%<br>EFRF: %{z:.4f}<extra></extra>'
-            ))
-            fig.update_layout(title='EFRF Sensitivity', xaxis_title='Pressure', yaxis_title='API', height=400)
-            fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='red')
-            st.plotly_chart(fig, use_container_width=True)
+            # Retrieve formulation from session state
+            f = st.session_state.formulation
+            if f['api_n'] is None:
+                st.info("Please run optimisation first to see sensitivity.")
+            else:
+                st.markdown("### 🔬 Sensitivity Analysis")
+                api_range = np.linspace(85, 95, 10)
+                pressure_range = np.linspace(80, PRESSURE_MAX, 10)
+                efrf_grid = np.zeros((len(api_range), len(pressure_range)))
+                for i, api_val in enumerate(api_range):
+                    for j, press_val in enumerate(pressure_range):
+                        inp = [api_val, f['mcc_n'], f['pvpp_n'], f['mgst_n'], f['binder_n'],
+                               press_val, f['speed'], f['granule_use']]
+                        d, t, e, ef = predict_pinn(model, scaler, y_scaler, inp)
+                        efrf_grid[i, j] = ef
+                fig = go.Figure(data=go.Contour(
+                    z=efrf_grid,
+                    x=pressure_range,
+                    y=api_range,
+                    colorscale='RdYlGn_r',
+                    contours=dict(coloring='heatmap'),
+                    hovertemplate='Pressure: %{x:.0f} MPa<br>API: %{y:.1f}%<br>EFRF: %{z:.4f}<extra></extra>'
+                ))
+                fig.update_layout(title='EFRF Sensitivity', xaxis_title='Pressure', yaxis_title='API', height=400)
+                fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='red')
+                st.plotly_chart(fig, use_container_width=True)
 
         # ---- Comparison (if knob ON) ----
         if show_comparison:
@@ -925,6 +948,7 @@ with col_right:
         # ---- Report (button triggered) ----
         if generate_report:
             timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            f = st.session_state.formulation
             try:
                 if golden_solution is not None:
                     golden_str = ', '.join([f'{k}: {v:.2f}' for k,v in zip(['API','MCC','PVPP','MgSt','Binder','Pressure','Speed','Granule'], golden_solution)])
@@ -937,25 +961,25 @@ with col_right:
             **Generated:** {timestamp}
 
             ## Current Formulation
-            - API: {api_n:.1f}%
-            - MCC: {mcc_n:.1f}%
-            - PVPP: {pvpp_n:.1f}%
-            - Mg-St: {mgst_n:.2f}%
-            - Binder: {binder_n:.1f}%
-            - Pressure: {pressure:.1f} MPa
-            - Speed: {speed:.1f} rpm
-            - Granule: {granule_use:.0f} µm (mode: {'Fixed' if granule_fixed else 'Variable'})
+            - API: {f['api_n']:.1f}%
+            - MCC: {f['mcc_n']:.1f}%
+            - PVPP: {f['pvpp_n']:.1f}%
+            - Mg-St: {f['mgst_n']:.2f}%
+            - Binder: {f['binder_n']:.1f}%
+            - Pressure: {f['pressure']:.1f} MPa
+            - Speed: {f['speed']:.1f} rpm
+            - Granule: {f['granule_use']:.0f} µm (mode: {'Fixed' if f['granule_fixed'] else 'Variable'})
 
             ## Predicted Properties
-            - Density: {density:.3f}
-            - Tensile: {tensile:.2f} MPa
-            - EFRF: {efrf:.4f}
+            - Density: {f['density']:.3f}
+            - Tensile: {f['tensile']:.2f} MPa
+            - EFRF: {f['efrf']:.4f}
 
             ## Constraints
-            - Density: {'PASS' if D_MIN <= density <= D_MAX else 'FAIL'}
-            - Tensile: {'PASS' if tensile >= TENSILE_MIN else 'FAIL'}
-            - EFRF: {'PASS' if efrf < EFRF_MAX else 'FAIL'}
-            - MCC: {'PASS' if mcc_n <= MCC_MAX else 'FAIL'}
+            - Density: {'PASS' if D_MIN <= f['density'] <= D_MAX else 'FAIL'}
+            - Tensile: {'PASS' if f['tensile'] >= TENSILE_MIN else 'FAIL'}
+            - EFRF: {'PASS' if f['efrf'] < EFRF_MAX else 'FAIL'}
+            - MCC: {'PASS' if f['mcc_n'] <= MCC_MAX else 'FAIL'}
 
             ## NSGA-II Results
             - Pareto solutions: {len(fronts[0]) if fronts else 0}
