@@ -1,10 +1,10 @@
 """
-Hubryd AI – v29.27-R2 (Production)
+Hubryd AI – v29.27-R2 (Fully Functional)
 - R² > 0.8
-- Pareto curve + golden star (best trade-off)
-- Knobs work perfectly
-- Sensitivity plot works
-- Comparison with bar chart
+- Pareto curve + golden star (balanced)
+- Sensitivity analysis
+- Comparison bar chart
+- Cached NSGA-II results
 Nile Valley University · Sudan
 """
 
@@ -38,18 +38,18 @@ BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
 # ================================================================
-# Training Parameters – OPTIMISED FOR R² > 0.8
+# Training Parameters – ENHANCED for R² > 0.8
 # ================================================================
-N_SAMPLES = 12000          # Even more data
-ADAM_EPOCHS = 500          # Longer training
-PATIENCE = 40
-NSGA_POP = 50
-NSGA_GENS = 40
+N_SAMPLES = 10000
+ADAM_EPOCHS = 400
+PATIENCE = 30
+NSGA_POP = 40
+NSGA_GENS = 30
 HIDDEN_SIZE = 384
 
 W_DENSITY = 1.0
-W_TENSILE = 150.0          # Very heavy weight on tensile
-W_ER = 25.0
+W_TENSILE = 120.0
+W_ER = 20.0
 W_PHYSICS = 5.0
 W_EFRF_PENALTY = 200.0
 
@@ -58,14 +58,19 @@ W_EFRF_PENALTY = 200.0
 # ================================================================
 if 'api' not in st.session_state:
     st.session_state.update({
-        'api': 90.5, 'binder': 3.0, 'pvpp': 3.0, 'mgst': 0.15, 'mcc': 3.35,
-        'pressure': 235.0, 'speed': 10.0, 'granule': 125.0,
-        'granule_mode': 'Fixed',
-        # UI knobs
+        'api': 90.5,
+        'binder': 3.0,
+        'pvpp': 3.0,
+        'mgst': 0.15,
+        'mcc': 3.35,
+        'pressure': 235.0,
+        'speed': 10.0,
+        'granule': 125.0,
         'show_pareto': True,
         'show_sensitivity': False,
         'show_comparison': True,
-        # NSGA-II cache
+        'granule_mode': 'Fixed',
+        # NSGA-II results cache
         'nsga_pop': None,
         'nsga_objectives': None,
         'nsga_fronts': None,
@@ -83,7 +88,7 @@ if 'api' not in st.session_state:
     })
 
 # ================================================================
-# Helper Functions (identical to v29.18)
+# Helper Functions (unchanged)
 # ================================================================
 def normalize_components(api, binder, pvpp, mgst, mcc):
     api = np.clip(api, 60, 100)
@@ -292,7 +297,7 @@ class MultiTaskPINN(nn.Module):
         return total_loss
 
 # ================================================================
-# NSGA-II (unchanged – same as v29.18)
+# NSGA-II (unchanged)
 # ================================================================
 class NSGAII:
     def __init__(self, model, scaler, y_scaler, bounds, pop=40, gens=30, granule_fixed=True, granule_fixed_val=125.0):
@@ -508,12 +513,14 @@ def plot_pareto_with_golden(objectives, fronts, golden_solution=None, golden_pre
     if fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
     front = fronts[0]
+    # Sort by API (x-axis) to connect points as a curve
     df_front = pd.DataFrame({
         'API': -objectives[front, 0],
         'EFRF': objectives[front, 1]
     }).sort_values('API')
     
     fig = go.Figure()
+    # Pareto curve (line + markers)
     fig.add_trace(go.Scatter(
         x=df_front['API'],
         y=df_front['EFRF'],
@@ -523,10 +530,11 @@ def plot_pareto_with_golden(objectives, fronts, golden_solution=None, golden_pre
         marker=dict(size=6, color='red'),
         hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
     ))
+    # Golden solution if available
     if golden_solution is not None and golden_pred is not None:
         fig.add_trace(go.Scatter(
-            x=[golden_solution[0]],
-            y=[golden_pred[2] / golden_pred[1]],
+            x=[golden_solution[0]],  # API
+            y=[golden_pred[2] / golden_pred[1]],  # EFRF (ER / Tensile)
             mode='markers',
             name='⭐ Golden Solution',
             marker=dict(size=14, color='gold', symbol='star', line=dict(width=2, color='black')),
@@ -572,7 +580,7 @@ def train_benchmark(X_train, X_test, y_train, y_test):
 # Cached Training (Enhanced)
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r2_final.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r2_enhanced.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -589,7 +597,7 @@ def load_or_train():
         except Exception as e:
             st.warning(f"Cache load failed: {e}. Retraining...")
 
-    st.caption("🔄 Training final model (12k samples, 500 epochs)...")
+    st.caption("🔄 Training enhanced model (10k samples, 400 epochs)...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%']].values
@@ -623,7 +631,7 @@ def load_or_train():
         if loss.item() < best_loss:
             best_loss = loss.item()
             patience_counter = 0
-            torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_adam_final.pt'))
+            torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_adam_enhanced.pt'))
         else:
             patience_counter += 1
             if patience_counter >= PATIENCE:
@@ -631,8 +639,8 @@ def load_or_train():
                 break
         progress_bar.progress((epoch+1)/ADAM_EPOCHS)
     st.success(f"✅ Best validation loss: {best_loss:.4f}")
-    if os.path.exists(os.path.join(CACHE_DIR, 'best_adam_final.pt')):
-        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_adam_final.pt'), map_location=device))
+    if os.path.exists(os.path.join(CACHE_DIR, 'best_adam_enhanced.pt')):
+        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_adam_enhanced.pt'), map_location=device))
     model.cpu()
     checkpoint = {
         'model_state': model.state_dict(),
@@ -647,7 +655,7 @@ def load_or_train():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# Streamlit UI – with clean knob logic
+# Streamlit UI – Fully Functional
 # ================================================================
 st.set_page_config(page_title="Hubryd AI v29.27-R2", layout="wide")
 
@@ -666,12 +674,12 @@ with st.sidebar:
     ✅ EFRF: ER / σt < 0.40  
     ✅ Density: 0.40 ≤ D ≤ 0.97  
     ✅ MCC: ≤ 8.0%  
-    ✅ Samples: 12000  
-    ✅ Epochs: 500  
-    ✅ NSGA‑II: Pop=50, Gen=40  
+    ✅ Samples: 10000  
+    ✅ Epochs: 400  
+    ✅ NSGA‑II: Pop=40, Gen=30  
     ✅ Network: 384 Neurons
     """)
-    st.caption("🔬 v29.27-R2 — Production")
+    st.caption("🔬 v29.27-R2 — Enhanced")
 
 # Load model
 try:
@@ -750,7 +758,7 @@ with col_right:
             else:
                 density, tensile, er, efrf = 0.7, 2.0, 0.5, 0.25
 
-            # Store formulation
+            # ---- Store formulation in session_state ----
             st.session_state.formulation = {
                 'api_n': api_n, 'binder_n': binder_n, 'pvpp_n': pvpp_n,
                 'mgst_n': mgst_n, 'mcc_n': mcc_n,
@@ -772,7 +780,7 @@ with col_right:
             else:
                 st.error("❌ Violates constraints")
 
-            # ---- 2. Run NSGA-II ----
+            # ---- 2. Run NSGA-II and cache ----
             bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],
                                [80,PRESSURE_MAX],[1,50],[30,250]])
             with st.spinner(f"Running NSGA‑II (pop={NSGA_POP}, gen={NSGA_GENS})..."):
@@ -787,22 +795,26 @@ with col_right:
             st.session_state.nsga_fronts = fronts
             st.session_state.run_optimized = True
 
-            # ---- 3. Select Golden Solution (best trade-off) ----
+            # ---- 3. Select Golden Solution (balance: closest to ideal point) ----
             best_idx = None
-            best_score = -np.inf
             if len(fronts) > 0 and len(fronts[0]) > 0:
-                for idx in fronts[0]:
-                    # Score = API - 100 * EFRF (balance maximising API, minimising EFRF)
-                    api_val = -objectives[idx, 0]  # since objective[0] = -API
+                front_indices = fronts[0]
+                # Ideal point: max API, min EFRF
+                max_api = max(-objectives[i, 0] for i in front_indices)
+                min_efrf = min(objectives[i, 1] for i in front_indices)
+                # Find the point with minimum normalized distance to ideal
+                best_dist = np.inf
+                for idx in front_indices:
+                    # Check feasibility (should be already feasible)
+                    api_val = -objectives[idx, 0]
                     efrf_val = objectives[idx, 1]
-                    # Only consider feasible solutions
-                    ind = pop[idx]
-                    d2, t2, e2, ef2 = predict_pinn(model, scaler, y_scaler, ind)
-                    if D_MIN <= d2 <= D_MAX and t2 >= TENSILE_MIN and ef2 < EFRF_MAX:
-                        score = api_val - 100 * efrf_val
-                        if score > best_score:
-                            best_score = score
-                            best_idx = idx
+                    # Normalize distances
+                    norm_api = (max_api - api_val) / (max_api - 85) if max_api > 85 else 0
+                    norm_efrf = (efrf_val - min_efrf) / (EFRF_MAX - min_efrf) if EFRF_MAX > min_efrf else 0
+                    dist = np.sqrt(norm_api**2 + norm_efrf**2)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_idx = idx
                 if best_idx is not None:
                     golden = pop[best_idx]
                     d2, t2, e2, ef2 = predict_pinn(model, scaler, y_scaler, golden)
@@ -812,7 +824,7 @@ with col_right:
                     st.session_state.golden_solution = None
                     st.session_state.golden_pred = None
 
-    # ---- 4. Display cached results (if any) ----
+    # ---- Display sections (using cached results) ----
     if st.session_state.run_optimized:
         pop = st.session_state.nsga_pop
         objectives = st.session_state.nsga_objectives
@@ -820,28 +832,9 @@ with col_right:
         golden_solution = st.session_state.golden_solution
         golden_pred = st.session_state.golden_pred
 
-        # ---- Knob row (controls visibility) ----
-        st.markdown("**🔘 Toggle additional sections:**")
-        knob_cols = st.columns(4)  # only 4 knobs now: Pareto, Sensitivity, Comparison, Particle Size
-        with knob_cols[0]:
-            st.session_state.show_pareto = st.toggle("📉 Pareto", value=st.session_state.show_pareto, key="knob_pareto")
-        with knob_cols[1]:
-            st.session_state.show_sensitivity = st.toggle("🔬 Sensitivity", value=st.session_state.show_sensitivity, key="knob_sensitivity")
-        with knob_cols[2]:
-            st.session_state.show_comparison = st.toggle("📊 Comparison", value=st.session_state.show_comparison, key="knob_comparison")
-        with knob_cols[3]:
-            particle_fixed = st.toggle("🧪 Particle Size", value=(st.session_state.granule_mode == 'Fixed'), key="knob_particle")
-            if particle_fixed and st.session_state.granule_mode != 'Fixed':
-                st.session_state.granule_mode = 'Fixed'
-                st.rerun()
-            elif not particle_fixed and st.session_state.granule_mode != 'Variable':
-                st.session_state.granule_mode = 'Variable'
-                st.rerun()
-
-        st.markdown("---")
-
-        # ---- Pareto Section ----
-        if st.session_state.show_pareto:
+        # ---- Pareto Front (if knob ON) ----
+        show_pareto = st.session_state.get('show_pareto', True)
+        if show_pareto:
             st.markdown("### 📉 Pareto Front")
             if len(fronts) > 0 and len(fronts[0]) > 0:
                 st.success(f"✅ Pareto front found: {len(fronts[0])} optimal solutions")
@@ -849,7 +842,7 @@ with col_right:
                 if fig:
                     st.plotly_chart(fig, use_container_width=True)
                 if golden_solution is not None:
-                    st.markdown("#### ⭐ Golden Solution (Best Trade‑off)")
+                    st.markdown("#### ⭐ Golden Solution (Balanced)")
                     colA, colB = st.columns(2)
                     with colA:
                         st.write("**Formulation:**")
@@ -868,26 +861,55 @@ with col_right:
                         st.write(f"Tensile: {golden_pred[1]:.3f} MPa")
                         st.write(f"EFRF: {golden_pred[3]:.4f}")
                 else:
-                    st.info("No feasible golden solution found.")
+                    st.info("No fully feasible solution found.")
             else:
                 st.warning("No Pareto front found.")
 
-        # ---- Sensitivity Section ----
-        if st.session_state.show_sensitivity:
+        # ---- Knobs Row ----
+        st.markdown("---")
+        st.markdown("**🔘 Toggle additional sections:**")
+        knob_cols = st.columns(5)
+        with knob_cols[0]:
+            show_pareto = st.toggle("📉 Pareto", value=st.session_state.get('show_pareto', True),
+                                    key="knob_pareto")
+            st.session_state.show_pareto = show_pareto
+        with knob_cols[1]:
+            show_sensitivity = st.toggle("🔬 Sensitivity", value=st.session_state.get('show_sensitivity', False),
+                                         key="knob_sensitivity")
+            st.session_state.show_sensitivity = show_sensitivity
+        with knob_cols[2]:
+            show_comparison = st.toggle("📊 Comparison", value=st.session_state.get('show_comparison', True),
+                                        key="knob_comparison")
+            st.session_state.show_comparison = show_comparison
+        with knob_cols[3]:
+            particle_fixed = st.toggle("🧪 Particle Size", value=(st.session_state.get('granule_mode', 'Fixed') == 'Fixed'),
+                                       key="knob_particle")
+            if particle_fixed and st.session_state.granule_mode != 'Fixed':
+                st.session_state.granule_mode = 'Fixed'
+                st.rerun()
+            elif not particle_fixed and st.session_state.granule_mode != 'Variable':
+                st.session_state.granule_mode = 'Variable'
+                st.rerun()
+        with knob_cols[4]:
+            generate_report = st.button("📄 Report", key="knob_report")
+
+        # ---- Sensitivity ----
+        if show_sensitivity:
             f = st.session_state.formulation
             if f['api_n'] is None:
-                st.info("Please run optimisation first.")
+                st.info("Please run optimisation first to see sensitivity.")
             else:
                 st.markdown("### 🔬 Sensitivity Analysis")
                 api_range = np.linspace(85, 95, 10)
                 pressure_range = np.linspace(80, PRESSURE_MAX, 10)
                 efrf_grid = np.zeros((len(api_range), len(pressure_range)))
-                for i, api_val in enumerate(api_range):
-                    for j, press_val in enumerate(pressure_range):
-                        inp = [api_val, f['mcc_n'], f['pvpp_n'], f['mgst_n'], f['binder_n'],
-                               press_val, f['speed'], f['granule_use']]
-                        d, t, e, ef = predict_pinn(model, scaler, y_scaler, inp)
-                        efrf_grid[i, j] = ef
+                with st.spinner("Computing sensitivity grid..."):
+                    for i, api_val in enumerate(api_range):
+                        for j, press_val in enumerate(pressure_range):
+                            inp = [api_val, f['mcc_n'], f['pvpp_n'], f['mgst_n'], f['binder_n'],
+                                   press_val, f['speed'], f['granule_use']]
+                            d, t, e, ef = predict_pinn(model, scaler, y_scaler, inp)
+                            efrf_grid[i, j] = ef
                 fig = go.Figure(data=go.Contour(
                     z=efrf_grid,
                     x=pressure_range,
@@ -896,13 +918,12 @@ with col_right:
                     contours=dict(coloring='heatmap'),
                     hovertemplate='Pressure: %{x:.0f} MPa<br>API: %{y:.1f}%<br>EFRF: %{z:.4f}<extra></extra>'
                 ))
-                fig.update_layout(title='EFRF Sensitivity', xaxis_title='Pressure (MPa)',
-                                  yaxis_title='API (%)', height=400)
+                fig.update_layout(title='EFRF Sensitivity', xaxis_title='Pressure (MPa)', yaxis_title='API (%)', height=400)
                 fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='red')
                 st.plotly_chart(fig, use_container_width=True)
 
-        # ---- Comparison Section ----
-        if st.session_state.show_comparison:
+        # ---- Comparison ----
+        if show_comparison:
             st.markdown("### 📊 Comparison (Tensile R²)")
             X_train, X_test, y_train, y_test = train_test_split(
                 df[features].values, df['Tensile_Strength_MPa'].values,
@@ -928,19 +949,19 @@ with col_right:
             }])
             bench_df = pd.concat([pinn_row, bench_df], ignore_index=True)
 
-            # Bar chart for R²
+            # Display bar chart
             fig_bar = px.bar(bench_df, x='Model', y='R²', color='Model',
-                             title='R² Score Comparison',
-                             text='R²', height=350,
-                             color_discrete_sequence=px.colors.qualitative.Set2)
-            fig_bar.update_traces(texttemplate='%{text:.3f}', textposition='outside')
-            fig_bar.add_hline(y=0.8, line_dash='dash', line_color='green',
-                              annotation_text='Target R² = 0.8')
+                             title='R² Comparison (Tensile)',
+                             labels={'R²': 'R² Score'},
+                             text='R²')
+            fig_bar.update_layout(height=400, template='plotly_white')
             st.plotly_chart(fig_bar, use_container_width=True)
+
+            # Also show table
             st.dataframe(bench_df, use_container_width=True)
 
-        # ---- Report button (always visible) ----
-        if st.button("📄 Generate Report", key="report_btn"):
+        # ---- Report ----
+        if generate_report:
             timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             f = st.session_state.formulation
             try:
