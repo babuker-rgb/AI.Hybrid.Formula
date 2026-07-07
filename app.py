@@ -1,10 +1,11 @@
 """
 Hubryd AI – v29.27-R2 (Fully Functional)
-- PDF Report (fpdf)
+- PDF Report (fpdf2)
 - Particle Size Effect Plot (Density & Tensile vs Granule)
 - Clean Pareto plot (lines + markers + golden star)
 - Enhanced sensitivity grid + bar chart
 - Cached NSGA-II results
+- Fixed torch.load for PyTorch 2.6+
 Nile Valley University · Sudan
 """
 
@@ -24,7 +25,7 @@ import os
 import tempfile
 import datetime
 import warnings
-from fpdf import FPDF  # <-- for PDF report
+from fpdf import FPDF
 import base64
 warnings.filterwarnings('ignore')
 
@@ -92,7 +93,7 @@ if 'api' not in st.session_state:
     })
 
 # ================================================================
-# Helper Functions (unchanged)
+# Helper Functions
 # ================================================================
 def normalize_components(api, binder, pvpp, mgst, mcc):
     api = np.clip(api, 60, 100)
@@ -301,7 +302,7 @@ class MultiTaskPINN(nn.Module):
         return total_loss
 
 # ================================================================
-# NSGA-II (unchanged)
+# NSGA-II
 # ================================================================
 class NSGAII:
     def __init__(self, model, scaler, y_scaler, bounds, pop=40, gens=30, granule_fixed=True, granule_fixed_val=125.0):
@@ -674,13 +675,7 @@ def plot_sensitivity_bars(formulation, model, scaler, y_scaler, efrf_max=0.40):
     )
     return fig
 
-# ================================================================
-# NEW: Particle Size Effect Plot (Density & Tensile vs Granule)
-# ================================================================
 def plot_particle_effect(formulation, model, scaler, y_scaler):
-    """
-    Dual-axis plot: Density (left) and Tensile (right) vs Granule Size.
-    """
     api0 = formulation['api_n']
     mcc0 = formulation['mcc_n']
     pvpp0 = formulation['pvpp_n']
@@ -793,7 +788,6 @@ def generate_pdf_report(formulation, pinn_r2, bench_df, golden_solution, golden_
     pdf.set_font("Arial", "B", 12)
     pdf.cell(0, 8, "5. Model Performance (Tensile R²)", ln=True)
     pdf.set_font("Arial", "", 10)
-    # Simple table
     pdf.cell(50, 6, "Model", border=1)
     pdf.cell(30, 6, "R²", border=1)
     pdf.cell(30, 6, "RMSE", border=1)
@@ -833,7 +827,7 @@ def train_benchmark(X_train, X_test, y_train, y_test):
     return pd.DataFrame(results)
 
 # ================================================================
-# Cached Training (Enhanced)
+# Cached Training (with weights_only=False fix)
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
 CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r2_enhanced.pt')
@@ -842,7 +836,8 @@ CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r2_enhanced.pt')
 def load_or_train():
     if os.path.exists(CHECKPOINT_PATH):
         try:
-            ckpt = torch.load(CHECKPOINT_PATH, map_location='cpu')
+            # FIX: set weights_only=False to allow StandardScaler and other objects
+            ckpt = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=False)
             model = MultiTaskPINN(ckpt['input_dim'], hidden=HIDDEN_SIZE)
             model.load_state_dict(ckpt['model_state'])
             scaler = ckpt['scaler']
@@ -852,6 +847,8 @@ def load_or_train():
             return model, scaler, y_scaler, features, df
         except Exception as e:
             st.warning(f"Cache load failed: {e}. Retraining...")
+            if os.path.exists(CHECKPOINT_PATH):
+                os.remove(CHECKPOINT_PATH)
 
     st.caption("🔄 Training enhanced model (10k samples, 400 epochs)...")
     df, features = generate_pinn_data(N_SAMPLES)
@@ -1117,7 +1114,7 @@ with col_right:
             else:
                 st.warning("No Pareto front found.")
 
-        # ---- Knobs Row (updated) ----
+        # ---- Knobs Row ----
         st.markdown("---")
         st.markdown("**🔘 Toggle additional sections:**")
         knob_cols = st.columns(5)
