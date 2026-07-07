@@ -734,7 +734,7 @@ def plot_particle_pressure_density(formulation, model, scaler, y_scaler):
     return fig
 
 # ================================================================
-# PUBLICATION-GRADE BENCHMARKING (your function)
+# PUBLICATION-GRADE BENCHMARKING (CORRECTED)
 # ================================================================
 def run_publication_benchmarking(X_train_scaled, X_test_scaled, y_train, y_test, pinn_model, scaler_y):
     """
@@ -752,12 +752,13 @@ def run_publication_benchmarking(X_train_scaled, X_test_scaled, y_train, y_test,
     y_train_tensile = y_train[:, 1]
     y_test_tensile = y_test[:, 1]
 
-    # Generate PINN predictions and isolate Tensile Strength column
+    # Generate PINN predictions – slice only the first 3 outputs (D, σt, ER)
     pinn_model.eval()
     with torch.no_grad():
         X_test_tensor = torch.tensor(X_test_scaled, dtype=torch.float32)
-        pinn_pred_scaled = pinn_model(X_test_tensor).cpu().numpy()
-        pinn_pred = scaler_y.inverse_transform(pinn_pred_scaled)[:, 1]
+        # Model outputs 5: [D, σt, ER, k, A] – we only need first 3 for inverse transform
+        pinn_pred_scaled = pinn_model(X_test_tensor)[:, :3].cpu().numpy()
+        pinn_pred = scaler_y.inverse_transform(pinn_pred_scaled)[:, 1]  # tensile only
 
     # Calculate clean, aligned PINN metrics
     pinn_r2 = r2_score(y_test_tensile, pinn_pred)
@@ -1199,10 +1200,6 @@ with col_right:
 
             # ---- Run publication-grade benchmark ----
             with st.spinner("Running publication-grade benchmarking..."):
-                # We already have train/test splits; use the same split as in training.
-                # We'll grab the split from the training process; but we need X_train_scaled, X_test_scaled, y_train, y_test in real units.
-                # We can use the data generated in load_or_train, but that's not accessible here.
-                # Instead, we can generate a fresh split from the df we have.
                 X_raw_all = df[features].values
                 y_all = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%']].values
                 X_aug_all = add_interaction_features(X_raw_all)
