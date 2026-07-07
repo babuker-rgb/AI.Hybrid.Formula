@@ -1,6 +1,7 @@
 """
 Hubryd AI – v29.27-R2 (Fully Functional)
 - PDF Report (fpdf2) – fixed bytes output
+- Feasible region (light green) + tested solution (blue circle)
 - Particle Size Effect Plot (Density & Tensile vs Granule)
 - Clean Pareto plot (lines + markers + golden star)
 - Enhanced sensitivity grid + bar chart
@@ -89,7 +90,10 @@ if 'api' not in st.session_state:
             'pressure': None, 'speed': None, 'granule_use': None,
             'granule_fixed': None,
             'density': None, 'tensile': None, 'er': None, 'efrf': None
-        }
+        },
+        # Feasible region cache
+        'feasible_df': None,
+        'tested_point': None
     })
 
 # ================================================================
@@ -514,7 +518,31 @@ def predict_pinn(model, scaler, y_scaler, inputs):
         st.error(f"Prediction error: {e}")
         return 0.7, 2.0, 0.5, 0.25
 
-def plot_pareto_clean(objectives, fronts, golden_solution=None, golden_pred=None, efrf_max=0.40):
+def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
+    """
+    Generate random formulations, predict properties, and keep only feasible ones.
+    Returns DataFrame with columns: API, EFRF
+    """
+    np.random.seed(42)
+    points = []
+    for _ in range(n_samples):
+        api = np.random.uniform(85, 95)
+        binder = np.random.uniform(BINDER_MIN, BINDER_MAX)
+        pvpp = np.random.uniform(0.5, 6.0)
+        mgst = np.random.uniform(0.01, 1.2)
+        mcc = np.random.uniform(0, MCC_MAX)
+        pressure = np.random.uniform(80, PRESSURE_MAX)
+        speed = np.random.uniform(1, 50)
+        granule = np.random.uniform(30, 250)
+        api_n, binder_n, pvpp_n, mgst_n, mcc_n = normalize_components(api, binder, pvpp, mgst, mcc)
+        inputs = [api_n, mcc_n, pvpp_n, mgst_n, binder_n, pressure, speed, granule]
+        density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs)
+        if (D_MIN <= density <= D_MAX and tensile >= TENSILE_MIN and efrf < EFRF_MAX and mcc_n <= MCC_MAX):
+            points.append({'API': api_n, 'EFRF': efrf})
+    return pd.DataFrame(points)
+
+def plot_pareto_clean(objectives, fronts, golden_solution=None, golden_pred=None,
+                      feasible_df=None, tested_point=None, efrf_max=0.40):
     if fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
     front = fronts[0]
@@ -522,7 +550,22 @@ def plot_pareto_clean(objectives, fronts, golden_solution=None, golden_pred=None
         'API': -objectives[front, 0],
         'EFRF': objectives[front, 1]
     }).sort_values('API')
+    
     fig = go.Figure()
+    
+    # 1. Feasible region (light green)
+    if feasible_df is not None and not feasible_df.empty:
+        fig.add_trace(go.Scatter(
+            x=feasible_df['API'],
+            y=feasible_df['EFRF'],
+            mode='markers',
+            name='Feasible Region',
+            marker=dict(color='lightgreen', size=4, opacity=0.4),
+            hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>',
+            showlegend=True
+        ))
+    
+    # 2. Pareto front (lines+markers)
     fig.add_trace(go.Scatter(
         x=df_front['API'],
         y=df_front['EFRF'],
@@ -532,6 +575,8 @@ def plot_pareto_clean(objectives, fronts, golden_solution=None, golden_pred=None
         marker=dict(size=7, color='red'),
         hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
     ))
+    
+    # 3. Golden solution (star)
     if golden_solution is not None and golden_pred is not None:
         fig.add_trace(go.Scatter(
             x=[golden_solution[0]],
@@ -541,10 +586,22 @@ def plot_pareto_clean(objectives, fronts, golden_solution=None, golden_pred=None
             marker=dict(size=14, color='gold', symbol='star', line=dict(width=2, color='black')),
             hovertemplate='Golden: API %{x:.1f}%, EFRF %{y:.4f}<extra></extra>'
         ))
+    
+    # 4. Tested solution (blue circle)
+    if tested_point is not None:
+        fig.add_trace(go.Scatter(
+            x=[tested_point[0]],
+            y=[tested_point[1]],
+            mode='markers',
+            name='Tested Formulation',
+            marker=dict(size=10, color='blue', symbol='circle', line=dict(width=2, color='darkblue')),
+            hovertemplate='Tested: API %{x:.1f}%, EFRF %{y:.4f}<extra></extra>'
+        ))
+    
     fig.add_hline(y=efrf_max, line_dash='dash', line_color='gray',
                   annotation_text=f'EFRF threshold {efrf_max}')
     fig.update_layout(
-        title='Pareto Front (Clean Version)',
+        title='Pareto Front with Feasible Region',
         xaxis_title='API (%)',
         yaxis_title='EFRF',
         height=450,
@@ -715,92 +772,95 @@ def plot_particle_effect(formulation, model, scaler, y_scaler):
     return fig
 
 # ================================================================
-# PDF Report Generator (FIXED: returns bytes directly)
+# PDF Report Generator (FIXED)
 # ================================================================
 def generate_pdf_report(formulation, pinn_r2, bench_df, golden_solution, golden_pred, fronts, timestamp):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, "Hubryd AI v29.27-R2 Report", ln=True, align='C')
-    pdf.set_font("Arial", "I", 10)
-    pdf.cell(0, 6, f"Generated: {timestamp}", ln=True, align='C')
-    pdf.ln(5)
+    try:
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", "B", 16)
+        pdf.cell(0, 10, "Hubryd AI v29.27-R2 Report", ln=True, align='C')
+        pdf.set_font("Arial", "I", 10)
+        pdf.cell(0, 6, f"Generated: {timestamp}", ln=True, align='C')
+        pdf.ln(5)
 
-    # Formulation
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 8, "1. Formulation Parameters", ln=True)
-    pdf.set_font("Arial", "", 10)
-    f = formulation
-    pdf.cell(60, 6, f"API: {f['api_n']:.1f}%", border=0)
-    pdf.cell(60, 6, f"MCC: {f['mcc_n']:.1f}%", ln=True)
-    pdf.cell(60, 6, f"PVPP: {f['pvpp_n']:.1f}%", border=0)
-    pdf.cell(60, 6, f"Mg-St: {f['mgst_n']:.2f}%", ln=True)
-    pdf.cell(60, 6, f"Binder: {f['binder_n']:.1f}%", border=0)
-    pdf.cell(60, 6, f"Pressure: {f['pressure']:.1f} MPa", ln=True)
-    pdf.cell(60, 6, f"Speed: {f['speed']:.1f} rpm", border=0)
-    pdf.cell(60, 6, f"Granule: {f['granule_use']:.0f} µm", ln=True)
-    pdf.ln(3)
-
-    # Predicted properties
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 8, "2. Predicted Properties", ln=True)
-    pdf.set_font("Arial", "", 10)
-    pdf.cell(60, 6, f"Density: {f['density']:.3f}", border=0)
-    pdf.cell(60, 6, f"Tensile: {f['tensile']:.2f} MPa", ln=True)
-    pdf.cell(60, 6, f"EFRF: {f['efrf']:.4f}", border=0)
-    pdf.cell(60, 6, f"ER: {f['er']:.4f}", ln=True)
-    pdf.ln(3)
-
-    # Constraints
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 8, "3. Constraints Status", ln=True)
-    pdf.set_font("Arial", "", 10)
-    status = "PASS" if D_MIN <= f['density'] <= D_MAX else "FAIL"
-    pdf.cell(60, 6, f"Density: {status}", border=0)
-    status = "PASS" if f['tensile'] >= TENSILE_MIN else "FAIL"
-    pdf.cell(60, 6, f"Tensile: {status}", ln=True)
-    status = "PASS" if f['efrf'] < EFRF_MAX else "FAIL"
-    pdf.cell(60, 6, f"EFRF: {status}", border=0)
-    status = "PASS" if f['mcc_n'] <= MCC_MAX else "FAIL"
-    pdf.cell(60, 6, f"MCC: {status}", ln=True)
-    pdf.ln(3)
-
-    # Golden solution
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 8, "4. Golden Solution (NSGA-II)", ln=True)
-    if golden_solution is not None and golden_pred is not None:
+        # Formulation
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, "1. Formulation Parameters", ln=True)
         pdf.set_font("Arial", "", 10)
-        pdf.cell(60, 6, f"API: {golden_solution[0]:.1f}%", border=0)
-        pdf.cell(60, 6, f"MCC: {golden_solution[1]:.1f}%", ln=True)
-        pdf.cell(60, 6, f"PVPP: {golden_solution[2]:.1f}%", border=0)
-        pdf.cell(60, 6, f"Mg-St: {golden_solution[3]:.2f}%", ln=True)
-        pdf.cell(60, 6, f"Binder: {golden_solution[4]:.1f}%", border=0)
-        pdf.cell(60, 6, f"Pressure: {golden_solution[5]:.1f} MPa", ln=True)
-        pdf.cell(60, 6, f"Speed: {golden_solution[6]:.1f} rpm", border=0)
-        pdf.cell(60, 6, f"Granule: {golden_solution[7]:.0f} µm", ln=True)
-        pdf.cell(60, 6, f"Density: {golden_pred[0]:.3f}", border=0)
-        pdf.cell(60, 6, f"Tensile: {golden_pred[1]:.3f} MPa", ln=True)
-        pdf.cell(60, 6, f"EFRF: {golden_pred[3]:.4f}", border=0)
-        pdf.cell(60, 6, f"ER: {golden_pred[2]:.4f}", ln=True)
+        f = formulation
+        pdf.cell(60, 6, f"API: {f['api_n']:.1f}%", border=0)
+        pdf.cell(60, 6, f"MCC: {f['mcc_n']:.1f}%", ln=True)
+        pdf.cell(60, 6, f"PVPP: {f['pvpp_n']:.1f}%", border=0)
+        pdf.cell(60, 6, f"Mg-St: {f['mgst_n']:.2f}%", ln=True)
+        pdf.cell(60, 6, f"Binder: {f['binder_n']:.1f}%", border=0)
+        pdf.cell(60, 6, f"Pressure: {f['pressure']:.1f} MPa", ln=True)
+        pdf.cell(60, 6, f"Speed: {f['speed']:.1f} rpm", border=0)
+        pdf.cell(60, 6, f"Granule: {f['granule_use']:.0f} µm", ln=True)
         pdf.ln(3)
 
-    # Model comparison
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 8, "5. Model Performance (Tensile R²)", ln=True)
-    pdf.set_font("Arial", "", 10)
-    pdf.cell(50, 6, "Model", border=1)
-    pdf.cell(30, 6, "R²", border=1)
-    pdf.cell(30, 6, "RMSE", border=1)
-    pdf.cell(30, 6, "MAE", border=1, ln=True)
-    pdf.set_font("Arial", "", 8)
-    for _, row in bench_df.iterrows():
-        pdf.cell(50, 6, row['Model'], border=1)
-        pdf.cell(30, 6, f"{row['R²']:.4f}", border=1)
-        pdf.cell(30, 6, f"{row['RMSE']:.4f}", border=1)
-        pdf.cell(30, 6, f"{row['MAE']:.4f}", border=1, ln=True)
+        # Predicted properties
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, "2. Predicted Properties", ln=True)
+        pdf.set_font("Arial", "", 10)
+        pdf.cell(60, 6, f"Density: {f['density']:.3f}", border=0)
+        pdf.cell(60, 6, f"Tensile: {f['tensile']:.2f} MPa", ln=True)
+        pdf.cell(60, 6, f"EFRF: {f['efrf']:.4f}", border=0)
+        pdf.cell(60, 6, f"ER: {f['er']:.4f}", ln=True)
+        pdf.ln(3)
 
-    # Return bytes directly (FIXED: removed .encode('latin-1'))
-    return pdf.output(dest='S')
+        # Constraints
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, "3. Constraints Status", ln=True)
+        pdf.set_font("Arial", "", 10)
+        status = "PASS" if D_MIN <= f['density'] <= D_MAX else "FAIL"
+        pdf.cell(60, 6, f"Density: {status}", border=0)
+        status = "PASS" if f['tensile'] >= TENSILE_MIN else "FAIL"
+        pdf.cell(60, 6, f"Tensile: {status}", ln=True)
+        status = "PASS" if f['efrf'] < EFRF_MAX else "FAIL"
+        pdf.cell(60, 6, f"EFRF: {status}", border=0)
+        status = "PASS" if f['mcc_n'] <= MCC_MAX else "FAIL"
+        pdf.cell(60, 6, f"MCC: {status}", ln=True)
+        pdf.ln(3)
+
+        # Golden solution
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, "4. Golden Solution (NSGA-II)", ln=True)
+        if golden_solution is not None and golden_pred is not None:
+            pdf.set_font("Arial", "", 10)
+            pdf.cell(60, 6, f"API: {golden_solution[0]:.1f}%", border=0)
+            pdf.cell(60, 6, f"MCC: {golden_solution[1]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"PVPP: {golden_solution[2]:.1f}%", border=0)
+            pdf.cell(60, 6, f"Mg-St: {golden_solution[3]:.2f}%", ln=True)
+            pdf.cell(60, 6, f"Binder: {golden_solution[4]:.1f}%", border=0)
+            pdf.cell(60, 6, f"Pressure: {golden_solution[5]:.1f} MPa", ln=True)
+            pdf.cell(60, 6, f"Speed: {golden_solution[6]:.1f} rpm", border=0)
+            pdf.cell(60, 6, f"Granule: {golden_solution[7]:.0f} µm", ln=True)
+            pdf.cell(60, 6, f"Density: {golden_pred[0]:.3f}", border=0)
+            pdf.cell(60, 6, f"Tensile: {golden_pred[1]:.3f} MPa", ln=True)
+            pdf.cell(60, 6, f"EFRF: {golden_pred[3]:.4f}", border=0)
+            pdf.cell(60, 6, f"ER: {golden_pred[2]:.4f}", ln=True)
+            pdf.ln(3)
+
+        # Model comparison
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, "5. Model Performance (Tensile R²)", ln=True)
+        pdf.set_font("Arial", "", 10)
+        pdf.cell(50, 6, "Model", border=1)
+        pdf.cell(30, 6, "R²", border=1)
+        pdf.cell(30, 6, "RMSE", border=1)
+        pdf.cell(30, 6, "MAE", border=1, ln=True)
+        pdf.set_font("Arial", "", 8)
+        for _, row in bench_df.iterrows():
+            pdf.cell(50, 6, row['Model'], border=1)
+            pdf.cell(30, 6, f"{row['R²']:.4f}", border=1)
+            pdf.cell(30, 6, f"{row['RMSE']:.4f}", border=1)
+            pdf.cell(30, 6, f"{row['MAE']:.4f}", border=1, ln=True)
+
+        return pdf.output(dest='S')  # returns bytes
+    except Exception as e:
+        st.error(f"PDF generation failed: {e}")
+        return None
 
 # ================================================================
 def train_benchmark(X_train, X_test, y_train, y_test):
@@ -1011,7 +1071,7 @@ with col_right:
             else:
                 density, tensile, er, efrf = 0.7, 2.0, 0.5, 0.25
 
-            # ---- Store formulation in session_state ----
+            # ---- Store formulation ----
             st.session_state.formulation = {
                 'api_n': api_n, 'binder_n': binder_n, 'pvpp_n': pvpp_n,
                 'mgst_n': mgst_n, 'mcc_n': mcc_n,
@@ -1020,7 +1080,7 @@ with col_right:
                 'density': density, 'tensile': tensile, 'er': er, 'efrf': efrf
             }
 
-            # ---- 1. Constraints Status ----
+            # ---- Constraints Status ----
             st.markdown("#### Constraints Status")
             col_metrics = st.columns(4)
             col_metrics[0].metric("Density", f"{density:.3f}", "✅" if D_MIN <= density <= D_MAX else "❌")
@@ -1033,7 +1093,7 @@ with col_right:
             else:
                 st.error("❌ Violates constraints")
 
-            # ---- 2. Run NSGA-II and cache ----
+            # ---- Run NSGA-II ----
             bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],
                                [80,PRESSURE_MAX],[1,50],[30,250]])
             with st.spinner(f"Running NSGA‑II (pop={NSGA_POP}, gen={NSGA_GENS})..."):
@@ -1048,7 +1108,7 @@ with col_right:
             st.session_state.nsga_fronts = fronts
             st.session_state.run_optimized = True
 
-            # ---- 3. Select Golden Solution (balance: closest to ideal point) ----
+            # ---- Select Golden Solution ----
             best_idx = None
             if len(fronts) > 0 and len(fronts[0]) > 0:
                 front_indices = fronts[0]
@@ -1073,6 +1133,12 @@ with col_right:
                     st.session_state.golden_solution = None
                     st.session_state.golden_pred = None
 
+            # ---- Generate feasible region (cached) ----
+            with st.spinner("Generating feasible region..."):
+                feasible_df = generate_feasible_points(model, scaler, y_scaler, n_samples=3000)
+                st.session_state.feasible_df = feasible_df
+                st.session_state.tested_point = (api_n, efrf)
+
     # ---- Display sections (using cached results) ----
     if st.session_state.run_optimized:
         pop = st.session_state.nsga_pop
@@ -1080,14 +1146,17 @@ with col_right:
         fronts = st.session_state.nsga_fronts
         golden_solution = st.session_state.golden_solution
         golden_pred = st.session_state.golden_pred
+        feasible_df = st.session_state.feasible_df
+        tested_point = st.session_state.tested_point
 
-        # ---- Pareto Front (if knob ON) ----
+        # ---- Pareto Front ----
         show_pareto = st.session_state.get('show_pareto', True)
         if show_pareto:
             st.markdown("### 📉 Pareto Front")
             if len(fronts) > 0 and len(fronts[0]) > 0:
                 st.success(f"✅ Pareto front found: {len(fronts[0])} optimal solutions")
-                fig = plot_pareto_clean(objectives, fronts, golden_solution, golden_pred, EFRF_MAX)
+                fig = plot_pareto_clean(objectives, fronts, golden_solution, golden_pred,
+                                        feasible_df, tested_point, EFRF_MAX)
                 if fig:
                     st.plotly_chart(fig, use_container_width=True)
                 if golden_solution is not None:
@@ -1137,22 +1206,18 @@ with col_right:
         with knob_cols[4]:
             generate_report = st.button("📄 Report", key="knob_report")
 
-        # ---- Particle Size Plot (if knob ON) ----
+        # ---- Particle Size Plot ----
         if show_particle:
             f = st.session_state.formulation
-            if f['api_n'] is None:
-                st.info("Please run optimisation first to see particle effect.")
-            else:
+            if f['api_n'] is not None:
                 st.markdown("### 📊 Particle Size Effect on Density & Tensile")
                 fig = plot_particle_effect(f, model, scaler, y_scaler)
                 st.plotly_chart(fig, use_container_width=True)
 
-        # ---- Sensitivity (if knob ON) ----
+        # ---- Sensitivity ----
         if show_sensitivity:
             f = st.session_state.formulation
-            if f['api_n'] is None:
-                st.info("Please run optimisation first to see sensitivity.")
-            else:
+            if f['api_n'] is not None:
                 st.markdown("### 🔬 Sensitivity Analysis (All Parameters vs EFRF)")
                 fig_grid = plot_sensitivity_grid(f, model, scaler, y_scaler, EFRF_MAX)
                 if fig_grid:
@@ -1162,7 +1227,7 @@ with col_right:
                 if fig_bars:
                     st.plotly_chart(fig_bars, use_container_width=True)
 
-        # ---- Comparison (if knob ON) ----
+        # ---- Comparison ----
         if show_comparison:
             st.markdown("### 📊 Comparison (Tensile R²)")
             X_train, X_test, y_train, y_test = train_test_split(
@@ -1201,7 +1266,7 @@ with col_right:
         if generate_report:
             f = st.session_state.formulation
             timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            # Recompute bench_df if needed (or use existing)
+            # Recompute bench_df if needed
             X_train, X_test, y_train, y_test = train_test_split(
                 df[features].values, df['Tensile_Strength_MPa'].values,
                 test_size=0.2, random_state=42
@@ -1223,12 +1288,15 @@ with col_right:
             bench_df = pd.concat([pinn_row, bench_df], ignore_index=True)
 
             pdf_bytes = generate_pdf_report(f, pinn_r2, bench_df, golden_solution, golden_pred, fronts, timestamp)
-            st.download_button(
-                label="📥 Download PDF Report",
-                data=pdf_bytes,
-                file_name=f"hubryd_report_{timestamp[:10]}.pdf",
-                mime="application/pdf"
-            )
+            if pdf_bytes is not None:
+                st.download_button(
+                    label="📥 Download PDF Report",
+                    data=pdf_bytes,
+                    file_name=f"hubryd_report_{timestamp[:10]}.pdf",
+                    mime="application/pdf"
+                )
+            else:
+                st.error("Could not generate PDF. Check logs for details.")
 
     else:
         st.info("Adjust sliders and click 'Predict & Optimise' to see results.")
