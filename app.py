@@ -1,7 +1,7 @@
 """
 Hubryd AI – v29.27-R2 (Balanced)
 Optimised for R² · Fast training on free tier
-NSGA-II unchanged · Knobs appear after NSGA-II results.
+Knobs appear after constraints and NSGA-II results.
 Nile Valley University · Sudan
 """
 
@@ -610,11 +610,11 @@ def load_or_train():
 # ================================================================
 # Streamlit UI – v29.27 with Knobs after NSGA-II
 # ================================================================
-st.set_page_config(page_title="Hubryd AI v29.27", layout="wide")
+st.set_page_config(page_title="Hubryd AI v29.27-R2", layout="wide")
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #0b1a33, #1a2a4a, #0f3460); padding:1.5rem; border-radius:1rem; text-align:center; margin-bottom:1rem;">
-    <h1 style="color:#fff; margin:0;">🧬 Hybrid AI Multi-Objective Optimisation–v29.27 </h1>
+    <h1 style="color:#fff; margin:0;">🧬 Hybrid AI Multi-Objective Optimisation – v29.27</h1>
     <p style="color:#64ffda; margin:0;">Balanced for R² · Fast training on free tier</p>
     <p style="color:#8899aa; font-size:0.9rem;">Nile Valley University · Sudan</p>
 </div>
@@ -710,7 +710,7 @@ with col_right:
             else:
                 density, tensile, er, efrf = 0.7, 2.0, 0.5, 0.25
 
-            # ---- 1. Constraints Status ----
+            # ---- 1. Constraints Status (always shown) ----
             st.markdown("#### Constraints Status")
             col_metrics = st.columns(4)
             col_metrics[0].metric("Density", f"{density:.3f}", "✅" if D_MIN <= density <= D_MAX else "❌")
@@ -733,8 +733,7 @@ with col_right:
                               granule_fixed_val=granule if granule_fixed else 125.0)
                 pop, objectives, fronts = nsga.run()
 
-            # ---- 3. Pareto Front and Golden Solution (shown if show_pareto is True) ----
-            # We'll still compute best_idx even if show_pareto is False, for use later.
+            # ---- 3. Extract best (golden) solution (used later) ----
             best_idx = None
             best_ef = 1e9
             if len(fronts) > 0 and len(fronts[0]) > 0:
@@ -749,7 +748,8 @@ with col_right:
                     golden = pop[best_idx]
                     d2, t2, e2, ef2 = predict_pinn(model, scaler, y_scaler, golden)
 
-            # Now display the Pareto section (only if show_pareto is True)
+            # ---- 4. Display Pareto Front & Golden Solution (controlled by show_pareto) ----
+            show_pareto = st.session_state.get('show_pareto', True)   # <-- FIX: read from session state
             if show_pareto:
                 st.markdown("### 📉 Pareto Front")
                 if len(fronts) > 0 and len(fronts[0]) > 0:
@@ -781,15 +781,15 @@ with col_right:
                 else:
                     st.warning("No Pareto front found.")
 
-            # ---- 4. Knobs Row (appears after NSGA-II results) ----
+            # ---- 5. Knobs Row (appears after NSGA-II results) ----
             st.markdown("---")
             st.markdown("**🔘 Toggle additional sections:**")
             knob_cols = st.columns(5)
             with knob_cols[0]:
-                # Pareto knob already used above; we'll keep it here for consistency, but it's already applied.
-                # We'll just display a disabled indicator or reuse the existing toggle.
-                # We'll simply show the current state.
-                st.write(f"📉 Pareto: {'ON' if show_pareto else 'OFF'}")
+                # Pareto knob – toggles visibility of the Pareto section
+                show_pareto = st.toggle("📉 Pareto", value=st.session_state.get('show_pareto', True),
+                                        key="knob_pareto")
+                st.session_state.show_pareto = show_pareto
             with knob_cols[1]:
                 show_sensitivity = st.toggle("🔬 Sensitivity", value=st.session_state.get('show_sensitivity', False),
                                              key="knob_sensitivity")
@@ -811,7 +811,7 @@ with col_right:
             with knob_cols[4]:
                 generate_report = st.button("📄 Report", key="knob_report")
 
-            # ---- 5. Sensitivity (if knob ON) ----
+            # ---- 6. Sensitivity (if knob ON) ----
             if show_sensitivity:
                 st.markdown("### 🔬 Sensitivity Analysis")
                 api_range = np.linspace(85, 95, 10)
@@ -834,7 +834,7 @@ with col_right:
                 fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='red')
                 st.plotly_chart(fig, use_container_width=True)
 
-            # ---- 6. Comparison (if knob ON) ----
+            # ---- 7. Comparison (if knob ON) ----
             if show_comparison:
                 st.markdown("### 📊 Comparison (Tensile R²)")
                 X_train, X_test, y_train, y_test = train_test_split(
@@ -862,7 +862,7 @@ with col_right:
                 bench_df = pd.concat([pinn_row, bench_df], ignore_index=True)
                 st.dataframe(bench_df, use_container_width=True)
 
-            # ---- 7. Report (button triggered) ----
+            # ---- 8. Report (button triggered) ----
             if generate_report:
                 timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 try:
