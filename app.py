@@ -1,6 +1,6 @@
 """
 Hubryd AI – v29.27-R2 (Fully Functional)
-- PDF Report (fpdf2)
+- PDF Report (fpdf2) – fixed bytes output
 - Particle Size Effect Plot (Density & Tensile vs Granule)
 - Clean Pareto plot (lines + markers + golden star)
 - Enhanced sensitivity grid + bar chart
@@ -715,7 +715,7 @@ def plot_particle_effect(formulation, model, scaler, y_scaler):
     return fig
 
 # ================================================================
-# PDF Report Generator
+# PDF Report Generator (FIXED: returns bytes directly)
 # ================================================================
 def generate_pdf_report(formulation, pinn_r2, bench_df, golden_solution, golden_pred, fronts, timestamp):
     pdf = FPDF()
@@ -799,7 +799,8 @@ def generate_pdf_report(formulation, pinn_r2, bench_df, golden_solution, golden_
         pdf.cell(30, 6, f"{row['RMSE']:.4f}", border=1)
         pdf.cell(30, 6, f"{row['MAE']:.4f}", border=1, ln=True)
 
-    return pdf.output(dest='S').encode('latin-1')
+    # Return bytes directly (FIXED: removed .encode('latin-1'))
+    return pdf.output(dest='S')
 
 # ================================================================
 def train_benchmark(X_train, X_test, y_train, y_test):
@@ -836,7 +837,6 @@ CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r2_enhanced.pt')
 def load_or_train():
     if os.path.exists(CHECKPOINT_PATH):
         try:
-            # FIX: set weights_only=False to allow StandardScaler and other objects
             ckpt = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=False)
             model = MultiTaskPINN(ckpt['input_dim'], hidden=HIDDEN_SIZE)
             model.load_state_dict(ckpt['model_state'])
