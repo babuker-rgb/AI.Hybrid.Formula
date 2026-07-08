@@ -1,10 +1,10 @@
 """
-Hubryd AI – v29.27-R2 (Final)
-- PINN outputs raw scaled values (R² > 0.95)
-- Bootstrapped benchmarking with mean ± std
-- Correctly isolated Tensile Strength column
-- Fixed inverse_transform shape mismatch
-- All knobs and plots functional
+Hubryd AI – v29.27-R2 (النسخة النهائية)
+- مخرجات PINN في النطاق المعياري (R² > 0.95)
+- تقييم بالـ Bootstrap مع متوسط ± انحراف معياري
+- تم عزل عمود مقاومة الشد بشكل صحيح
+- تم إصلاح خطأ الأبعاد في inverse_transform
+- جميع الأزرار والمخططات تعمل
 Nile Valley University · Sudan
 """
 
@@ -33,7 +33,7 @@ except ImportError:
     FPDF_AVAILABLE = False
 
 # ================================================================
-# Physics Constants
+# الثوابت الفيزيائية
 # ================================================================
 D_MIN = 0.40
 D_MAX = 0.97
@@ -45,7 +45,7 @@ BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
 # ================================================================
-# Training Parameters
+# معاملات التدريب
 # ================================================================
 N_SAMPLES = 15000
 ADAM_EPOCHS = 800
@@ -61,7 +61,7 @@ W_PHYSICS = 1.0
 W_EFRF_PENALTY = 100.0
 
 # ================================================================
-# Session State Initialisation
+# تهيئة حالة الجلسة
 # ================================================================
 if 'api' not in st.session_state:
     st.session_state.update({
@@ -97,7 +97,7 @@ if 'api' not in st.session_state:
     })
 
 # ================================================================
-# Helper Functions
+# دوال مساعدة (بدون تغيير)
 # ================================================================
 def normalize_components(api, binder, pvpp, mgst, mcc):
     api = np.clip(api, 60, 100)
@@ -181,7 +181,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         api_n, binder_n, pvpp_n, mgst_n, mcc_n = normalize_components(api, binder, pvpp, mgst, mcc)
         X[i] = [api_n, mcc_n, pvpp_n, mgst_n, binder_n, pressure, speed, granule]
 
-        # Density (Heckel)
+        # الكثافة (معادلة هيكل)
         k = 0.025 + 0.0001 * pressure
         A = 1.0 + 0.01 * (api_n - 85) - 0.05 * binder_n
         x_val = k * pressure + A
@@ -189,7 +189,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         D = np.clip(D, D_MIN, D_MAX) + np.random.normal(0, 0.002)
         D = np.clip(D, D_MIN, D_MAX)
 
-        # Tensile (deterministic)
+        # مقاومة الشد (حتمية)
         porosity = 1.0 - D
         sigma0 = 5.0 + 0.1 * (api_n - 85) + 0.2 * binder_n - 0.5 * mgst_n
         sigma0 = np.clip(sigma0, 2.0, 8.0)
@@ -207,7 +207,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         strength = strength * np.random.normal(1.0, 0.01)
         strength = np.clip(strength, 0.5, 6.0)
 
-        # Elastic Recovery (ER)
+        # الاسترجاع المرن
         er_base = 1.8 + 0.3 * (api_n - 85)/10 + 0.08 * (speed - 10)/30 - 0.1 * (pressure - 100)/150
         er_base = er_base * (1.0 - 0.15 * (D - 0.4))
         er = np.clip(er_base + np.random.normal(0, 0.01), 0.5, 4.0)
@@ -223,7 +223,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# PINN Model (FIXED: raw scaled outputs)
+# نموذج PINN (مخرجات خام في النطاق المعياري)
 # ================================================================
 class Mish(nn.Module):
     def forward(self, x):
@@ -253,7 +253,7 @@ class MultiTaskPINN(nn.Module):
         self.res1 = ResidualBlock(hidden)
         self.res2 = ResidualBlock(hidden)
         self.transition = nn.Sequential(nn.Linear(hidden, hidden//2), nn.Tanh())
-        self.output = nn.Linear(hidden//2, 5)   # density, tensile, ER, k, A
+        self.output = nn.Linear(hidden//2, 5)   # الكثافة، الشد، ER، k، A
 
     def forward(self, X):
         x = self.input_layer(X)
@@ -261,7 +261,7 @@ class MultiTaskPINN(nn.Module):
         x = self.res2(x)
         x = self.transition(x)
         raw = self.output(x)
-        # Predict values directly in the scaled domain for high convergence stability
+        # التنبؤ مباشرة في النطاق المعياري لتحقيق استقرار أعلى
         density = raw[:, 0:1]
         tensile = raw[:, 1:2]
         er = raw[:, 2:3]
@@ -290,13 +290,13 @@ class MultiTaskPINN(nn.Module):
         k_pred = y_pred[:, 3:4]
         A_pred = y_pred[:, 4:5]
 
-        # Standard MSE on the scaled domain
+        # MSE على النطاق المعياري
         loss_dens = nn.MSELoss()(density_pred, y_true[:, 0:1])
         loss_tensile = nn.MSELoss()(tensile_pred, y_true[:, 1:2])
         loss_er = nn.MSELoss()(er_pred, y_true[:, 2:3])
         data_loss = W_DENSITY * loss_dens + W_TENSILE * loss_tensile + W_ER * loss_er
 
-        # Unscale variables exclusively to apply real physical constraints
+        # تحويل إلى الوحدات الحقيقية لتطبيق القيود الفيزيائية
         scale_dens, mean_dens = y_scaler.scale_[0], y_scaler.mean_[0]
         scale_tensile, mean_tensile = y_scaler.scale_[1], y_scaler.mean_[1]
         scale_er, mean_er = y_scaler.scale_[2], y_scaler.mean_[2]
@@ -305,12 +305,12 @@ class MultiTaskPINN(nn.Module):
         tensile_real = tensile_pred * scale_tensile + mean_tensile
         er_real = er_pred * scale_er + mean_er
 
-        # Heckel physical relationship
+        # معادلة هيكل
         heckel_lhs = torch.log(1.0 / torch.clamp(1.0 - density_real, min=1e-4))
         heckel_rhs = k_pred * pressure + A_pred
         heckel_loss = nn.MSELoss()(heckel_lhs, heckel_rhs)
 
-        # EFRF real unit constraint
+        # قيد EFRF بالوحدات الحقيقية
         efrf_real = er_real / torch.clamp(tensile_real, min=1e-4)
         efrf_penalty = torch.mean(torch.relu(efrf_real - EFRF_MAX) ** 2) * W_EFRF_PENALTY
 
@@ -321,7 +321,7 @@ class MultiTaskPINN(nn.Module):
         return data_loss + physics_loss
 
 # ================================================================
-# NSGA-II (unchanged)
+# NSGA-II (بدون تغيير)
 # ================================================================
 class NSGAII:
     def __init__(self, model, scaler, y_scaler, bounds, pop=40, gens=30, granule_fixed=True, granule_fixed_val=125.0):
@@ -514,7 +514,7 @@ class NSGAII:
         return pop, objectives, fronts
 
 # ================================================================
-# Prediction and Plotting Helpers
+# دوال التنبؤ والرسم (بدون تغيير)
 # ================================================================
 def predict_pinn(model, scaler, y_scaler, inputs):
     try:
@@ -530,7 +530,7 @@ def predict_pinn(model, scaler, y_scaler, inputs):
         efrf = er / tensile
         return density, tensile, er, efrf
     except Exception as e:
-        st.error(f"Prediction error: {e}")
+        st.error(f"خطأ في التنبؤ: {e}")
         return 0.7, 2.0, 0.5, 0.25
 
 def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
@@ -567,7 +567,7 @@ def plot_pareto_clean(objectives, fronts, golden_solution=None, golden_pred=None
             x=feasible_df['API'],
             y=feasible_df['EFRF'],
             mode='markers',
-            name='Feasible Region',
+            name='المنطقة الممكنة',
             marker=dict(color='lightgreen', size=4, opacity=0.4),
             hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>',
             showlegend=True
@@ -576,7 +576,7 @@ def plot_pareto_clean(objectives, fronts, golden_solution=None, golden_pred=None
         x=df_front['API'],
         y=df_front['EFRF'],
         mode='lines+markers',
-        name='Pareto Front',
+        name='جبهة باريتو',
         line=dict(color='red', width=2),
         marker=dict(size=7, color='red'),
         hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
@@ -586,23 +586,23 @@ def plot_pareto_clean(objectives, fronts, golden_solution=None, golden_pred=None
             x=[golden_solution[0]],
             y=[golden_pred[2] / golden_pred[1]],
             mode='markers',
-            name='⭐ Golden Solution',
+            name='⭐ الحل الذهبي',
             marker=dict(size=14, color='gold', symbol='star', line=dict(width=2, color='black')),
-            hovertemplate='Golden: API %{x:.1f}%, EFRF %{y:.4f}<extra></extra>'
+            hovertemplate='الذهبي: API %{x:.1f}%، EFRF %{y:.4f}<extra></extra>'
         ))
     if tested_point is not None:
         fig.add_trace(go.Scatter(
             x=[tested_point[0]],
             y=[tested_point[1]],
             mode='markers',
-            name='Tested Formulation',
+            name='التركيبة المختبرة',
             marker=dict(size=10, color='blue', symbol='circle', line=dict(width=2, color='darkblue')),
-            hovertemplate='Tested: API %{x:.1f}%, EFRF %{y:.4f}<extra></extra>'
+            hovertemplate='المختبرة: API %{x:.1f}%، EFRF %{y:.4f}<extra></extra>'
         ))
     fig.add_hline(y=efrf_max, line_dash='dash', line_color='gray',
-                  annotation_text=f'EFRF threshold {efrf_max}')
+                  annotation_text=f'حد EFRF {efrf_max}')
     fig.update_layout(
-        title='Pareto Front with Feasible Region',
+        title='جبهة باريتو مع المنطقة الممكنة',
         xaxis_title='API (%)',
         yaxis_title='EFRF',
         height=450,
@@ -665,11 +665,11 @@ def plot_sensitivity_bars(formulation, model, scaler, y_scaler, efrf_max=0.40):
         hovertemplate='%{y}<br>ΔEFRF: %{x:.4f}<extra></extra>'
     ))
     fig.add_vline(x=efrf_max, line_dash='dash', line_color='red',
-                  annotation_text=f'EFRF threshold {efrf_max}')
+                  annotation_text=f'حد EFRF {efrf_max}')
     fig.update_layout(
-        title='Parameter Impact on EFRF (absolute change across full range)',
-        xaxis_title='Absolute change in EFRF',
-        yaxis_title='Parameter',
+        title='تأثير المتغيرات على EFRF (التغير المطلق عبر النطاق الكامل)',
+        xaxis_title='التغير المطلق في EFRF',
+        yaxis_title='المتغير',
         height=400,
         template='plotly_white',
         margin=dict(l=10, r=10, t=60, b=10)
@@ -699,86 +699,86 @@ def plot_particle_pressure_density(formulation, model, scaler, y_scaler):
         x=granule_range,
         y=pressure_range,
         colorscale='Viridis',
-        hovertemplate='Granule: %{x:.0f} µm<br>Pressure: %{y:.0f} MPa<br>Density: %{z:.3f}<extra></extra>'
+        hovertemplate='الحبيبات: %{x:.0f} µm<br>الضغط: %{y:.0f} MPa<br>الكثافة: %{z:.3f}<extra></extra>'
     ))
     fig.update_layout(
-        title='Density vs Particle Size and Pressure',
-        xaxis_title='Granule Size (µm)',
-        yaxis_title='Pressure (MPa)',
+        title='الكثافة مقابل حجم الحبيبات والضغط',
+        xaxis_title='حجم الحبيبات (µm)',
+        yaxis_title='الضغط (MPa)',
         height=450,
         template='plotly_white'
     )
     return fig
 
 # ================================================================
-# PDF Report (simplified)
+# تقرير PDF (مبسط)
 # ================================================================
 def generate_pdf_report(formulation, pinn_r2, bench_df, golden_solution, golden_pred, fronts, timestamp):
     if not FPDF_AVAILABLE:
-        return None, "fpdf2 is not installed. Please install it with: pip install fpdf2"
+        return None, "fpdf2 غير مثبت. يرجى تثبيته باستخدام: pip install fpdf2"
     try:
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Arial", "B", 16)
-        pdf.cell(0, 10, "Hubryd AI v29.27-R2 Report", ln=True, align='C')
+        pdf.cell(0, 10, "تقرير Hubryd AI v29.27-R2", ln=True, align='C')
         pdf.set_font("Arial", "I", 10)
-        pdf.cell(0, 6, f"Generated: {timestamp}", ln=True, align='C')
+        pdf.cell(0, 6, f"تم الإنشاء: {timestamp}", ln=True, align='C')
         pdf.ln(4)
 
         f = formulation
         pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 8, "1. Formulation Parameters", ln=True)
+        pdf.cell(0, 8, "1. معاملات التركيبة", ln=True)
         pdf.set_font("Arial", "", 10)
         pdf.cell(60, 6, f"API: {f['api_n']:.1f}%", ln=True)
         pdf.cell(60, 6, f"MCC: {f['mcc_n']:.1f}%", ln=True)
         pdf.cell(60, 6, f"PVPP: {f['pvpp_n']:.1f}%", ln=True)
         pdf.cell(60, 6, f"Mg-St: {f['mgst_n']:.2f}%", ln=True)
         pdf.cell(60, 6, f"Binder: {f['binder_n']:.1f}%", ln=True)
-        pdf.cell(60, 6, f"Pressure: {f['pressure']:.1f} MPa", ln=True)
-        pdf.cell(60, 6, f"Speed: {f['speed']:.1f} rpm", ln=True)
-        pdf.cell(60, 6, f"Granule: {f['granule_use']:.0f} µm", ln=True)
+        pdf.cell(60, 6, f"الضغط: {f['pressure']:.1f} MPa", ln=True)
+        pdf.cell(60, 6, f"السرعة: {f['speed']:.1f} rpm", ln=True)
+        pdf.cell(60, 6, f"الحبيبات: {f['granule_use']:.0f} µm", ln=True)
         pdf.ln(4)
 
         pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 8, "2. Predicted Properties", ln=True)
+        pdf.cell(0, 8, "2. الخصائص المتوقعة", ln=True)
         pdf.set_font("Arial", "", 10)
-        pdf.cell(60, 6, f"Density: {f['density']:.3f}", ln=True)
-        pdf.cell(60, 6, f"Tensile Strength: {f['tensile']:.2f} MPa", ln=True)
+        pdf.cell(60, 6, f"الكثافة: {f['density']:.3f}", ln=True)
+        pdf.cell(60, 6, f"مقاومة الشد: {f['tensile']:.2f} MPa", ln=True)
         pdf.cell(60, 6, f"EFRF: {f['efrf']:.4f}", ln=True)
-        pdf.cell(60, 6, f"Elastic Recovery: {f['er']:.4f}", ln=True)
+        pdf.cell(60, 6, f"الاسترجاع المرن: {f['er']:.4f}", ln=True)
         pdf.ln(4)
 
         pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 8, "3. Constraints Status", ln=True)
+        pdf.cell(0, 8, "3. حالة القيود", ln=True)
         pdf.set_font("Arial", "", 10)
-        pdf.cell(60, 6, f"Density Status: {'PASS' if D_MIN <= f['density'] <= D_MAX else 'FAIL'}", ln=True)
-        pdf.cell(60, 6, f"Tensile Status: {'PASS' if f['tensile'] >= TENSILE_MIN else 'FAIL'}", ln=True)
-        pdf.cell(60, 6, f"EFRF Status: {'PASS' if f['efrf'] < EFRF_MAX else 'FAIL'}", ln=True)
-        pdf.cell(60, 6, f"MCC Status: {'PASS' if f['mcc_n'] <= MCC_MAX else 'FAIL'}", ln=True)
+        pdf.cell(60, 6, f"الكثافة: {'ناجح' if D_MIN <= f['density'] <= D_MAX else 'راسب'}", ln=True)
+        pdf.cell(60, 6, f"الشد: {'ناجح' if f['tensile'] >= TENSILE_MIN else 'راسب'}", ln=True)
+        pdf.cell(60, 6, f"EFRF: {'ناجح' if f['efrf'] < EFRF_MAX else 'راسب'}", ln=True)
+        pdf.cell(60, 6, f"MCC: {'ناجح' if f['mcc_n'] <= MCC_MAX else 'راسب'}", ln=True)
         pdf.ln(4)
 
         if golden_solution is not None and golden_pred is not None:
             pdf.set_font("Arial", "B", 12)
-            pdf.cell(0, 8, "4. Golden Solution (NSGA-II)", ln=True)
+            pdf.cell(0, 8, "4. الحل الذهبي (NSGA-II)", ln=True)
             pdf.set_font("Arial", "", 10)
-            pdf.cell(60, 6, f"Optimized API: {golden_solution[0]:.1f}%", ln=True)
-            pdf.cell(60, 6, f"Optimized MCC: {golden_solution[1]:.1f}%", ln=True)
-            pdf.cell(60, 6, f"Optimized PVPP: {golden_solution[2]:.1f}%", ln=True)
-            pdf.cell(60, 6, f"Optimized Mg-St: {golden_solution[3]:.2f}%", ln=True)
-            pdf.cell(60, 6, f"Optimized Binder: {golden_solution[4]:.1f}%", ln=True)
-            pdf.cell(60, 6, f"Optimized Pressure: {golden_solution[5]:.1f} MPa", ln=True)
-            pdf.cell(60, 6, f"Optimized Speed: {golden_solution[6]:.1f} rpm", ln=True)
-            pdf.cell(60, 6, f"Optimized Granule: {golden_solution[7]:.0f} µm", ln=True)
-            pdf.cell(60, 6, f"Optimized Density: {golden_pred[0]:.3f}", ln=True)
-            pdf.cell(60, 6, f"Optimized Tensile: {golden_pred[1]:.3f} MPa", ln=True)
-            pdf.cell(60, 6, f"Optimized EFRF: {golden_pred[3]:.4f}", ln=True)
+            pdf.cell(60, 6, f"API: {golden_solution[0]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"MCC: {golden_solution[1]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"PVPP: {golden_solution[2]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"Mg-St: {golden_solution[3]:.2f}%", ln=True)
+            pdf.cell(60, 6, f"Binder: {golden_solution[4]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"الضغط: {golden_solution[5]:.1f} MPa", ln=True)
+            pdf.cell(60, 6, f"السرعة: {golden_solution[6]:.1f} rpm", ln=True)
+            pdf.cell(60, 6, f"الحبيبات: {golden_solution[7]:.0f} µm", ln=True)
+            pdf.cell(60, 6, f"الكثافة: {golden_pred[0]:.3f}", ln=True)
+            pdf.cell(60, 6, f"الشد: {golden_pred[1]:.3f} MPa", ln=True)
+            pdf.cell(60, 6, f"EFRF: {golden_pred[3]:.4f}", ln=True)
             pdf.ln(4)
 
         pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 8, "5. Model Performance Metrics", ln=True)
+        pdf.cell(0, 8, "5. أداء النماذج", ln=True)
         pdf.set_font("Arial", "", 10)
         pinn_r2_str = bench_df[bench_df['Model'] == 'PINN (Proposed)']['R2 (Test)'].values[0]
-        pdf.cell(0, 6, f"PINN (Proposed) R-squared: {pinn_r2_str}", ln=True)
+        pdf.cell(0, 6, f"PINN (المقترح) R-squared: {pinn_r2_str}", ln=True)
         if bench_df is not None:
             for _, row in bench_df.iterrows():
                 pdf.cell(0, 6, f"{row['Model']}: R2 = {row['R2 (Test)']} | RMSE = {row['RMSE (MPa)']} | MAE = {row['MAE (MPa)']}", ln=True)
@@ -786,9 +786,9 @@ def generate_pdf_report(formulation, pinn_r2, bench_df, golden_solution, golden_
 
         if fronts is not None and len(fronts) > 0:
             pdf.set_font("Arial", "B", 12)
-            pdf.cell(0, 8, "6. Multi-Objective Optimisation Summary (NSGA-II)", ln=True)
+            pdf.cell(0, 8, "6. ملخص التحسين متعدد الأهداف (NSGA-II)", ln=True)
             pdf.set_font("Arial", "", 10)
-            pdf.cell(0, 6, f"Pareto Optimal Solutions Found: {len(fronts[0])} solutions", ln=True)
+            pdf.cell(0, 6, f"عدد الحلول المثلى (باريتو): {len(fronts[0])} حل", ln=True)
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             pdf.output(tmp.name)
@@ -797,7 +797,7 @@ def generate_pdf_report(formulation, pinn_r2, bench_df, golden_solution, golden_
         return None, str(e)
 
 # ================================================================
-# Cached Training
+# التدريب المخبأ
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
 CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r2_final.pt')
@@ -815,11 +815,11 @@ def load_or_train():
             df = ckpt['df']
             return model, scaler, y_scaler, features, df
         except Exception as e:
-            st.warning(f"Cache load failed: {e}. Retraining...")
+            st.warning(f"فشل تحميل الذاكرة المؤقتة: {e}. جاري إعادة التدريب...")
             if os.path.exists(CHECKPOINT_PATH):
                 os.remove(CHECKPOINT_PATH)
 
-    st.caption("🔄 Training final model (15k samples, up to 800 epochs)...")
+    st.caption("🔄 جاري تدريب النموذج النهائي (15k عينة، حتى 800 دورة)...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%']].values
@@ -832,7 +832,7 @@ def load_or_train():
     X_train, X_test, X_raw_train, X_raw_test, y_train, y_test = train_test_split(
         X_scaled, X_raw, y_scaled, test_size=0.2, random_state=42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    st.caption(f"🖥️ Using device: {device}")
+    st.caption(f"🖥️ الجهاز المستخدم: {device}")
     model = MultiTaskPINN(input_dim, hidden=HIDDEN_SIZE).to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=30, factor=0.5)
@@ -865,7 +865,7 @@ def load_or_train():
                 val_pred = y_scaler.inverse_transform(val_pred_scaled)[:, 1]
                 val_true = y_scaler.inverse_transform(y_val_t.cpu().numpy())[:, 1]
                 val_r2 = r2_score(val_true, val_pred)
-                status_text.text(f"Epoch {epoch+1}/{ADAM_EPOCHS} - Val R²: {val_r2:.4f}")
+                status_text.text(f"الدورة {epoch+1}/{ADAM_EPOCHS} - R² للتحقق: {val_r2:.4f}")
                 if val_r2 > best_val_r2:
                     best_val_r2 = val_r2
                     patience_counter = 0
@@ -873,7 +873,7 @@ def load_or_train():
                 else:
                     patience_counter += 1
                     if patience_counter >= PATIENCE:
-                        st.info(f"Early stopping at epoch {epoch+1}")
+                        st.info(f"تم الإيقاف المبكر عند الدورة {epoch+1}")
                         break
 
         progress_bar.progress((epoch+1)/ADAM_EPOCHS)
@@ -881,7 +881,7 @@ def load_or_train():
     if os.path.exists(os.path.join(CACHE_DIR, 'best_model_final.pt')):
         model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_final.pt'), map_location=device))
     model.cpu()
-    st.success(f"✅ Best validation R²: {best_val_r2:.4f}")
+    st.success(f"✅ أفضل R² للتحقق: {best_val_r2:.4f}")
 
     checkpoint = {
         'model_state': model.state_dict(),
@@ -892,11 +892,11 @@ def load_or_train():
         'input_dim': input_dim
     }
     torch.save(checkpoint, CHECKPOINT_PATH)
-    st.success("✅ Model trained and cached successfully!")
+    st.success("✅ تم تدريب النموذج وتخزينه بنجاح!")
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# Streamlit UI
+# واجهة Streamlit
 # ================================================================
 st.set_page_config(page_title="Hubryd AI v29.27-R2", layout="wide")
 
@@ -922,17 +922,17 @@ with st.sidebar:
     """)
     st.caption("🔬 v29.27-R2 — Final")
 
-# Load model
+# تحميل النموذج
 try:
     model, scaler, y_scaler, features, df = load_or_train()
 except Exception as e:
-    st.error(f"❌ Training failed: {e}. Using dummy model.")
+    st.error(f"❌ فشل التدريب: {e}. جاري استخدام نموذج وهمي.")
     model = None
 
-# Get device from model
+# الجهاز
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# Main layout
+# تخطيط الواجهة
 col_left, col_right = st.columns([1, 1.2], gap="medium")
 
 with col_left:
@@ -948,9 +948,9 @@ with col_left:
             mcc = st.slider("MCC (%)", 0.0, MCC_MAX, st.session_state.mcc, 0.1, key="mcc_slider")
         total = api + binder + pvpp + mgst + mcc
         if abs(total-100) < 0.1:
-            st.success(f"✅ Total = {total:.2f}%")
+            st.success(f"✅ المجموع = {total:.2f}%")
         else:
-            st.warning(f"⚠️ Total = {total:.2f}% (should be 100%)")
+            st.warning(f"⚠️ المجموع = {total:.2f}% (يجب أن يساوي 100%)")
 
     st.markdown("### ⚙️ Process Parameters")
     with st.container(border=True):
@@ -977,7 +977,7 @@ with col_left:
         else:
             granule = st.session_state.get('granule', 125.0)
             granule_fixed = False
-            st.info("Granule size will be optimised by NSGA‑II (30–250 µm)")
+            st.info("سيتم تحسين حجم الحبيبات بواسطة NSGA-II (30–250 µm)")
             st.session_state.granule_mode = 'Variable'
 
     predict_btn = st.button("🔬 Predict & Optimise", use_container_width=True, type="primary")
@@ -987,7 +987,7 @@ with col_right:
 
     if predict_btn:
         if abs(total-100) > 0.1:
-            st.warning("Formulation must sum to 100%")
+            st.warning("يجب أن يساوي مجموع التركيبة 100%")
         else:
             api_n, binder_n, pvpp_n, mgst_n, mcc_n = normalize_components(api, binder, pvpp, mgst, mcc)
             if granule_fixed:
@@ -1009,21 +1009,21 @@ with col_right:
                 'density': density, 'tensile': tensile, 'er': er, 'efrf': efrf
             }
 
-            st.markdown("#### Constraints Status")
+            st.markdown("#### حالة القيود")
             col_metrics = st.columns(4)
-            col_metrics[0].metric("Density", f"{density:.3f}", "✅" if D_MIN <= density <= D_MAX else "❌")
-            col_metrics[1].metric("Tensile", f"{tensile:.2f} MPa", "✅" if tensile >= TENSILE_MIN else "❌")
+            col_metrics[0].metric("الكثافة", f"{density:.3f}", "✅" if D_MIN <= density <= D_MAX else "❌")
+            col_metrics[1].metric("الشد", f"{tensile:.2f} MPa", "✅" if tensile >= TENSILE_MIN else "❌")
             col_metrics[2].metric("EFRF", f"{efrf:.4f}", "✅" if efrf < EFRF_MAX else "❌")
             col_metrics[3].metric("MCC", f"{mcc_n:.1f}%", "✅" if mcc_n <= MCC_MAX else "❌")
 
             if all([D_MIN <= density <= D_MAX, tensile >= TENSILE_MIN, efrf < EFRF_MAX, mcc_n <= MCC_MAX]):
-                st.success("✅ All constraints satisfied!")
+                st.success("✅ جميع القيود مستوفاة!")
             else:
-                st.error("❌ Violates constraints")
+                st.error("❌ انتهاك القيود")
 
             bounds = np.array([[60,100],[0.1,20],[0.1,12],[0.01,3.0],[0.1,10],
                                [80,PRESSURE_MAX],[1,50],[30,250]])
-            with st.spinner(f"Running NSGA‑II (pop={NSGA_POP}, gen={NSGA_GENS})..."):
+            with st.spinner(f"تشغيل NSGA-II (عدد الأفراد={NSGA_POP}, الأجيال={NSGA_GENS})..."):
                 nsga = NSGAII(model, scaler, y_scaler, bounds,
                               pop=NSGA_POP, gens=NSGA_GENS,
                               granule_fixed=granule_fixed,
@@ -1059,12 +1059,12 @@ with col_right:
                     st.session_state.golden_solution = None
                     st.session_state.golden_pred = None
 
-            with st.spinner("Generating feasible region..."):
+            with st.spinner("توليد المنطقة الممكنة..."):
                 feasible_df = generate_feasible_points(model, scaler, y_scaler, n_samples=3000)
                 st.session_state.feasible_df = feasible_df
                 st.session_state.tested_point = (api_n, efrf)
 
-    # ---- Display cached results ----
+    # عرض النتائج المخزنة
     if st.session_state.run_optimized:
         pop = st.session_state.nsga_pop
         objectives = st.session_state.nsga_objectives
@@ -1074,43 +1074,43 @@ with col_right:
         feasible_df = st.session_state.feasible_df
         tested_point = st.session_state.tested_point
 
-        # Pareto
+        # باريتو
         show_pareto = st.session_state.get('show_pareto', True)
         if show_pareto:
             st.markdown("### 📉 Pareto Front")
             if len(fronts) > 0 and len(fronts[0]) > 0:
-                st.success(f"✅ Pareto front found: {len(fronts[0])} optimal solutions")
+                st.success(f"✅ تم إيجاد جبهة باريتو: {len(fronts[0])} حل")
                 fig = plot_pareto_clean(objectives, fronts, golden_solution, golden_pred,
                                         feasible_df, tested_point, EFRF_MAX)
                 if fig:
                     st.plotly_chart(fig, use_container_width=True)
                 if golden_solution is not None:
-                    st.markdown("#### ⭐ Golden Solution (Balanced)")
+                    st.markdown("#### ⭐ الحل الذهبي (المتوازن)")
                     colA, colB = st.columns(2)
                     with colA:
-                        st.write("**Formulation:**")
+                        st.write("**التركيبة:**")
                         st.write(f"API: {golden_solution[0]:.1f}%")
                         st.write(f"MCC: {golden_solution[1]:.1f}%")
                         st.write(f"PVPP: {golden_solution[2]:.1f}%")
                         st.write(f"Mg-St: {golden_solution[3]:.2f}%")
                         st.write(f"Binder: {golden_solution[4]:.1f}%")
                     with colB:
-                        st.write("**Process:**")
-                        st.write(f"Pressure: {golden_solution[5]:.1f} MPa")
-                        st.write(f"Speed: {golden_solution[6]:.1f} rpm")
-                        st.write(f"Granule: {golden_solution[7]:.0f} µm")
-                        st.write("**Predicted:**")
-                        st.write(f"Density: {golden_pred[0]:.3f}")
-                        st.write(f"Tensile: {golden_pred[1]:.3f} MPa")
+                        st.write("**العملية:**")
+                        st.write(f"الضغط: {golden_solution[5]:.1f} MPa")
+                        st.write(f"السرعة: {golden_solution[6]:.1f} rpm")
+                        st.write(f"الحبيبات: {golden_solution[7]:.0f} µm")
+                        st.write("**المتوقع:**")
+                        st.write(f"الكثافة: {golden_pred[0]:.3f}")
+                        st.write(f"الشد: {golden_pred[1]:.3f} MPa")
                         st.write(f"EFRF: {golden_pred[3]:.4f}")
                 else:
-                    st.info("No fully feasible solution found.")
+                    st.info("لم يتم العثور على حل ممكن ضمن القيود.")
             else:
-                st.warning("No Pareto front found.")
+                st.warning("لم يتم العثور على جبهة باريتو.")
 
-        # Knobs
+        # الأزرار الإضافية
         st.markdown("---")
-        st.markdown("**🔘 Toggle additional sections:**")
+        st.markdown("**🔘 تشغيل/إيقاف الأقسام الإضافية:**")
         knob_cols = st.columns(5)
         with knob_cols[0]:
             show_pareto = st.toggle("📉 Pareto", value=st.session_state.get('show_pareto', True),
@@ -1131,55 +1131,55 @@ with col_right:
         with knob_cols[4]:
             generate_report_btn = st.button("📄 Report", key="knob_report")
 
-        # Particle Effect
+        # تأثير حجم الحبيبات
         if show_particle:
             f = st.session_state.formulation
             if f['api_n'] is not None:
-                st.markdown("### 📊 Particle Size Effect with Pressure Variation")
+                st.markdown("### 📊 تأثير حجم الحبيبات مع تغير الضغط")
                 fig = plot_particle_pressure_density(f, model, scaler, y_scaler)
                 st.plotly_chart(fig, use_container_width=True)
 
-        # Sensitivity
+        # تحليل الحساسية
         if show_sensitivity:
             f = st.session_state.formulation
             if f['api_n'] is not None:
-                st.markdown("### 🔬 Sensitivity Analysis – Parameter Impact on EFRF")
+                st.markdown("### 🔬 تحليل الحساسية – تأثير المتغيرات على EFRF")
                 fig_bars = plot_sensitivity_bars(f, model, scaler, y_scaler, EFRF_MAX)
                 if fig_bars:
                     st.plotly_chart(fig_bars, use_container_width=True)
 
         # ================================================================
-        # 📊 Comparison Section (Fixed for Dimensional Alignment & Variance)
+        # 📊 قسم المقارنة (مع التصحيح النهائي للأبعاد)
         # ================================================================
         if show_comparison:
             st.markdown("### 📊 Comparison (Tensile R²)")
-            
-            # Retrieve data from the already loaded df and features
+
+            # استخراج البيانات من df والميزات
             X_raw_all = df[features].values
             y_raw_all = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%']].values
-            
-            # 1. Ensure clean, localized validation splitting
+
+            # تقسيم البيانات
             X_b_train, X_b_test, y_b_train, y_b_test = train_test_split(
                 X_raw_all, y_raw_all, test_size=0.2, random_state=42
             )
-            
-            # Transform inputs through the global pipeline scaler
+
+            # تحويل المدخلات
             X_b_train_scaled = scaler.transform(add_interaction_features(X_b_train))
             X_b_test_scaled = scaler.transform(add_interaction_features(X_b_test))
-            
-            # CRITICAL FIX: Isolate column index 1 (Tensile Strength in MPa) for true metrics
+
+            # عزل عمود مقاومة الشد (المؤشر 1)
             y_train_target = y_b_train[:, 1]
             y_test_target = y_b_test[:, 1]
 
-            # 2. Extract Real PINN Predictions
+            # تنبؤات PINN
             model.eval()
             with torch.no_grad():
                 pinn_input = torch.tensor(X_b_test_scaled, dtype=torch.float32).to(device)
-                # Model outputs 5 columns – slice only first 3 for inverse_transform
+                # المخرج يحتوي على 5 أعمدة – نأخذ أول 3 فقط
                 pinn_out_scaled = model(pinn_input).cpu().numpy()[:, :3]
                 pinn_pred = y_scaler.inverse_transform(pinn_out_scaled)[:, 1]
 
-            # 3. Train and Predict Baseline Models on Aligned Target
+            # النماذج الأساسية
             from sklearn.neural_network import MLPRegressor
             from sklearn.ensemble import RandomForestRegressor
 
@@ -1191,14 +1191,14 @@ with col_right:
             rf_mod.fit(X_b_train_scaled, y_train_target)
             rf_pred = rf_mod.predict(X_b_test_scaled)
 
-            # Build prediction tracking registry
+            # سجل النماذج
             models_registry = {
                 'PINN (Proposed)': (pinn_pred, 'Enforced'),
                 'MLP (Baseline)': (mlp_pred, 'Not enforced'),
                 'Random Forest': (rf_pred, 'Not enforced')
             }
 
-            # Optional XGBoost integration with automated environment safeguard
+            # XGBoost (اختياري)
             try:
                 from xgboost import XGBRegressor
                 xgb_mod = XGBRegressor(n_estimators=100, learning_rate=0.05, random_state=42, n_jobs=-1)
@@ -1206,34 +1206,32 @@ with col_right:
                 xgb_pred = xgb_mod.predict(X_b_test_scaled)
                 models_registry['XGBoost'] = (xgb_pred, 'Not enforced')
             except ImportError:
-                # If XGBoost package is missing on host, map highly correlated baseline variants
+                # محاكاة قيم قريبة من Random Forest
                 xgb_pred = rf_pred * 0.995 + np.random.normal(0, 0.01, size=len(rf_pred))
                 models_registry['XGBoost'] = (xgb_pred, 'Not enforced')
 
-            # 4. Statistical Bootstrapping Loop for Real Uncertainty Estimation (+/-)
+            # دالة حساب المتوسط والانحراف المعياري بواسطة Bootstrap
             def compute_metrics_with_variance(y_true, y_pred, n_bootstraps=15):
                 np.random.seed(42)
                 r2_scores, rmse_scores, mae_scores = [], [], []
-                
                 for _ in range(n_bootstraps):
                     indices = np.random.choice(len(y_true), len(y_true), replace=True)
                     r2_scores.append(r2_score(y_true[indices], y_pred[indices]))
                     rmse_scores.append(np.sqrt(mean_squared_error(y_true[indices], y_pred[indices])))
                     mae_scores.append(mean_absolute_error(y_true[indices], y_pred[indices]))
-                    
                 return (
                     np.mean(r2_scores), np.std(r2_scores),
                     np.mean(rmse_scores), np.std(rmse_scores),
                     np.mean(mae_scores), np.std(mae_scores)
                 )
 
-            # 5. Compile Results into Publication Format
+            # تجميع النتائج
             table_rows = []
             chart_data = []
 
             for name, (preds, consistency) in models_registry.items():
                 r2_m, r2_s, rmse_m, rmse_s, mae_m, mae_s = compute_metrics_with_variance(y_test_target, preds)
-                
+
                 table_rows.append({
                     'Model': name,
                     'R2 (Test)': f"{r2_m:.2f} +/- {r2_s:.2f}",
@@ -1241,36 +1239,36 @@ with col_right:
                     'MAE (MPa)': f"{mae_m:.2f} +/- {mae_s:.2f}",
                     'Physical Consistency': consistency
                 })
-                
+
                 chart_data.append({'Model': name, 'R² Score': r2_m})
 
             bench_df = pd.DataFrame(table_rows)
             st.session_state.benchmark_df = bench_df
-            
-            # Display interactive Plotly visualization
+
+            # عرض الرسم البياني
             fig_bar = px.bar(pd.DataFrame(chart_data), x='Model', y='R² Score', color='Model',
-                             title='Real R² Comparison (Tensile Strength Channel)',
+                             title='مقارنة R² الحقيقية (قناة مقاومة الشد)',
                              text=pd.DataFrame(chart_data)['R² Score'].round(3))
             fig_bar.update_layout(height=380, template='plotly_white')
             st.plotly_chart(fig_bar, use_container_width=True)
 
-            # Render final clean comparison table
+            # عرض الجدول النهائي
             st.dataframe(bench_df, use_container_width=True)
 
-        # Report – PDF only
+        # توليد تقرير PDF
         if generate_report_btn and st.session_state.benchmark_df is not None:
             f = st.session_state.formulation
             timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             bench_df = st.session_state.benchmark_df
             filepath, error = generate_pdf_report(f, None, bench_df, golden_solution, golden_pred, fronts, timestamp)
             if error:
-                st.error(f"PDF generation failed: {error}")
+                st.error(f"فشل إنشاء PDF: {error}")
                 if not FPDF_AVAILABLE:
-                    st.info("Please install fpdf2: `pip install fpdf2`")
+                    st.info("يرجى تثبيت fpdf2: `pip install fpdf2`")
             else:
                 with open(filepath, "rb") as pdf_file:
                     st.download_button(
-                        label="📥 Download PDF Report",
+                        label="📥 تحميل التقرير PDF",
                         data=pdf_file,
                         file_name=f"hubryd_report_{timestamp[:10]}.pdf",
                         mime="application/pdf"
@@ -1281,6 +1279,6 @@ with col_right:
                     pass
 
     else:
-        st.info("Adjust sliders and click 'Predict & Optimise' to see results.")
+        st.info("قم بتعديل المنزلقات واضغط على 'Predict & Optimise' لعرض النتائج.")
 
 st.caption("📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Sudan")
