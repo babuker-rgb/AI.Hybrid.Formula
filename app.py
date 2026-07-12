@@ -1,10 +1,10 @@
 """
-Hubryd AI – v29.27-R2 (Final)
+Hubryd AI – v29.27-R2 (Enhanced with 3 Golden Solutions)
 - PINN outputs raw scaled values (R² > 0.95)
 - Bootstrapped benchmarking with mean ± std
-- Correctly isolated Tensile Strength column
-- Fixed inverse_transform shape mismatch
-- All knobs and plots functional
+- Three Pareto-optimal solutions: Balanced, Quality, Cost
+- Enhanced NSGA-II: pop=80, gen=50
+- PDF report without "R²" in title
 Nile Valley University · Sudan
 """
 
@@ -45,15 +45,16 @@ BINDER_MIN = 0.5
 BINDER_MAX = 5.0
 
 # ================================================================
-# Training Parameters
+# Training Parameters – ENHANCED NSGA-II
 # ================================================================
 N_SAMPLES = 15000
 ADAM_EPOCHS = 800
 PATIENCE = 80
-NSGA_POP = 40
-NSGA_GENS = 30
+NSGA_POP = 80          # Increased for 80 Pareto solutions
+NSGA_GENS = 50          # Increased generations for convergence
 HIDDEN_SIZE = 256
 
+# Loss weights
 W_DENSITY = 1.0
 W_TENSILE = 500.0
 W_ER = 5.0
@@ -81,8 +82,12 @@ if 'api' not in st.session_state:
         'nsga_pop': None,
         'nsga_objectives': None,
         'nsga_fronts': None,
-        'golden_solution': None,
-        'golden_pred': None,
+        'balanced_solution': None,
+        'quality_solution': None,
+        'cost_solution': None,
+        'balanced_pred': None,
+        'quality_pred': None,
+        'cost_pred': None,
         'run_optimized': False,
         'formulation': {
             'api_n': None, 'binder_n': None, 'pvpp_n': None,
@@ -97,7 +102,7 @@ if 'api' not in st.session_state:
     })
 
 # ================================================================
-# Helper Functions
+# Helper Functions (unchanged)
 # ================================================================
 def normalize_components(api, binder, pvpp, mgst, mcc):
     api = np.clip(api, 60, 100)
@@ -223,7 +228,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# PINN Model (FIXED: raw scaled outputs)
+# PINN Model (raw scaled outputs)
 # ================================================================
 class Mish(nn.Module):
     def forward(self, x):
@@ -252,6 +257,7 @@ class MultiTaskPINN(nn.Module):
         self.input_layer = nn.Sequential(nn.Linear(input_dim, hidden), Mish())
         self.res1 = ResidualBlock(hidden)
         self.res2 = ResidualBlock(hidden)
+        self.res3 = ResidualBlock(hidden)
         self.transition = nn.Sequential(nn.Linear(hidden, hidden//2), nn.Tanh())
         self.output = nn.Linear(hidden//2, 5)   # density, tensile, ER, k, A
 
@@ -259,9 +265,9 @@ class MultiTaskPINN(nn.Module):
         x = self.input_layer(X)
         x = self.res1(x)
         x = self.res2(x)
+        x = self.res3(x)
         x = self.transition(x)
         raw = self.output(x)
-        # Predict values directly in the scaled domain for high convergence stability
         density = raw[:, 0:1]
         tensile = raw[:, 1:2]
         er = raw[:, 2:3]
@@ -290,13 +296,13 @@ class MultiTaskPINN(nn.Module):
         k_pred = y_pred[:, 3:4]
         A_pred = y_pred[:, 4:5]
 
-        # Standard MSE on the scaled domain
+        # Standard MSE on scaled domain
         loss_dens = nn.MSELoss()(density_pred, y_true[:, 0:1])
         loss_tensile = nn.MSELoss()(tensile_pred, y_true[:, 1:2])
         loss_er = nn.MSELoss()(er_pred, y_true[:, 2:3])
         data_loss = W_DENSITY * loss_dens + W_TENSILE * loss_tensile + W_ER * loss_er
 
-        # Unscale variables exclusively to apply real physical constraints
+        # Unscale variables to apply real physical constraints
         scale_dens, mean_dens = y_scaler.scale_[0], y_scaler.mean_[0]
         scale_tensile, mean_tensile = y_scaler.scale_[1], y_scaler.mean_[1]
         scale_er, mean_er = y_scaler.scale_[2], y_scaler.mean_[2]
@@ -305,26 +311,51 @@ class MultiTaskPINN(nn.Module):
         tensile_real = tensile_pred * scale_tensile + mean_tensile
         er_real = er_pred * scale_er + mean_er
 
-        # Heckel physical relationship
+        # Heckel
         heckel_lhs = torch.log(1.0 / torch.clamp(1.0 - density_real, min=1e-4))
         heckel_rhs = k_pred * pressure + A_pred
         heckel_loss = nn.MSELoss()(heckel_lhs, heckel_rhs)
 
-        # EFRF real unit constraint
+        # EFRF
         efrf_real = er_real / torch.clamp(tensile_real, min=1e-4)
         efrf_penalty = torch.mean(torch.relu(efrf_real - EFRF_MAX) ** 2) * W_EFRF_PENALTY
 
         mcc_penalty = torch.mean(torch.relu(mcc - MCC_MAX) ** 2) * 0.3
         density_penalty = torch.mean(torch.relu(density_real - D_MAX) ** 2 + torch.relu(D_MIN - density_real) ** 2) * 0.5
 
+        # Monotonicity (simplified)
+        monotonicity_loss = 0.0
+        if epoch % 10 == 0:
+            pressure_scaled = X_scaled[:, 5:6].detach().clone().requires_grad_(True)
+            X_scaled_ = X_scaled.detach().clone()
+            X_scaled_[:, 5:6] = pressure_scaled
+            y_pred_ = self.forward(X_scaled_)
+            d_pred = y_pred_[:, 0:1]
+            t_pred = y_pred_[:, 1:2]
+            grad_d = torch.autograd.grad(outputs=d_pred, inputs=pressure_scaled,
+                                         grad_outputs=torch.ones_like(d_pred),
+                                         create_graph=True, retain_graph=True)[0]
+            grad_t = torch.autograd.grad(outputs=t_pred, inputs=pressure_scaled,
+                                         grad_outputs=torch.ones_like(t_pred),
+                                         create_graph=True, retain_graph=True)[0]
+            mon_d = torch.mean(torch.relu(-grad_d) ** 2)
+            mon_t = torch.mean(torch.relu(-grad_t) ** 2)
+            monotonicity_loss = 0.5 * (mon_d + mon_t) * W_PHYSICS
+
         physics_loss = W_PHYSICS * (heckel_loss + efrf_penalty) + mcc_penalty + density_penalty
-        return data_loss + physics_loss
+
+        progress = epoch / total_epochs
+        phys_weight = 2.0 / (1 + np.exp(-10 * (progress - 0.5)))
+        phys_weight = max(0.1, phys_weight)
+
+        total_loss = data_loss + phys_weight * (physics_loss + monotonicity_loss)
+        return total_loss
 
 # ================================================================
-# NSGA-II (unchanged)
+# NSGA-II (with enhanced pop/gens)
 # ================================================================
 class NSGAII:
-    def __init__(self, model, scaler, y_scaler, bounds, pop=40, gens=30, granule_fixed=True, granule_fixed_val=125.0):
+    def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS, granule_fixed=True, granule_fixed_val=125.0):
         self.model = model
         self.scaler = scaler
         self.y_scaler = y_scaler
@@ -514,7 +545,7 @@ class NSGAII:
         return pop, objectives, fronts
 
 # ================================================================
-# Prediction and Plotting Helpers
+# Prediction and Plotting Helpers (unchanged)
 # ================================================================
 def predict_pinn(model, scaler, y_scaler, inputs):
     try:
@@ -586,7 +617,7 @@ def plot_pareto_clean(objectives, fronts, golden_solution=None, golden_pred=None
             x=[golden_solution[0]],
             y=[golden_pred[2] / golden_pred[1]],
             mode='markers',
-            name='⭐ Golden Solution',
+            name='⭐ Golden Solution (Balanced)',
             marker=dict(size=14, color='gold', symbol='star', line=dict(width=2, color='black')),
             hovertemplate='Golden: API %{x:.1f}%, EFRF %{y:.4f}<extra></extra>'
         ))
@@ -711,84 +742,128 @@ def plot_particle_pressure_density(formulation, model, scaler, y_scaler):
     return fig
 
 # ================================================================
-# PDF Report (simplified)
+# PDF Report (without "R²" in title)
 # ================================================================
-def generate_pdf_report(formulation, pinn_r2, bench_df, golden_solution, golden_pred, fronts, timestamp):
+def generate_pdf_report(formulation, bench_df, balanced_sol, balanced_pred,
+                        quality_sol, quality_pred, cost_sol, cost_pred, fronts, timestamp):
     if not FPDF_AVAILABLE:
         return None, "fpdf2 is not installed. Please install it with: pip install fpdf2"
     try:
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Arial", "B", 16)
-        pdf.cell(0, 10, "Hubryd AI v29.27-R2 Report", ln=True, align='C')
+        # Title without "R²"
+        pdf.cell(0, 10, "تقرير تحسين تركيبة الأقراص – Hubryd AI v29.27-R2", ln=True, align='C')
         pdf.set_font("Arial", "I", 10)
-        pdf.cell(0, 6, f"Generated: {timestamp}", ln=True, align='C')
+        pdf.cell(0, 6, f"تم الإنشاء: {timestamp}", ln=True, align='C')
         pdf.ln(4)
 
         f = formulation
         pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 8, "1. Formulation Parameters", ln=True)
+        pdf.cell(0, 8, "1. معاملات التركيبة الحالية", ln=True)
         pdf.set_font("Arial", "", 10)
         pdf.cell(60, 6, f"API: {f['api_n']:.1f}%", ln=True)
         pdf.cell(60, 6, f"MCC: {f['mcc_n']:.1f}%", ln=True)
         pdf.cell(60, 6, f"PVPP: {f['pvpp_n']:.1f}%", ln=True)
         pdf.cell(60, 6, f"Mg-St: {f['mgst_n']:.2f}%", ln=True)
         pdf.cell(60, 6, f"Binder: {f['binder_n']:.1f}%", ln=True)
-        pdf.cell(60, 6, f"Pressure: {f['pressure']:.1f} MPa", ln=True)
-        pdf.cell(60, 6, f"Speed: {f['speed']:.1f} rpm", ln=True)
-        pdf.cell(60, 6, f"Granule: {f['granule_use']:.0f} µm", ln=True)
+        pdf.cell(60, 6, f"الضغط: {f['pressure']:.1f} MPa", ln=True)
+        pdf.cell(60, 6, f"السرعة: {f['speed']:.1f} rpm", ln=True)
+        pdf.cell(60, 6, f"الحبيبات: {f['granule_use']:.0f} µm", ln=True)
         pdf.ln(4)
 
         pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 8, "2. Predicted Properties", ln=True)
+        pdf.cell(0, 8, "2. الخصائص المتوقعة للتركيبة الحالية", ln=True)
         pdf.set_font("Arial", "", 10)
-        pdf.cell(60, 6, f"Density: {f['density']:.3f}", ln=True)
-        pdf.cell(60, 6, f"Tensile Strength: {f['tensile']:.2f} MPa", ln=True)
+        pdf.cell(60, 6, f"الكثافة: {f['density']:.3f}", ln=True)
+        pdf.cell(60, 6, f"مقاومة الشد: {f['tensile']:.2f} MPa", ln=True)
         pdf.cell(60, 6, f"EFRF: {f['efrf']:.4f}", ln=True)
-        pdf.cell(60, 6, f"Elastic Recovery: {f['er']:.4f}", ln=True)
+        pdf.cell(60, 6, f"الاسترجاع المرن: {f['er']:.4f}", ln=True)
         pdf.ln(4)
 
         pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 8, "3. Constraints Status", ln=True)
+        pdf.cell(0, 8, "3. حالة القيود", ln=True)
         pdf.set_font("Arial", "", 10)
-        pdf.cell(60, 6, f"Density Status: {'PASS' if D_MIN <= f['density'] <= D_MAX else 'FAIL'}", ln=True)
-        pdf.cell(60, 6, f"Tensile Status: {'PASS' if f['tensile'] >= TENSILE_MIN else 'FAIL'}", ln=True)
-        pdf.cell(60, 6, f"EFRF Status: {'PASS' if f['efrf'] < EFRF_MAX else 'FAIL'}", ln=True)
-        pdf.cell(60, 6, f"MCC Status: {'PASS' if f['mcc_n'] <= MCC_MAX else 'FAIL'}", ln=True)
+        pdf.cell(60, 6, f"الكثافة: {'ناجح' if D_MIN <= f['density'] <= D_MAX else 'راسب'}", ln=True)
+        pdf.cell(60, 6, f"الشد: {'ناجح' if f['tensile'] >= TENSILE_MIN else 'راسب'}", ln=True)
+        pdf.cell(60, 6, f"EFRF: {'ناجح' if f['efrf'] < EFRF_MAX else 'راسب'}", ln=True)
+        pdf.cell(60, 6, f"MCC: {'ناجح' if f['mcc_n'] <= MCC_MAX else 'راسب'}", ln=True)
         pdf.ln(4)
 
-        if golden_solution is not None and golden_pred is not None:
-            pdf.set_font("Arial", "B", 12)
-            pdf.cell(0, 8, "4. Golden Solution (NSGA-II)", ln=True)
-            pdf.set_font("Arial", "", 10)
-            pdf.cell(60, 6, f"Optimized API: {golden_solution[0]:.1f}%", ln=True)
-            pdf.cell(60, 6, f"Optimized MCC: {golden_solution[1]:.1f}%", ln=True)
-            pdf.cell(60, 6, f"Optimized PVPP: {golden_solution[2]:.1f}%", ln=True)
-            pdf.cell(60, 6, f"Optimized Mg-St: {golden_solution[3]:.2f}%", ln=True)
-            pdf.cell(60, 6, f"Optimized Binder: {golden_solution[4]:.1f}%", ln=True)
-            pdf.cell(60, 6, f"Optimized Pressure: {golden_solution[5]:.1f} MPa", ln=True)
-            pdf.cell(60, 6, f"Optimized Speed: {golden_solution[6]:.1f} rpm", ln=True)
-            pdf.cell(60, 6, f"Optimized Granule: {golden_solution[7]:.0f} µm", ln=True)
-            pdf.cell(60, 6, f"Optimized Density: {golden_pred[0]:.3f}", ln=True)
-            pdf.cell(60, 6, f"Optimized Tensile: {golden_pred[1]:.3f} MPa", ln=True)
-            pdf.cell(60, 6, f"Optimized EFRF: {golden_pred[3]:.4f}", ln=True)
-            pdf.ln(4)
-
+        # Three golden solutions
         pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 8, "5. Model Performance Metrics", ln=True)
+        pdf.cell(0, 8, "4. الحلول الذهبية المقترحة (من جبهة باريتو)", ln=True)
+        pdf.set_font("Arial", "B", 11)
+        pdf.cell(0, 6, "أ. الحل المتوازن (الذهبي)", ln=True)
         pdf.set_font("Arial", "", 10)
-        pinn_r2_str = bench_df[bench_df['Model'] == 'PINN (Proposed)']['R2 (Test)'].values[0]
-        pdf.cell(0, 6, f"PINN (Proposed) R-squared: {pinn_r2_str}", ln=True)
+        if balanced_sol is not None and balanced_pred is not None:
+            pdf.cell(60, 6, f"API: {balanced_sol[0]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"MCC: {balanced_sol[1]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"PVPP: {balanced_sol[2]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"Mg-St: {balanced_sol[3]:.2f}%", ln=True)
+            pdf.cell(60, 6, f"Binder: {balanced_sol[4]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"الضغط: {balanced_sol[5]:.1f} MPa", ln=True)
+            pdf.cell(60, 6, f"السرعة: {balanced_sol[6]:.1f} rpm", ln=True)
+            pdf.cell(60, 6, f"الحبيبات: {balanced_sol[7]:.0f} µm", ln=True)
+            pdf.cell(60, 6, f"الكثافة: {balanced_pred[0]:.3f}", ln=True)
+            pdf.cell(60, 6, f"الشد: {balanced_pred[1]:.3f} MPa", ln=True)
+            pdf.cell(60, 6, f"EFRF: {balanced_pred[3]:.4f}", ln=True)
+        pdf.ln(2)
+        pdf.set_font("Arial", "B", 11)
+        pdf.cell(0, 6, "ب. الحل الأمثل جودة (أعلى شد)", ln=True)
+        pdf.set_font("Arial", "", 10)
+        if quality_sol is not None and quality_pred is not None:
+            pdf.cell(60, 6, f"API: {quality_sol[0]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"MCC: {quality_sol[1]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"PVPP: {quality_sol[2]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"Mg-St: {quality_sol[3]:.2f}%", ln=True)
+            pdf.cell(60, 6, f"Binder: {quality_sol[4]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"الضغط: {quality_sol[5]:.1f} MPa", ln=True)
+            pdf.cell(60, 6, f"السرعة: {quality_sol[6]:.1f} rpm", ln=True)
+            pdf.cell(60, 6, f"الحبيبات: {quality_sol[7]:.0f} µm", ln=True)
+            pdf.cell(60, 6, f"الكثافة: {quality_pred[0]:.3f}", ln=True)
+            pdf.cell(60, 6, f"الشد: {quality_pred[1]:.3f} MPa", ln=True)
+            pdf.cell(60, 6, f"EFRF: {quality_pred[3]:.4f}", ln=True)
+        pdf.ln(2)
+        pdf.set_font("Arial", "B", 11)
+        pdf.cell(0, 6, "ج. الحل الأمثل تكلفة (أعلى API وأقل ضغط)", ln=True)
+        pdf.set_font("Arial", "", 10)
+        if cost_sol is not None and cost_pred is not None:
+            pdf.cell(60, 6, f"API: {cost_sol[0]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"MCC: {cost_sol[1]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"PVPP: {cost_sol[2]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"Mg-St: {cost_sol[3]:.2f}%", ln=True)
+            pdf.cell(60, 6, f"Binder: {cost_sol[4]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"الضغط: {cost_sol[5]:.1f} MPa", ln=True)
+            pdf.cell(60, 6, f"السرعة: {cost_sol[6]:.1f} rpm", ln=True)
+            pdf.cell(60, 6, f"الحبيبات: {cost_sol[7]:.0f} µm", ln=True)
+            pdf.cell(60, 6, f"الكثافة: {cost_pred[0]:.3f}", ln=True)
+            pdf.cell(60, 6, f"الشد: {cost_pred[1]:.3f} MPa", ln=True)
+            pdf.cell(60, 6, f"EFRF: {cost_pred[3]:.4f}", ln=True)
+        pdf.ln(4)
+
+        # Model comparison (without R² in header)
         if bench_df is not None:
+            pdf.set_font("Arial", "B", 12)
+            pdf.cell(0, 8, "5. مقارنة أداء النماذج", ln=True)
+            pdf.set_font("Arial", "", 10)
+            pdf.cell(50, 6, "النموذج", border=1)
+            pdf.cell(35, 6, "R² (اختبار)", border=1)
+            pdf.cell(35, 6, "RMSE (MPa)", border=1)
+            pdf.cell(35, 6, "MAE (MPa)", border=1, ln=True)
+            pdf.set_font("Arial", "", 8)
             for _, row in bench_df.iterrows():
-                pdf.cell(0, 6, f"{row['Model']}: R2 = {row['R2 (Test)']} | RMSE = {row['RMSE (MPa)']} | MAE = {row['MAE (MPa)']}", ln=True)
+                pdf.cell(50, 6, row['Model'], border=1)
+                pdf.cell(35, 6, row['R2 (Test)'], border=1)
+                pdf.cell(35, 6, row['RMSE (MPa)'], border=1)
+                pdf.cell(35, 6, row['MAE (MPa)'], border=1, ln=True)
         pdf.ln(4)
 
         if fronts is not None and len(fronts) > 0:
             pdf.set_font("Arial", "B", 12)
-            pdf.cell(0, 8, "6. Multi-Objective Optimisation Summary (NSGA-II)", ln=True)
+            pdf.cell(0, 8, "6. ملخص التحسين متعدد الأهداف (NSGA-II)", ln=True)
             pdf.set_font("Arial", "", 10)
-            pdf.cell(0, 6, f"Pareto Optimal Solutions Found: {len(fronts[0])} solutions", ln=True)
+            pdf.cell(0, 6, f"عدد الحلول المثلى (باريتو): {len(fronts[0])} حل", ln=True)
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             pdf.output(tmp.name)
@@ -800,7 +875,7 @@ def generate_pdf_report(formulation, pinn_r2, bench_df, golden_solution, golden_
 # Cached Training
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r2_final.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r2_enhanced.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -819,7 +894,7 @@ def load_or_train():
             if os.path.exists(CHECKPOINT_PATH):
                 os.remove(CHECKPOINT_PATH)
 
-    st.caption("🔄 Training final model (15k samples, up to 800 epochs)...")
+    st.caption("🔄 Training enhanced model (15k samples, up to 800 epochs)...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%']].values
@@ -869,7 +944,7 @@ def load_or_train():
                 if val_r2 > best_val_r2:
                     best_val_r2 = val_r2
                     patience_counter = 0
-                    torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_model_final.pt'))
+                    torch.save(model.state_dict(), os.path.join(CACHE_DIR, 'best_model_enhanced.pt'))
                 else:
                     patience_counter += 1
                     if patience_counter >= PATIENCE:
@@ -878,8 +953,8 @@ def load_or_train():
 
         progress_bar.progress((epoch+1)/ADAM_EPOCHS)
 
-    if os.path.exists(os.path.join(CACHE_DIR, 'best_model_final.pt')):
-        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_final.pt'), map_location=device))
+    if os.path.exists(os.path.join(CACHE_DIR, 'best_model_enhanced.pt')):
+        model.load_state_dict(torch.load(os.path.join(CACHE_DIR, 'best_model_enhanced.pt'), map_location=device))
     model.cpu()
     st.success(f"✅ Best validation R²: {best_val_r2:.4f}")
 
@@ -898,29 +973,29 @@ def load_or_train():
 # ================================================================
 # Streamlit UI
 # ================================================================
-st.set_page_config(page_title="Hubryd AI v29.27-R2", layout="wide")
+st.set_page_config(page_title="Hubryd AI v29.27-R2 Enhanced", layout="wide")
 
 st.markdown("""
 <div style="background: linear-gradient(135deg, #0b1a33, #1a2a4a, #0f3460); padding:1.5rem; border-radius:1rem; text-align:center; margin-bottom:1rem;">
     <h1 style="color:#fff; margin:0;">🧬 Hybrid AI Multi-Objective Optimisation – v29.27</h1>
-    <p style="color:#64ffda; margin:0;">Enhanced R² · Clean Pareto · Golden star</p>
+    <p style="color:#64ffda; margin:0;">Enhanced R² · 3 Golden Solutions · NSGA-II Pop=80, Gen=50</p>
     <p style="color:#8899aa; font-size:0.9rem;">Nile Valley University · Sudan</p>
 </div>
 """, unsafe_allow_html=True)
 
 with st.sidebar:
     st.markdown("### 📚 Physics Constraints (v29.18)")
-    st.markdown("""
+    st.markdown(f"""
     ✅ Heckel: ln(1/(1-D)) = kP + A  
     ✅ EFRF: ER / σt < 0.40  
     ✅ Density: 0.40 ≤ D ≤ 0.97  
     ✅ MCC: ≤ 8.0%  
-    ✅ Samples: 15000  
-    ✅ Epochs: 800  
-    ✅ NSGA‑II: Pop=40, Gen=30  
-    ✅ Network: 256 Neurons
+    ✅ Samples: {N_SAMPLES}  
+    ✅ Epochs: {ADAM_EPOCHS}  
+    ✅ NSGA‑II: Pop={NSGA_POP}, Gen={NSGA_GENS}  
+    ✅ Network: {HIDDEN_SIZE} Neurons
     """)
-    st.caption("🔬 v29.27-R2 — Final")
+    st.caption("🔬 v29.27-R2 — Enhanced")
 
 # Load model
 try:
@@ -929,8 +1004,9 @@ except Exception as e:
     st.error(f"❌ Training failed: {e}. Using dummy model.")
     model = None
 
-# Get device from model
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+if model is not None:
+    device = next(model.parameters()).device
 
 # Main layout
 col_left, col_right = st.columns([1, 1.2], gap="medium")
@@ -1035,9 +1111,15 @@ with col_right:
             st.session_state.nsga_fronts = fronts
             st.session_state.run_optimized = True
 
-            best_idx = None
+            # ---------- Extract 3 Golden Solutions ----------
+            balanced_idx = None
+            quality_idx = None
+            cost_idx = None
+
             if len(fronts) > 0 and len(fronts[0]) > 0:
                 front_indices = fronts[0]
+
+                # 1. Balanced (closest to ideal: max API, min EFRF)
                 max_api = max(-objectives[i, 0] for i in front_indices)
                 min_efrf = min(objectives[i, 1] for i in front_indices)
                 best_dist = np.inf
@@ -1049,15 +1131,44 @@ with col_right:
                     dist = np.sqrt(norm_api**2 + norm_efrf**2)
                     if dist < best_dist:
                         best_dist = dist
-                        best_idx = idx
-                if best_idx is not None:
-                    golden = pop[best_idx]
-                    d2, t2, e2, ef2 = predict_pinn(model, scaler, y_scaler, golden)
-                    st.session_state.golden_solution = golden
-                    st.session_state.golden_pred = (d2, t2, e2, ef2)
-                else:
-                    st.session_state.golden_solution = None
-                    st.session_state.golden_pred = None
+                        balanced_idx = idx
+
+                # 2. Quality (highest tensile)
+                best_tensile = -np.inf
+                for idx in front_indices:
+                    ind = pop[idx]
+                    d2, t2, e2, ef2 = predict_pinn(model, scaler, y_scaler, ind)
+                    if t2 > best_tensile:
+                        best_tensile = t2
+                        quality_idx = idx
+
+                # 3. Cost (highest API - weight * pressure)
+                best_cost_score = -np.inf
+                for idx in front_indices:
+                    ind = pop[idx]
+                    api_val = ind[0]
+                    pressure_val = ind[5]
+                    cost_score = api_val - 0.05 * pressure_val
+                    if cost_score > best_cost_score:
+                        best_cost_score = cost_score
+                        cost_idx = idx
+
+                # Store solutions
+                if balanced_idx is not None:
+                    bal_sol = pop[balanced_idx]
+                    d2, t2, e2, ef2 = predict_pinn(model, scaler, y_scaler, bal_sol)
+                    st.session_state.balanced_solution = bal_sol
+                    st.session_state.balanced_pred = (d2, t2, e2, ef2)
+                if quality_idx is not None:
+                    qual_sol = pop[quality_idx]
+                    d2, t2, e2, ef2 = predict_pinn(model, scaler, y_scaler, qual_sol)
+                    st.session_state.quality_solution = qual_sol
+                    st.session_state.quality_pred = (d2, t2, e2, ef2)
+                if cost_idx is not None:
+                    cost_sol = pop[cost_idx]
+                    d2, t2, e2, ef2 = predict_pinn(model, scaler, y_scaler, cost_sol)
+                    st.session_state.cost_solution = cost_sol
+                    st.session_state.cost_pred = (d2, t2, e2, ef2)
 
             with st.spinner("Generating feasible region..."):
                 feasible_df = generate_feasible_points(model, scaler, y_scaler, n_samples=3000)
@@ -1069,8 +1180,6 @@ with col_right:
         pop = st.session_state.nsga_pop
         objectives = st.session_state.nsga_objectives
         fronts = st.session_state.nsga_fronts
-        golden_solution = st.session_state.golden_solution
-        golden_pred = st.session_state.golden_pred
         feasible_df = st.session_state.feasible_df
         tested_point = st.session_state.tested_point
 
@@ -1080,33 +1189,77 @@ with col_right:
             st.markdown("### 📉 Pareto Front")
             if len(fronts) > 0 and len(fronts[0]) > 0:
                 st.success(f"✅ Pareto front found: {len(fronts[0])} optimal solutions")
-                fig = plot_pareto_clean(objectives, fronts, golden_solution, golden_pred,
+                fig = plot_pareto_clean(objectives, fronts,
+                                        st.session_state.balanced_solution,
+                                        st.session_state.balanced_pred,
                                         feasible_df, tested_point, EFRF_MAX)
                 if fig:
                     st.plotly_chart(fig, use_container_width=True)
-                if golden_solution is not None:
-                    st.markdown("#### ⭐ Golden Solution (Balanced)")
-                    colA, colB = st.columns(2)
-                    with colA:
-                        st.write("**Formulation:**")
-                        st.write(f"API: {golden_solution[0]:.1f}%")
-                        st.write(f"MCC: {golden_solution[1]:.1f}%")
-                        st.write(f"PVPP: {golden_solution[2]:.1f}%")
-                        st.write(f"Mg-St: {golden_solution[3]:.2f}%")
-                        st.write(f"Binder: {golden_solution[4]:.1f}%")
-                    with colB:
-                        st.write("**Process:**")
-                        st.write(f"Pressure: {golden_solution[5]:.1f} MPa")
-                        st.write(f"Speed: {golden_solution[6]:.1f} rpm")
-                        st.write(f"Granule: {golden_solution[7]:.0f} µm")
-                        st.write("**Predicted:**")
-                        st.write(f"Density: {golden_pred[0]:.3f}")
-                        st.write(f"Tensile: {golden_pred[1]:.3f} MPa")
-                        st.write(f"EFRF: {golden_pred[3]:.4f}")
-                else:
-                    st.info("No fully feasible solution found.")
             else:
                 st.warning("No Pareto front found.")
+
+        # Display 3 Golden Solutions
+        st.markdown("---")
+        st.markdown("### ⭐ الحلول الذهبية المقترحة")
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.markdown("#### 🟡 المتوازن (الذهبي)")
+            if st.session_state.balanced_solution is not None:
+                sol = st.session_state.balanced_solution
+                pred = st.session_state.balanced_pred
+                st.write(f"**API:** {sol[0]:.1f}%")
+                st.write(f"**MCC:** {sol[1]:.1f}%")
+                st.write(f"**PVPP:** {sol[2]:.1f}%")
+                st.write(f"**Mg-St:** {sol[3]:.2f}%")
+                st.write(f"**Binder:** {sol[4]:.1f}%")
+                st.write(f"**الضغط:** {sol[5]:.1f} MPa")
+                st.write(f"**السرعة:** {sol[6]:.1f} rpm")
+                st.write(f"**الحبيبات:** {sol[7]:.0f} µm")
+                st.write(f"**الكثافة:** {pred[0]:.3f}")
+                st.write(f"**الشد:** {pred[1]:.3f} MPa")
+                st.write(f"**EFRF:** {pred[3]:.4f}")
+            else:
+                st.info("غير متاح")
+
+        with col2:
+            st.markdown("#### 🔵 الأمثل جودة")
+            if st.session_state.quality_solution is not None:
+                sol = st.session_state.quality_solution
+                pred = st.session_state.quality_pred
+                st.write(f"**API:** {sol[0]:.1f}%")
+                st.write(f"**MCC:** {sol[1]:.1f}%")
+                st.write(f"**PVPP:** {sol[2]:.1f}%")
+                st.write(f"**Mg-St:** {sol[3]:.2f}%")
+                st.write(f"**Binder:** {sol[4]:.1f}%")
+                st.write(f"**الضغط:** {sol[5]:.1f} MPa")
+                st.write(f"**السرعة:** {sol[6]:.1f} rpm")
+                st.write(f"**الحبيبات:** {sol[7]:.0f} µm")
+                st.write(f"**الكثافة:** {pred[0]:.3f}")
+                st.write(f"**الشد:** {pred[1]:.3f} MPa")
+                st.write(f"**EFRF:** {pred[3]:.4f}")
+            else:
+                st.info("غير متاح")
+
+        with col3:
+            st.markdown("#### 🟠 الأمثل تكلفة")
+            if st.session_state.cost_solution is not None:
+                sol = st.session_state.cost_solution
+                pred = st.session_state.cost_pred
+                st.write(f"**API:** {sol[0]:.1f}%")
+                st.write(f"**MCC:** {sol[1]:.1f}%")
+                st.write(f"**PVPP:** {sol[2]:.1f}%")
+                st.write(f"**Mg-St:** {sol[3]:.2f}%")
+                st.write(f"**Binder:** {sol[4]:.1f}%")
+                st.write(f"**الضغط:** {sol[5]:.1f} MPa")
+                st.write(f"**السرعة:** {sol[6]:.1f} rpm")
+                st.write(f"**الحبيبات:** {sol[7]:.0f} µm")
+                st.write(f"**الكثافة:** {pred[0]:.3f}")
+                st.write(f"**الشد:** {pred[1]:.3f} MPa")
+                st.write(f"**EFRF:** {pred[3]:.4f}")
+            else:
+                st.info("غير متاح")
 
         # Knobs
         st.markdown("---")
@@ -1148,41 +1301,27 @@ with col_right:
                 if fig_bars:
                     st.plotly_chart(fig_bars, use_container_width=True)
 
-        # ================================================================
-        # 📊 Comparison Section (Fixed for Dimensional Alignment & Variance)
-        # ================================================================
+        # Comparison
         if show_comparison:
             st.markdown("### 📊 Comparison (Tensile R²)")
-            
-            # Retrieve data from the already loaded df and features
             X_raw_all = df[features].values
             y_raw_all = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%']].values
-            
-            # 1. Ensure clean, localized validation splitting
             X_b_train, X_b_test, y_b_train, y_b_test = train_test_split(
                 X_raw_all, y_raw_all, test_size=0.2, random_state=42
             )
-            
-            # Transform inputs through the global pipeline scaler
             X_b_train_scaled = scaler.transform(add_interaction_features(X_b_train))
             X_b_test_scaled = scaler.transform(add_interaction_features(X_b_test))
-            
-            # CRITICAL FIX: Isolate column index 1 (Tensile Strength in MPa) for true metrics
             y_train_target = y_b_train[:, 1]
             y_test_target = y_b_test[:, 1]
 
-            # 2. Extract Real PINN Predictions
             model.eval()
             with torch.no_grad():
                 pinn_input = torch.tensor(X_b_test_scaled, dtype=torch.float32).to(device)
-                # Model outputs 5 columns – slice only first 3 for inverse_transform
-                pinn_out_scaled = model(pinn_input).cpu().numpy()[:, :3]
-                pinn_pred = y_scaler.inverse_transform(pinn_out_scaled)[:, 1]
+                pinn_pred_scaled = model.predict(pinn_input)
+                pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
 
-            # 3. Train and Predict Baseline Models on Aligned Target
             from sklearn.neural_network import MLPRegressor
             from sklearn.ensemble import RandomForestRegressor
-
             mlp_mod = MLPRegressor(hidden_layer_sizes=(128, 64), max_iter=400, random_state=42)
             mlp_mod.fit(X_b_train_scaled, y_train_target)
             mlp_pred = mlp_mod.predict(X_b_test_scaled)
@@ -1191,14 +1330,12 @@ with col_right:
             rf_mod.fit(X_b_train_scaled, y_train_target)
             rf_pred = rf_mod.predict(X_b_test_scaled)
 
-            # Build prediction tracking registry
             models_registry = {
                 'PINN (Proposed)': (pinn_pred, 'Enforced'),
                 'MLP (Baseline)': (mlp_pred, 'Not enforced'),
                 'Random Forest': (rf_pred, 'Not enforced')
             }
 
-            # Optional XGBoost integration with automated environment safeguard
             try:
                 from xgboost import XGBRegressor
                 xgb_mod = XGBRegressor(n_estimators=100, learning_rate=0.05, random_state=42, n_jobs=-1)
@@ -1206,34 +1343,27 @@ with col_right:
                 xgb_pred = xgb_mod.predict(X_b_test_scaled)
                 models_registry['XGBoost'] = (xgb_pred, 'Not enforced')
             except ImportError:
-                # If XGBoost package is missing on host, map highly correlated baseline variants
                 xgb_pred = rf_pred * 0.995 + np.random.normal(0, 0.01, size=len(rf_pred))
                 models_registry['XGBoost'] = (xgb_pred, 'Not enforced')
 
-            # 4. Statistical Bootstrapping Loop for Real Uncertainty Estimation (+/-)
             def compute_metrics_with_variance(y_true, y_pred, n_bootstraps=15):
                 np.random.seed(42)
                 r2_scores, rmse_scores, mae_scores = [], [], []
-                
                 for _ in range(n_bootstraps):
                     indices = np.random.choice(len(y_true), len(y_true), replace=True)
                     r2_scores.append(r2_score(y_true[indices], y_pred[indices]))
                     rmse_scores.append(np.sqrt(mean_squared_error(y_true[indices], y_pred[indices])))
                     mae_scores.append(mean_absolute_error(y_true[indices], y_pred[indices]))
-                    
                 return (
                     np.mean(r2_scores), np.std(r2_scores),
                     np.mean(rmse_scores), np.std(rmse_scores),
                     np.mean(mae_scores), np.std(mae_scores)
                 )
 
-            # 5. Compile Results into Publication Format
             table_rows = []
             chart_data = []
-
             for name, (preds, consistency) in models_registry.items():
                 r2_m, r2_s, rmse_m, rmse_s, mae_m, mae_s = compute_metrics_with_variance(y_test_target, preds)
-                
                 table_rows.append({
                     'Model': name,
                     'R2 (Test)': f"{r2_m:.2f} +/- {r2_s:.2f}",
@@ -1241,28 +1371,40 @@ with col_right:
                     'MAE (MPa)': f"{mae_m:.2f} +/- {mae_s:.2f}",
                     'Physical Consistency': consistency
                 })
-                
                 chart_data.append({'Model': name, 'R² Score': r2_m})
 
             bench_df = pd.DataFrame(table_rows)
             st.session_state.benchmark_df = bench_df
-            
-            # Display interactive Plotly visualization
+
             fig_bar = px.bar(pd.DataFrame(chart_data), x='Model', y='R² Score', color='Model',
                              title='Real R² Comparison (Tensile Strength Channel)',
                              text=pd.DataFrame(chart_data)['R² Score'].round(3))
             fig_bar.update_layout(height=380, template='plotly_white')
             st.plotly_chart(fig_bar, use_container_width=True)
-
-            # Render final clean comparison table
             st.dataframe(bench_df, use_container_width=True)
 
-        # Report – PDF only
-        if generate_report_btn and st.session_state.benchmark_df is not None:
+        # Report – PDF without "R²" in title
+        if generate_report_btn:
             f = st.session_state.formulation
             timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             bench_df = st.session_state.benchmark_df
-            filepath, error = generate_pdf_report(f, None, bench_df, golden_solution, golden_pred, fronts, timestamp)
+
+            # Get the three solutions
+            bal_sol = st.session_state.balanced_solution
+            bal_pred = st.session_state.balanced_pred
+            qual_sol = st.session_state.quality_solution
+            qual_pred = st.session_state.quality_pred
+            cost_sol = st.session_state.cost_solution
+            cost_pred = st.session_state.cost_pred
+            fronts = st.session_state.nsga_fronts
+
+            filepath, error = generate_pdf_report(
+                f, bench_df,
+                bal_sol, bal_pred,
+                qual_sol, qual_pred,
+                cost_sol, cost_pred,
+                fronts, timestamp
+            )
             if error:
                 st.error(f"PDF generation failed: {error}")
                 if not FPDF_AVAILABLE:
@@ -1270,9 +1412,9 @@ with col_right:
             else:
                 with open(filepath, "rb") as pdf_file:
                     st.download_button(
-                        label="📥 Download PDF Report",
+                        label="📥 تحميل التقرير PDF",
                         data=pdf_file,
-                        file_name=f"hubryd_report_{timestamp[:10]}.pdf",
+                        file_name=f"Hubryd_Report_{timestamp[:10]}.pdf",
                         mime="application/pdf"
                     )
                 try:
