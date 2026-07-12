@@ -1,5 +1,5 @@
 """
-Hubryd AI – v29.27-R2 (Final)
+Hubryd AI – v29.27-R3 (UI Simplified)
 Hybrid AI for Multi-Objective Optimization of Tablet Formulation
 - PINN outputs raw scaled values (R² > 0.99)
 - NSGA-II: Pop=80, Gen=50
@@ -36,7 +36,7 @@ except ImportError:
     FPDF_AVAILABLE = False
 
 # ================================================================
-# Physics Constants – SPECIFIED WIDE RANGES
+# Physics Constants – UPDATED API RANGE (80–98%)
 # ================================================================
 D_MIN = 0.70
 D_MAX = 0.99
@@ -46,6 +46,8 @@ MCC_MAX = 8.0
 PRESSURE_MAX = 400.0
 BINDER_MIN = 0.3
 BINDER_MAX = 6.0
+API_MIN = 80.0                  # <-- NEW
+API_MAX = 98.0                  # <-- NEW
 
 # ================================================================
 # Training Parameters
@@ -103,10 +105,10 @@ if 'api' not in st.session_state:
     })
 
 # ================================================================
-# Helper Functions (unchanged)
+# Helper Functions (Updated API range)
 # ================================================================
 def normalize_components(api, binder, pvpp, mgst, mcc):
-    api = np.clip(api, 60, 100)
+    api = np.clip(api, API_MIN, API_MAX)          # <-- UPDATED
     binder = np.clip(binder, 0.1, 15)
     pvpp = np.clip(pvpp, 0.1, 15)
     mgst = np.clip(mgst, 0.01, 3.0)
@@ -119,7 +121,7 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
     pvpp = (pvpp / total) * 100
     mgst = (mgst / total) * 100
     mcc = (mcc / total) * 100
-    api = np.clip(api, 85, 95)
+    api = np.clip(api, API_MIN, API_MAX)          # <-- UPDATED
     binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
     pvpp = np.clip(pvpp, 0.5, 6.0)
     mgst = np.clip(mgst, 0.01, 1.2)
@@ -132,7 +134,7 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
         pvpp *= scale
         mgst *= scale
         mcc *= scale
-        api = np.clip(api, 85, 95)
+        api = np.clip(api, API_MIN, API_MAX)      # <-- UPDATED
         binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
         pvpp = np.clip(pvpp, 0.5, 6.0)
         mgst = np.clip(mgst, 0.01, 1.2)
@@ -175,7 +177,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     x_max = -np.log(1 - D_MAX)
 
     for i in range(n_samples):
-        api = np.random.uniform(85, 95)
+        api = np.random.uniform(API_MIN, API_MAX)          # <-- UPDATED
         binder = np.random.uniform(BINDER_MIN, BINDER_MAX)
         pvpp = np.random.uniform(0.5, 6.0)
         mgst = np.random.uniform(0.01, 1.2)
@@ -229,7 +231,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# PINN Model
+# PINN Model (unchanged)
 # ================================================================
 class Mish(nn.Module):
     def forward(self, x):
@@ -471,7 +473,7 @@ class NSGAII:
                 pvpp = np.random.uniform(1, 4)
                 mgst = np.random.uniform(0.1, 0.4)
             else:
-                api = np.random.uniform(85, 95)
+                api = np.random.uniform(API_MIN, API_MAX)     # <-- UPDATED
                 mcc = np.random.uniform(0.1, MCC_MAX)
                 binder = np.random.uniform(BINDER_MIN, BINDER_MAX)
                 pvpp = np.random.uniform(0.5, 6)
@@ -542,7 +544,7 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
     np.random.seed(42)
     points = []
     for _ in range(n_samples):
-        api = np.random.uniform(85, 95)
+        api = np.random.uniform(API_MIN, API_MAX)          # <-- UPDATED
         binder = np.random.uniform(BINDER_MIN, BINDER_MAX)
         pvpp = np.random.uniform(0.5, 6.0)
         mgst = np.random.uniform(0.01, 1.2)
@@ -558,14 +560,6 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
     return pd.DataFrame(points)
 
 def plot_pareto_clean(objectives, fronts, balanced_solution=None, feasible_df=None, tested_point=None, efrf_max=0.40):
-    """
-    Pareto plot with:
-    - Feasible region (light green dots)
-    - Pareto front (red line + markers)
-    - Balanced solution (gold star) – always shown
-    - Tested solution (blue circle) – always shown
-    Cost-wise and Quality-wise solutions are NOT plotted here.
-    """
     if fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
     front = fronts[0]
@@ -593,12 +587,7 @@ def plot_pareto_clean(objectives, fronts, balanced_solution=None, feasible_df=No
         marker=dict(size=7, color='red'),
         hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
     ))
-    # Balanced solution (gold star) – always shown
-    if balanced_solution is not None:
-        d, t, e, ef = predict_pinn(None, None, None, balanced_solution)  # We'll compute later in UI
-        # We'll add it in the UI section with actual predictions
-        pass  # We'll add the trace in the UI after computing predictions
-    # Tested solution (blue circle) – always shown
+    # Golden (Balanced) marker added in the UI now
     if tested_point is not None:
         fig.add_trace(go.Scatter(
             x=[tested_point[0]],
@@ -631,7 +620,7 @@ def plot_sensitivity_bars(formulation, model, scaler, y_scaler, efrf_max=0.40):
     granule0 = formulation['granule_use']
 
     param_defs = [
-        {'name': 'API', 'current': api0, 'min': 85, 'max': 95, 'unit': '%'},
+        {'name': 'API', 'current': api0, 'min': API_MIN, 'max': API_MAX, 'unit': '%'},
         {'name': 'MCC', 'current': mcc0, 'min': 0, 'max': MCC_MAX, 'unit': '%'},
         {'name': 'PVPP', 'current': pvpp0, 'min': 0.5, 'max': 6.0, 'unit': '%'},
         {'name': 'Mg-St', 'current': mgst0, 'min': 0.01, 'max': 1.2, 'unit': '%'},
@@ -771,7 +760,7 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
         pdf.set_font("Arial", "B", 12)
         pdf.cell(0, 8, "4. Optimised Solutions (Pareto Front)", ln=True)
         pdf.set_font("Arial", "B", 10)
-        pdf.cell(0, 6, "Balanced Solution (Default)", ln=True)
+        pdf.cell(0, 6, "Golden Solution (Balanced)", ln=True)   # <-- UPDATED
         pdf.set_font("Arial", "", 10)
         if balanced_solution is not None and balanced_pred is not None:
             pdf.cell(60, 6, f"API: {balanced_solution[0]:.1f}%", ln=True)
@@ -849,7 +838,7 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
         return None, str(e)
 
 # ================================================================
-# Cached Training (unchanged)
+# Cached Training
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
 CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r2_final_eng.pt')
@@ -948,32 +937,30 @@ def load_or_train():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# Streamlit UI – Final English Version
+# Streamlit UI – Simplified English Version
 # ================================================================
 st.set_page_config(page_title="Hybrid AI for Multi-Objective Optimization", layout="wide")
 
+# ---- SIMPLIFIED TOP TITLE ----
 st.markdown("""
-<div style="background: linear-gradient(135deg, #0b1a33, #1a2a4a, #0f3460); padding:1.5rem; border-radius:1rem; text-align:center; margin-bottom:1rem;">
-    <h1 style="color:#fff; margin:0;">🧬 Hybrid AI for Multi‑Objective Optimization of Tablet Formulation</h1>
-    <p style="color:#64ffda; margin:0;">PINN + NSGA‑II · Wide Ranges · Optional Cost/Quality Solutions</p>
-    <p style="color:#8899aa; font-size:0.9rem;">Nile Valley University · Sudan</p>
+<div style="background: #0b1a33; padding:1rem; border-radius:0.5rem; text-align:center; margin-bottom:1rem;">
+    <h2 style="color:#fff; margin:0;">🧬 Hybrid AI · Multi‑Objective Tablet Optimization</h2>
+    <p style="color:#64ffda; margin:0;">PINN + NSGA‑II | Nile Valley University, Sudan</p>
 </div>
 """, unsafe_allow_html=True)
 
 with st.sidebar:
-    st.markdown("### 📚 Physics Constraints (Specified Ranges)")
+    st.markdown("### 📚 Physics Constraints")
     st.markdown(f"""
-    ✅ **Density:** {D_MIN:.2f}–{D_MAX:.2f} (realistic tablet range)  
+    ✅ **API:** {API_MIN:.0f}–{API_MAX:.0f}%  
+    ✅ **Density:** {D_MIN:.2f}–{D_MAX:.2f}  
     ✅ **Tensile:** ≥ {TENSILE_MIN:.2f} MPa  
-    ✅ **EFRF:** &lt; 0.40 (feasibility) / explores up to 0.50  
+    ✅ **EFRF:** &lt; 0.40 (feasible)  
     ✅ **MCC:** ≤ {MCC_MAX:.1f}%  
-    ✅ **Pressure:** up to {PRESSURE_MAX:.0f} MPa  
-    ✅ **Samples:** 15000  
-    ✅ **Epochs:** 800  
-    ✅ **NSGA‑II:** Pop=80, Gen=50  
-    ✅ **Network:** 256 Neurons
+    ✅ **Pressure:** ≤ {PRESSURE_MAX:.0f} MPa  
+    ✅ **NSGA‑II:** Pop=80, Gen=50
     """)
-    st.caption("🔬 v29.27-R2 — Final English")
+    st.caption("🔬 v29.27-R3 — Simplified UI")
 
 # Load model
 try:
@@ -994,7 +981,7 @@ with col_left:
     with st.container(border=True):
         c1, c2 = st.columns(2)
         with c1:
-            api = st.slider("API (%)", 85.0, 95.0, st.session_state.api, 0.1, key="api_slider")
+            api = st.slider("API (%)", API_MIN, API_MAX, st.session_state.api, 0.1, key="api_slider")  # UPDATED
             binder = st.slider("Binder (%)", BINDER_MIN, BINDER_MAX, st.session_state.binder, 0.1, key="binder_slider")
             pvpp = st.slider("PVPP (%)", 0.5, 6.0, st.session_state.pvpp, 0.1, key="pvpp_slider")
         with c2:
@@ -1031,7 +1018,7 @@ with col_left:
         else:
             granule = st.session_state.get('granule', 125.0)
             granule_fixed = False
-            st.info("Granule size will be optimised by NSGA‑II (30–250 µm)")
+            st.info("Granule size optimised by NSGA‑II (30–250 µm)")
             st.session_state.granule_mode = 'Variable'
 
     predict_btn = st.button("🔬 Predict & Optimise", use_container_width=True, type="primary")
@@ -1063,7 +1050,8 @@ with col_right:
                 'density': density, 'tensile': tensile, 'er': er, 'efrf': efrf
             }
 
-            st.markdown("#### Constraints Status (D: 0.70–0.99, Tensile ≥ 1.50, EFRF < 0.40)")
+            # Compact constraints display
+            st.markdown("**Constraints Status** (D: 0.70–0.99, Tensile ≥ 1.50, EFRF < 0.40)")
             col_metrics = st.columns(4)
             col_metrics[0].metric("Density", f"{density:.3f}", f"[{D_MIN:.2f}, {D_MAX:.2f}]")
             col_metrics[1].metric("Tensile", f"{tensile:.2f} MPa", f"≥ {TENSILE_MIN:.2f}")
@@ -1071,7 +1059,7 @@ with col_right:
             col_metrics[3].metric("MCC", f"{mcc_n:.1f}%", f"≤ {MCC_MAX:.1f}%")
 
             if all([D_MIN <= density <= D_MAX, tensile >= TENSILE_MIN, efrf < 0.40, mcc_n <= MCC_MAX]):
-                st.success("✅ All constraints satisfied!")
+                st.success("✅ All constraints satisfied")
             else:
                 st.error("❌ Violates constraints")
 
@@ -1156,55 +1144,53 @@ with col_right:
         # ---- Pareto Front plot ----
         show_pareto = st.session_state.get('show_pareto', True)
         if show_pareto:
-            st.markdown("### 📉 Pareto Front (Specified Ranges)")
+            st.markdown("### 📉 Pareto Front")
             if len(fronts) > 0 and len(fronts[0]) > 0:
                 num_solutions = len(fronts[0])
-                st.success(f"✅ Pareto front found: {num_solutions} optimal solutions (Pop={NSGA_POP}, Gen={NSGA_GENS})")
+                st.success(f"✅ Pareto front: {num_solutions} optimal solutions")
                 
-                # Build the plot without markers first
                 fig = plot_pareto_clean(objectives, fronts, None, feasible_df, tested_point, efrf_max=0.40)
                 if fig is not None:
-                    # Add balanced solution marker (gold star) – always shown
                     if balanced_solution is not None:
                         d, t, e, ef = predict_pinn(model, scaler, y_scaler, balanced_solution)
                         fig.add_trace(go.Scatter(
                             x=[balanced_solution[0]],
                             y=[ef],
                             mode='markers',
-                            name='⭐ Balanced (Golden)',
+                            name='⭐ Golden (Balanced)',
                             marker=dict(size=12, color='gold', symbol='star', line=dict(width=2, color='black')),
-                            hovertemplate='Balanced (Golden)<br>API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
+                            hovertemplate='Golden (Balanced)<br>API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
                         ))
-                    # The tested point is already added by the plot function
                     st.plotly_chart(fig, use_container_width=True)
 
-        # ---- Always show the Balanced (Golden) solution in writing ----
-        st.markdown("### ⭐ Golden Solution (Balanced – Always Shown)")
+        # ---- Golden Solution (Balanced) – always shown in a clean container ----
+        st.markdown("### ⭐ Golden Solution (Balanced)")
         if balanced_solution is not None:
             d, t, e, ef = predict_pinn(model, scaler, y_scaler, balanced_solution)
-            col1, col2 = st.columns(2)
-            with col1:
-                st.write("**Formulation:**")
-                st.write(f"API: {balanced_solution[0]:.1f}%")
-                st.write(f"MCC: {balanced_solution[1]:.1f}%")
-                st.write(f"PVPP: {balanced_solution[2]:.1f}%")
-                st.write(f"Mg-St: {balanced_solution[3]:.2f}%")
-                st.write(f"Binder: {balanced_solution[4]:.1f}%")
-            with col2:
-                st.write("**Process & CQAs:**")
-                st.write(f"Pressure: {balanced_solution[5]:.1f} MPa")
-                st.write(f"Speed: {balanced_solution[6]:.1f} rpm")
-                st.write(f"Granule: {balanced_solution[7]:.0f} µm")
-                st.write(f"Density: {d:.3f}")
-                st.write(f"Tensile: {t:.3f} MPa")
-                st.write(f"EFRF: {ef:.4f}")
+            with st.container(border=True):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write("**Formulation**")
+                    st.write(f"API: {balanced_solution[0]:.1f}%")
+                    st.write(f"MCC: {balanced_solution[1]:.1f}%")
+                    st.write(f"PVPP: {balanced_solution[2]:.1f}%")
+                    st.write(f"Mg-St: {balanced_solution[3]:.2f}%")
+                    st.write(f"Binder: {balanced_solution[4]:.1f}%")
+                with col2:
+                    st.write("**Process & CQAs**")
+                    st.write(f"Pressure: {balanced_solution[5]:.1f} MPa")
+                    st.write(f"Speed: {balanced_solution[6]:.1f} rpm")
+                    st.write(f"Granule: {balanced_solution[7]:.0f} µm")
+                    st.write(f"Density: {d:.3f}")
+                    st.write(f"Tensile: {t:.3f} MPa")
+                    st.write(f"EFRF: {ef:.4f}")
             st.session_state.balanced_pred = (d, t, e, ef)
         else:
             st.info("No balanced solution found.")
 
         # ---- Knobs Row ----
         st.markdown("---")
-        st.markdown("**🔘 Toggle additional sections:**")
+        st.markdown("**🔘 Toggle additional views:**")
         knob_cols = st.columns(7)
         with knob_cols[0]:
             show_pareto = st.toggle("📉 Pareto", value=st.session_state.get('show_pareto', True),
@@ -1223,11 +1209,13 @@ with col_right:
                                       key="knob_particle_plot")
             st.session_state.show_particle_plot = show_particle
         with knob_cols[4]:
-            show_cost = st.toggle("💰 Cost-wise (written only)", value=st.session_state.get('show_cost_solution', False),
+            show_cost = st.toggle("💰 cost-wise optimum solution",  # <-- UPDATED
+                                  value=st.session_state.get('show_cost_solution', False),
                                   key="knob_cost")
             st.session_state.show_cost_solution = show_cost
         with knob_cols[5]:
-            show_quality = st.toggle("🏆 Quality-wise (written only)", value=st.session_state.get('show_quality_solution', False),
+            show_quality = st.toggle("🏆 quality-wise optimum solution",  # <-- UPDATED
+                                     value=st.session_state.get('show_quality_solution', False),
                                      key="knob_quality")
             st.session_state.show_quality_solution = show_quality
         with knob_cols[6]:
@@ -1235,7 +1223,7 @@ with col_right:
 
         # ---- Show optional solutions in writing only ----
         if st.session_state.get('show_cost_solution', False) and cost_solution is not None:
-            st.markdown("#### 💰 Cost‑Optimised Solution (Max API, Min Pressure) – Written Only")
+            st.markdown("#### 💰 Cost‑Optimised Solution (Max API, Min Pressure)")
             d, t, e, ef = predict_pinn(model, scaler, y_scaler, cost_solution)
             col1, col2 = st.columns(2)
             with col1:
@@ -1256,7 +1244,7 @@ with col_right:
             st.session_state.cost_pred = (d, t, e, ef)
 
         if st.session_state.get('show_quality_solution', False) and quality_solution is not None:
-            st.markdown("#### 🏆 Quality‑Optimised Solution (Max Tensile Strength) – Written Only")
+            st.markdown("#### 🏆 Quality‑Optimised Solution (Max Tensile Strength)")
             d, t, e, ef = predict_pinn(model, scaler, y_scaler, quality_solution)
             col1, col2 = st.columns(2)
             with col1:
@@ -1289,13 +1277,13 @@ with col_right:
         if show_particle:
             f = st.session_state.formulation
             if f['api_n'] is not None:
-                st.markdown("### 📊 Particle Size Effect with Pressure Variation (D: 0.70–0.99)")
+                st.markdown("### 📊 Particle Size Effect with Pressure Variation")
                 fig = plot_particle_pressure_density(f, model, scaler, y_scaler)
                 st.plotly_chart(fig, use_container_width=True)
 
         # ---- Comparison ----
         if show_comparison:
-            st.markdown("### 📊 Comparison (Tensile R²)")
+            st.markdown("### 📊 Model Comparison (Tensile R²)")
             X_raw_all = df[features].values
             y_raw_all = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%']].values
             X_b_train, X_b_test, y_b_train, y_b_test = train_test_split(
@@ -1369,7 +1357,7 @@ with col_right:
             st.session_state.benchmark_df = bench_df
 
             fig_bar = px.bar(pd.DataFrame(chart_data), x='Model', y='R² Score', color='Model',
-                             title='Real R² Comparison (Tensile Strength Channel)',
+                             title='Real R² Comparison (Tensile Strength)',
                              text=pd.DataFrame(chart_data)['R² Score'].round(3))
             fig_bar.update_layout(height=380, template='plotly_white')
             st.plotly_chart(fig_bar, use_container_width=True)
