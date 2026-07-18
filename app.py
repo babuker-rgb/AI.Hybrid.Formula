@@ -1,7 +1,7 @@
 """
-Hubryd AI – v29.27-R7 (Vertical Toggles)
+Hubryd AI – v29.27-R8 (Content Under Knob)
 Hybrid AI for Multi-Objective Optimization of Tablet Formulation
-- Toggle buttons rearranged vertically for better usability
+- Each toggle shows its content directly below the knob
 - All previous optimisations retained
 Nile Valley University · Sudan
 """
@@ -864,7 +864,7 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
 # Cached Training
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r7_eng.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r8_eng.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -1057,7 +1057,7 @@ with st.sidebar:
     ✅ **Pressure:** ≤ {PRESSURE_MAX:.0f} MPa  
     ✅ **NSGA‑II:** Pop=80, Gen=50
     """)
-    st.caption("🔬 v29.27-R7 — Vertical Toggles")
+    st.caption("🔬 v29.27-R8 — Content Under Knob")
 
 try:
     model, scaler, y_scaler, features, df = load_or_train()
@@ -1243,6 +1243,7 @@ with col_right:
         feasible_df = st.session_state.feasible_df
         tested_point = st.session_state.tested_point
 
+        # ---- Pareto Front (toggle) ----
         show_pareto = st.session_state.get('show_pareto', True)
         if show_pareto:
             st.markdown("### 📉 Pareto Front")
@@ -1288,31 +1289,42 @@ with col_right:
             st.info("No balanced solution found.")
 
         st.markdown("---")
-        st.markdown("**🔘 Toggle additional views (vertical):**")
-        
-        # ---- VERTICAL TOGGLES (replaced horizontal columns) ----
-        with st.container():
-            show_pareto = st.toggle("📉 Pareto", value=st.session_state.get('show_pareto', True), key="knob_pareto")
-            st.session_state.show_pareto = show_pareto
-            
-            show_sensitivity = st.toggle("🔬 Sensitivity", value=st.session_state.get('show_sensitivity', False), key="knob_sensitivity")
-            st.session_state.show_sensitivity = show_sensitivity
-            
-            show_comparison = st.toggle("📊 Comparison", value=st.session_state.get('show_comparison', True), key="knob_comparison")
-            st.session_state.show_comparison = show_comparison
-            
-            show_particle = st.toggle("📊 Particle Plot", value=st.session_state.get('show_particle_plot', False), key="knob_particle_plot")
-            st.session_state.show_particle_plot = show_particle
-            
-            show_cost = st.toggle("💰 cost-wise optimum solution", value=st.session_state.get('show_cost_solution', False), key="knob_cost")
-            st.session_state.show_cost_solution = show_cost
-            
-            show_quality = st.toggle("🏆 quality-wise optimum solution", value=st.session_state.get('show_quality_solution', False), key="knob_quality")
-            st.session_state.show_quality_solution = show_quality
-            
-            generate_report_btn = st.button("📄 Report", key="knob_report", use_container_width=False)
 
-        # ---- Show optional solutions ----
+        # ---- Toggle: Sensitivity (content directly below) ----
+        st.toggle("🔬 Sensitivity", value=st.session_state.get('show_sensitivity', False), key="knob_sensitivity")
+        if st.session_state.get('show_sensitivity', False):
+            f = st.session_state.formulation
+            if f['api_n'] is not None:
+                st.markdown("### 🔬 Sensitivity Analysis – Parameter Impact on EFRF")
+                fig_bars = plot_sensitivity_bars(f, model, scaler, y_scaler, efrf_max=0.40)
+                if fig_bars:
+                    st.plotly_chart(fig_bars, use_container_width=True)
+
+        # ---- Toggle: Comparison ----
+        st.toggle("📊 Comparison", value=st.session_state.get('show_comparison', True), key="knob_comparison")
+        if st.session_state.get('show_comparison', False):
+            st.markdown("### 📊 Model Comparison (Tensile R²)")
+            bench_df, chart_data = run_model_comparison(model, scaler, y_scaler, features, df, device)
+            st.session_state.benchmark_df = bench_df
+
+            fig_bar = px.bar(pd.DataFrame(chart_data), x='Model', y='R² Score', color='Model',
+                             title='Real R² Comparison (Tensile Strength)',
+                             text=pd.DataFrame(chart_data)['R² Score'].round(3))
+            fig_bar.update_layout(height=380, template='plotly_white')
+            st.plotly_chart(fig_bar, use_container_width=True)
+            st.dataframe(bench_df, use_container_width=True)
+
+        # ---- Toggle: Particle Plot ----
+        st.toggle("📊 Particle Plot", value=st.session_state.get('show_particle_plot', False), key="knob_particle_plot")
+        if st.session_state.get('show_particle_plot', False):
+            f = st.session_state.formulation
+            if f['api_n'] is not None:
+                st.markdown("### 📊 Particle Size Effect with Pressure Variation")
+                fig = plot_particle_pressure_density(f, model, scaler, y_scaler)
+                st.plotly_chart(fig, use_container_width=True)
+
+        # ---- Toggle: Cost-wise solution ----
+        st.toggle("💰 cost-wise optimum solution", value=st.session_state.get('show_cost_solution', False), key="knob_cost")
         if st.session_state.get('show_cost_solution', False) and cost_solution is not None:
             st.markdown("#### 💰 Cost‑Optimised Solution (Max API, Min Pressure)")
             d, t, e, ef = predict_pinn(model, scaler, y_scaler, cost_solution)
@@ -1334,6 +1346,8 @@ with col_right:
                 st.write(f"EFRF: {ef:.4f}")
             st.session_state.cost_pred = (d, t, e, ef)
 
+        # ---- Toggle: Quality-wise solution ----
+        st.toggle("🏆 quality-wise optimum solution", value=st.session_state.get('show_quality_solution', False), key="knob_quality")
         if st.session_state.get('show_quality_solution', False) and quality_solution is not None:
             st.markdown("#### 🏆 Quality‑Optimised Solution (Max Tensile Strength)")
             d, t, e, ef = predict_pinn(model, scaler, y_scaler, quality_solution)
@@ -1355,32 +1369,8 @@ with col_right:
                 st.write(f"EFRF: {ef:.4f}")
             st.session_state.quality_pred = (d, t, e, ef)
 
-        if show_sensitivity:
-            f = st.session_state.formulation
-            if f['api_n'] is not None:
-                st.markdown("### 🔬 Sensitivity Analysis – Parameter Impact on EFRF")
-                fig_bars = plot_sensitivity_bars(f, model, scaler, y_scaler, efrf_max=0.40)
-                if fig_bars:
-                    st.plotly_chart(fig_bars, use_container_width=True)
-
-        if show_particle:
-            f = st.session_state.formulation
-            if f['api_n'] is not None:
-                st.markdown("### 📊 Particle Size Effect with Pressure Variation")
-                fig = plot_particle_pressure_density(f, model, scaler, y_scaler)
-                st.plotly_chart(fig, use_container_width=True)
-
-        if show_comparison:
-            st.markdown("### 📊 Model Comparison (Tensile R²)")
-            bench_df, chart_data = run_model_comparison(model, scaler, y_scaler, features, df, device)
-            st.session_state.benchmark_df = bench_df
-
-            fig_bar = px.bar(pd.DataFrame(chart_data), x='Model', y='R² Score', color='Model',
-                             title='Real R² Comparison (Tensile Strength)',
-                             text=pd.DataFrame(chart_data)['R² Score'].round(3))
-            fig_bar.update_layout(height=380, template='plotly_white')
-            st.plotly_chart(fig_bar, use_container_width=True)
-            st.dataframe(bench_df, use_container_width=True)
+        # ---- Report button (always visible) ----
+        generate_report_btn = st.button("📄 Report", key="knob_report")
 
         if generate_report_btn and st.session_state.benchmark_df is not None:
             f = st.session_state.formulation
