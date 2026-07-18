@@ -1,7 +1,7 @@
 """
-Hubryd AI – v29.27-R6 (Golden Solution Centred)
+Hubryd AI – v29.27-R7 (Vertical Toggles)
 Hybrid AI for Multi-Objective Optimization of Tablet Formulation
-- Fixed balanced-solution selection (now picks middle of Pareto front)
+- Toggle buttons rearranged vertically for better usability
 - All previous optimisations retained
 Nile Valley University · Sudan
 """
@@ -330,7 +330,7 @@ class MultiTaskPINN(nn.Module):
         return data_loss + physics_loss
 
 # ================================================================
-# NSGA-II (with vectorised evaluation)
+# NSGA-II
 # ================================================================
 class NSGAII:
     def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS,
@@ -864,7 +864,7 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
 # Cached Training
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r6_eng.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r7_eng.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -962,7 +962,7 @@ def load_or_train():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# Model Comparison (without caching – safe for Streamlit)
+# Model Comparison (without caching)
 # ================================================================
 def run_model_comparison(model, scaler, y_scaler, features, df, device):
     X_raw_all = df[features].values
@@ -1057,7 +1057,7 @@ with st.sidebar:
     ✅ **Pressure:** ≤ {PRESSURE_MAX:.0f} MPa  
     ✅ **NSGA‑II:** Pop=80, Gen=50
     """)
-    st.caption("🔬 v29.27-R6 — Golden Solution Centred")
+    st.caption("🔬 v29.27-R7 — Vertical Toggles")
 
 try:
     model, scaler, y_scaler, features, df = load_or_train()
@@ -1288,37 +1288,31 @@ with col_right:
             st.info("No balanced solution found.")
 
         st.markdown("---")
-        st.markdown("**🔘 Toggle additional views:**")
-        knob_cols = st.columns(7)
-        with knob_cols[0]:
-            show_pareto = st.toggle("📉 Pareto", value=st.session_state.get('show_pareto', True),
-                                    key="knob_pareto")
+        st.markdown("**🔘 Toggle additional views (vertical):**")
+        
+        # ---- VERTICAL TOGGLES (replaced horizontal columns) ----
+        with st.container():
+            show_pareto = st.toggle("📉 Pareto", value=st.session_state.get('show_pareto', True), key="knob_pareto")
             st.session_state.show_pareto = show_pareto
-        with knob_cols[1]:
-            show_sensitivity = st.toggle("🔬 Sensitivity", value=st.session_state.get('show_sensitivity', False),
-                                         key="knob_sensitivity")
+            
+            show_sensitivity = st.toggle("🔬 Sensitivity", value=st.session_state.get('show_sensitivity', False), key="knob_sensitivity")
             st.session_state.show_sensitivity = show_sensitivity
-        with knob_cols[2]:
-            show_comparison = st.toggle("📊 Comparison", value=st.session_state.get('show_comparison', True),
-                                        key="knob_comparison")
+            
+            show_comparison = st.toggle("📊 Comparison", value=st.session_state.get('show_comparison', True), key="knob_comparison")
             st.session_state.show_comparison = show_comparison
-        with knob_cols[3]:
-            show_particle = st.toggle("📊 Particle Plot", value=st.session_state.get('show_particle_plot', False),
-                                      key="knob_particle_plot")
+            
+            show_particle = st.toggle("📊 Particle Plot", value=st.session_state.get('show_particle_plot', False), key="knob_particle_plot")
             st.session_state.show_particle_plot = show_particle
-        with knob_cols[4]:
-            show_cost = st.toggle("💰 cost-wise optimum solution",
-                                  value=st.session_state.get('show_cost_solution', False),
-                                  key="knob_cost")
+            
+            show_cost = st.toggle("💰 cost-wise optimum solution", value=st.session_state.get('show_cost_solution', False), key="knob_cost")
             st.session_state.show_cost_solution = show_cost
-        with knob_cols[5]:
-            show_quality = st.toggle("🏆 quality-wise optimum solution",
-                                     value=st.session_state.get('show_quality_solution', False),
-                                     key="knob_quality")
+            
+            show_quality = st.toggle("🏆 quality-wise optimum solution", value=st.session_state.get('show_quality_solution', False), key="knob_quality")
             st.session_state.show_quality_solution = show_quality
-        with knob_cols[6]:
-            generate_report_btn = st.button("📄 Report", key="knob_report")
+            
+            generate_report_btn = st.button("📄 Report", key="knob_report", use_container_width=False)
 
+        # ---- Show optional solutions ----
         if st.session_state.get('show_cost_solution', False) and cost_solution is not None:
             st.markdown("#### 💰 Cost‑Optimised Solution (Max API, Min Pressure)")
             d, t, e, ef = predict_pinn(model, scaler, y_scaler, cost_solution)
