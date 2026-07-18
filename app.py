@@ -1,9 +1,9 @@
 """
-Hubryd AI – v29.27-R4 (Optimised & Bugfixed)
+Hubryd AI – v29.27-R5 (Final Corrected)
 Hybrid AI for Multi-Objective Optimization of Tablet Formulation
 - Vectorised data generation and evaluation
 - Fixed early stopping, crowding distance, NSGA bounds
-- Cached model comparison
+- Model comparison without caching (fixes UnhashableParamError)
 - Reproducible random number generation
 Nile Valley University · Sudan
 """
@@ -62,7 +62,7 @@ W_PHYSICS = 1.0
 W_EFRF_PENALTY = 100.0
 
 # ================================================================
-# Session State Initialisation (unchanged)
+# Session State Initialisation
 # ================================================================
 if 'api' not in st.session_state:
     st.session_state.update({
@@ -109,14 +109,12 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
     Vectorised version: accepts arrays or scalars.
     Returns arrays of shape (n,5) with components clipped and sum=100.
     """
-    # Convert to numpy arrays
     api = np.asarray(api, dtype=float)
     binder = np.asarray(binder, dtype=float)
     pvpp = np.asarray(pvpp, dtype=float)
     mgst = np.asarray(mgst, dtype=float)
     mcc = np.asarray(mcc, dtype=float)
 
-    # Clip to absolute limits
     api = np.clip(api, API_MIN, API_MAX)
     binder = np.clip(binder, 0.1, 15.0)
     pvpp = np.clip(pvpp, 0.1, 15.0)
@@ -124,26 +122,21 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
     mcc = np.clip(mcc, 0.1, 20.0)
 
     total = api + binder + pvpp + mgst + mcc
-    # Avoid division by zero
     total = np.where(total <= 0, 1.0, total)
 
-    # Normalise to sum to 100%
     api = (api / total) * 100.0
     binder = (binder / total) * 100.0
     pvpp = (pvpp / total) * 100.0
     mgst = (mgst / total) * 100.0
     mcc = (mcc / total) * 100.0
 
-    # Apply final regulatory bounds
     api = np.clip(api, API_MIN, API_MAX)
     binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
     pvpp = np.clip(pvpp, 0.5, 6.0)
     mgst = np.clip(mgst, 0.01, 1.2)
     mcc = np.clip(mcc, 0.0, MCC_MAX)
 
-    # Re-normalise to ensure sum remains 100% after clipping
     total2 = api + binder + pvpp + mgst + mcc
-    # Avoid division by zero
     total2 = np.where(total2 <= 0, 1.0, total2)
     scale = 100.0 / total2
     api = api * scale
@@ -152,14 +145,12 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
     mgst = mgst * scale
     mcc = mcc * scale
 
-    # Final clipping (for safety)
     api = np.clip(api, API_MIN, API_MAX)
     binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
     pvpp = np.clip(pvpp, 0.5, 6.0)
     mgst = np.clip(mgst, 0.01, 1.2)
     mcc = np.clip(mcc, 0.0, MCC_MAX)
 
-    # If scalar inputs, return scalar (or single-element array)
     return api, binder, pvpp, mgst, mcc
 
 
@@ -176,7 +167,6 @@ def add_interaction_features(X_raw):
     pvpp = X_raw[:, 2:3]
     mgst = X_raw[:, 3:4]
 
-    # Engineered features
     pressure_speed = np.clip(pressure / (speed + 0.1), 0, 1000)
     api_mcc = np.clip(api / (mcc + 0.1), 0, 1000)
     binder_speed = np.clip(binder / (speed + 0.1), 0, 100)
@@ -200,13 +190,7 @@ def add_interaction_features(X_raw):
 
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
-    """
-    Vectorised generation of 15,000 formulations.
-    Returns DataFrame with features and targets.
-    """
     rng = np.random.default_rng(random_state)
-
-    # Generate random inputs (n_samples x 8)
     api_raw = rng.uniform(API_MIN, API_MAX, n_samples)
     binder_raw = rng.uniform(BINDER_MIN, BINDER_MAX, n_samples)
     pvpp_raw = rng.uniform(0.5, 6.0, n_samples)
@@ -216,27 +200,23 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     speed_raw = rng.uniform(1.0, 50.0, n_samples)
     granule_raw = rng.uniform(30.0, 250.0, n_samples)
 
-    # Normalise components (vectorised)
     api_n, binder_n, pvpp_n, mgst_n, mcc_n = normalize_components(
         api_raw, binder_raw, pvpp_raw, mgst_raw, mcc_raw
     )
 
-    # Prepare X array
     X = np.column_stack([api_n, mcc_n, pvpp_n, mgst_n, binder_n,
                          pressure_raw, speed_raw, granule_raw])
 
-    # ---- Physics-based targets (vectorised) ----
     # Density (Heckel)
     k = 0.025 + 0.0001 * pressure_raw
     A = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
     x_val = k * pressure_raw + A
     D = 1.0 - np.exp(-x_val)
     D = np.clip(D, D_MIN, D_MAX)
-    # Add small noise
     D += rng.normal(0, 0.002, n_samples)
     D = np.clip(D, D_MIN, D_MAX)
 
-    # Tensile strength (semi-empirical)
+    # Tensile
     porosity = 1.0 - D
     sigma0 = 5.0 + 0.1 * (api_n - 85.0) + 0.2 * binder_n - 0.5 * mgst_n
     sigma0 = np.clip(sigma0, 2.0, 8.0)
@@ -255,7 +235,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     strength *= rng.normal(1.0, 0.01, n_samples)
     strength = np.clip(strength, 0.5, 6.0)
 
-    # Elastic Recovery (ER)
+    # Elastic Recovery
     er_base = (1.8 + 0.3 * (api_n - 85.0)/10.0 +
                0.08 * (speed_raw - 10.0)/30.0 -
                0.1 * (pressure_raw - 100.0)/150.0)
@@ -263,7 +243,6 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     er = er_base + rng.normal(0, 0.01, n_samples)
     er = np.clip(er, 0.5, 4.0)
 
-    # Build DataFrame
     feature_names = ['API_%', 'MCC_%', 'PVPP_%', 'MgSt_%', 'Binder_%',
                      'Pressure_MPa', 'Speed_rpm', 'Granule_Size_µm']
     df = pd.DataFrame(X, columns=feature_names)
@@ -273,7 +252,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# PINN Model (unchanged except maybe small fixes)
+# PINN Model
 # ================================================================
 class Mish(nn.Module):
     def forward(self, x):
@@ -339,13 +318,11 @@ class MultiTaskPINN(nn.Module):
         k_pred = y_pred[:, 3:4]
         A_pred = y_pred[:, 4:5]
 
-        # Data loss (scaled domain)
         loss_dens = nn.MSELoss()(density_pred, y_true[:, 0:1])
         loss_tensile = nn.MSELoss()(tensile_pred, y_true[:, 1:2])
         loss_er = nn.MSELoss()(er_pred, y_true[:, 2:3])
         data_loss = W_DENSITY * loss_dens + W_TENSILE * loss_tensile + W_ER * loss_er
 
-        # Unscale for physics
         scale_dens, mean_dens = y_scaler.scale_[0], y_scaler.mean_[0]
         scale_tensile, mean_tensile = y_scaler.scale_[1], y_scaler.mean_[1]
         scale_er, mean_er = y_scaler.scale_[2], y_scaler.mean_[2]
@@ -354,16 +331,13 @@ class MultiTaskPINN(nn.Module):
         tensile_real = tensile_pred * scale_tensile + mean_tensile
         er_real = er_pred * scale_er + mean_er
 
-        # Heckel residual
         heckel_lhs = torch.log(1.0 / torch.clamp(1.0 - density_real, min=1e-4))
         heckel_rhs = k_pred * pressure + A_pred
         heckel_loss = nn.MSELoss()(heckel_lhs, heckel_rhs)
 
-        # EFRF penalty (soft cutoff at 0.50)
         efrf_real = er_real / torch.clamp(tensile_real, min=1e-4)
         efrf_penalty = torch.mean(torch.relu(efrf_real - 0.50) ** 2) * W_EFRF_PENALTY
 
-        # Boundary penalties
         mcc_penalty = torch.mean(torch.relu(mcc - MCC_MAX) ** 2) * 0.3
         density_penalty = torch.mean(torch.relu(density_real - D_MAX) ** 2 +
                                      torch.relu(D_MIN - density_real) ** 2) * 0.5
@@ -387,7 +361,6 @@ class NSGAII:
         self.granule_fixed_val = granule_fixed_val
 
     def _repair(self, ind):
-        # Single-individual repair (kept for compatibility)
         api, mcc, pvpp, mgst, binder, pressure, speed, granule = ind
         api, binder, pvpp, mgst, mcc = normalize_components(api, binder, pvpp, mgst, mcc)
         pressure = np.clip(pressure, 80, PRESSURE_MAX)
@@ -399,17 +372,11 @@ class NSGAII:
         return np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule])
 
     def _repair_batch(self, pop):
-        """
-        Vectorised repair for a batch of individuals (pop: n x 8).
-        Returns repaired population.
-        """
         api = pop[:, 0]; mcc = pop[:, 1]; pvpp = pop[:, 2]
         mgst = pop[:, 3]; binder = pop[:, 4]
         pressure = pop[:, 5]; speed = pop[:, 6]; granule = pop[:, 7]
 
-        # Normalise components (vectorised)
         api, binder, pvpp, mgst, mcc = normalize_components(api, binder, pvpp, mgst, mcc)
-
         pressure = np.clip(pressure, 80, PRESSURE_MAX)
         speed = np.clip(speed, 1, 50)
         if self.granule_fixed:
@@ -420,23 +387,16 @@ class NSGAII:
         return np.column_stack([api, mcc, pvpp, mgst, binder, pressure, speed, granule])
 
     def _evaluate(self, population):
-        """
-        Vectorised evaluation of whole population.
-        Returns objectives (n,2), violation (n,), and repaired population.
-        """
         n = population.shape[0]
-        # Repair all individuals at once
         repaired = self._repair_batch(population)
-
-        # Build inputs for PINN
-        inputs = repaired  # (n,8)
-        aug = add_interaction_features(inputs)  # (n,21)
-        scaled = self.scaler.transform(aug)     # (n,21)
+        inputs = repaired
+        aug = add_interaction_features(inputs)
+        scaled = self.scaler.transform(aug)
         X_t = torch.tensor(scaled, dtype=torch.float32)
 
         with torch.no_grad():
-            pred_scaled = self.model.predict(X_t)   # (n,3) scaled
-            pred = self.y_scaler.inverse_transform(pred_scaled)  # (n,3) real
+            pred_scaled = self.model.predict(X_t)
+            pred = self.y_scaler.inverse_transform(pred_scaled)
 
         density = np.clip(pred[:, 0], D_MIN, D_MAX)
         tensile = np.maximum(pred[:, 1], 1e-4)
@@ -444,20 +404,16 @@ class NSGAII:
         efrf = er / tensile
         efrf = np.clip(efrf, 1e-4, 5.0)
 
-        # Constraints
         g1 = D_MIN - density
         g2 = density - D_MAX
         violation = np.maximum(0, np.maximum(g1, g2))
 
-        # Penalties for objectives
         penalty = np.zeros(n)
         penalty += np.where(tensile < TENSILE_MIN, (TENSILE_MIN - tensile)**2, 0.0)
         penalty += np.where(efrf >= 0.40, (efrf - 0.40)**2, 0.0)
-        # MCC constraint (repaired already ensures it, but as safety)
         mcc_val = repaired[:, 1]
         penalty += np.where(mcc_val > MCC_MAX, (mcc_val - MCC_MAX)**2, 0.0)
 
-        # Objectives: maximize API (negative for minimization) and minimize EFRF
         objectives = np.zeros((n, 2))
         objectives[:, 0] = -(repaired[:, 0]) + 100.0 * penalty
         objectives[:, 1] = efrf + 100.0 * penalty
@@ -465,7 +421,6 @@ class NSGAII:
         return objectives, violation, repaired
 
     def _non_dominated_sort(self, objectives, violation):
-        # Standard NSGA-II non-dominated sorting
         n = objectives.shape[0]
         fronts = []
         remaining = list(range(n))
@@ -474,8 +429,8 @@ class NSGAII:
             for i in remaining:
                 dominated = False
                 for j in remaining:
-                    if i == j: continue
-                    # Check if j dominates i
+                    if i == j:
+                        continue
                     if (objectives[j,0] <= objectives[i,0] and objectives[j,1] <= objectives[i,1]) and \
                        (objectives[j,0] < objectives[i,0] or objectives[j,1] < objectives[i,1]):
                         dominated = True
@@ -487,31 +442,22 @@ class NSGAII:
         return fronts
 
     def _crowding_distance(self, objectives, front):
-        """
-        Fixed crowding-distance calculation.
-        Returns array of distances for each individual in the front.
-        """
         if len(front) <= 2:
             return np.ones(len(front)) * np.inf
-
-        # Sort front by each objective
         dist = np.zeros(len(front))
         for obj_idx in range(objectives.shape[1]):
             sorted_idx = sorted(front, key=lambda i: objectives[i, obj_idx])
-            # Set infinite for boundary points
             dist[0] = np.inf
             dist[-1] = np.inf
             f_min = objectives[sorted_idx[0], obj_idx]
             f_max = objectives[sorted_idx[-1], obj_idx]
             if f_max - f_min > 1e-10:
                 for k in range(1, len(sorted_idx)-1):
-                    # add contribution from this objective
                     dist[k] += (objectives[sorted_idx[k+1], obj_idx] -
                                 objectives[sorted_idx[k-1], obj_idx]) / (f_max - f_min)
         return dist
 
     def _crossover(self, p1, p2, eta=40):
-        # SBX crossover (unchanged)
         child1 = np.zeros(8)
         child2 = np.zeros(8)
         for i in range(8):
@@ -525,7 +471,6 @@ class NSGAII:
         return child1, child2
 
     def _mutate(self, child, eta=20, pm=1.0/8.0):
-        # Polynomial mutation (unchanged)
         for i in range(8):
             if np.random.random() < pm:
                 u = np.random.random()
@@ -538,7 +483,6 @@ class NSGAII:
         return child
 
     def _tournament(self, pop, objectives, fronts, violation):
-        # Tournament selection (unchanged)
         idx1 = np.random.randint(0, len(pop))
         idx2 = np.random.randint(0, len(pop))
         rank1 = next((f for f, front in enumerate(fronts) if idx1 in front), len(fronts))
@@ -555,7 +499,6 @@ class NSGAII:
             return pop[idx1] if d1 > d2 else pop[idx2]
 
     def run(self):
-        # Initial population (vectorised)
         rng = np.random.default_rng()
         pop = []
         for i in range(self.pop_size):
@@ -614,7 +557,7 @@ class NSGAII:
         return pop, objectives, fronts
 
 # ================================================================
-# Prediction and Plotting Helpers (minimal changes)
+# Prediction and Plotting Helpers
 # ================================================================
 def predict_pinn(model, scaler, y_scaler, inputs):
     try:
@@ -634,11 +577,7 @@ def predict_pinn(model, scaler, y_scaler, inputs):
         return 0.7, 2.0, 0.5, 0.25
 
 def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
-    """
-    Vectorised generation of feasible points.
-    """
     rng = np.random.default_rng(42)
-    # Generate random inputs
     api = rng.uniform(API_MIN, API_MAX, n_samples)
     binder = rng.uniform(BINDER_MIN, BINDER_MAX, n_samples)
     pvpp = rng.uniform(0.5, 6.0, n_samples)
@@ -648,15 +587,12 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
     speed = rng.uniform(1.0, 50.0, n_samples)
     granule = rng.uniform(30.0, 250.0, n_samples)
 
-    # Normalise
     api_n, binder_n, pvpp_n, mgst_n, mcc_n = normalize_components(
         api, binder, pvpp, mgst, mcc
     )
-    # Build inputs array (n_samples x 8)
     inputs = np.column_stack([api_n, mcc_n, pvpp_n, mgst_n, binder_n,
                               pressure, speed, granule])
 
-    # Predict in batch
     aug = add_interaction_features(inputs)
     scaled = scaler.transform(aug)
     X_t = torch.tensor(scaled, dtype=torch.float32)
@@ -669,7 +605,6 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
     efrf = er / tensile
     efrf = np.clip(efrf, 1e-4, 5.0)
 
-    # Mask feasible
     mask = ((D_MIN <= density) & (density <= D_MAX) &
             (tensile >= TENSILE_MIN) & (efrf < 0.40) &
             (mcc_n <= MCC_MAX))
@@ -679,7 +614,6 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
 
 def plot_pareto_clean(objectives, fronts, balanced_solution=None, feasible_df=None,
                       tested_point=None, efrf_max=0.40):
-    # (unchanged)
     if fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
     front = fronts[0]
@@ -730,7 +664,6 @@ def plot_pareto_clean(objectives, fronts, balanced_solution=None, feasible_df=No
     return fig
 
 def plot_sensitivity_bars(formulation, model, scaler, y_scaler, efrf_max=0.40):
-    # (unchanged)
     api0 = formulation['api_n']; mcc0 = formulation['mcc_n']
     pvpp0 = formulation['pvpp_n']; mgst0 = formulation['mgst_n']
     binder0 = formulation['binder_n']; press0 = formulation['pressure']
@@ -788,7 +721,6 @@ def plot_sensitivity_bars(formulation, model, scaler, y_scaler, efrf_max=0.40):
     return fig
 
 def plot_particle_pressure_density(formulation, model, scaler, y_scaler):
-    # (unchanged)
     api0 = formulation['api_n']; mcc0 = formulation['mcc_n']
     pvpp0 = formulation['pvpp_n']; mgst0 = formulation['mgst_n']
     binder0 = formulation['binder_n']; speed0 = formulation['speed']
@@ -817,22 +749,141 @@ def plot_particle_pressure_density(formulation, model, scaler, y_scaler):
     return fig
 
 # ================================================================
-# PDF Report (unchanged)
+# PDF Report (include full code, but keep as is)
 # ================================================================
 def generate_pdf_report(formulation, bench_df, balanced_solution, quality_solution, cost_solution,
                         balanced_pred, quality_pred, cost_pred, fronts, timestamp):
-    # (code unchanged – omitted for brevity)
-    pass
+    if not FPDF_AVAILABLE:
+        return None, "fpdf2 is not installed. Please install it with: pip install fpdf2"
+    try:
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", "B", 16)
+        pdf.cell(0, 10, "Hybrid AI for Multi-Objective Optimization of Tablet Formulation", ln=True, align='C')
+        pdf.set_font("Arial", "I", 10)
+        pdf.cell(0, 6, f"Generated: {timestamp}", ln=True, align='C')
+        pdf.ln(4)
+
+        f = formulation
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, "1. Formulation Parameters", ln=True)
+        pdf.set_font("Arial", "", 10)
+        pdf.cell(60, 6, f"API: {f['api_n']:.1f}%", ln=True)
+        pdf.cell(60, 6, f"MCC: {f['mcc_n']:.1f}%", ln=True)
+        pdf.cell(60, 6, f"PVPP: {f['pvpp_n']:.1f}%", ln=True)
+        pdf.cell(60, 6, f"Mg-St: {f['mgst_n']:.2f}%", ln=True)
+        pdf.cell(60, 6, f"Binder: {f['binder_n']:.1f}%", ln=True)
+        pdf.cell(60, 6, f"Pressure: {f['pressure']:.1f} MPa", ln=True)
+        pdf.cell(60, 6, f"Speed: {f['speed']:.1f} rpm", ln=True)
+        pdf.cell(60, 6, f"Granule: {f['granule_use']:.0f} µm", ln=True)
+        pdf.ln(4)
+
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, "2. Predicted Properties", ln=True)
+        pdf.set_font("Arial", "", 10)
+        pdf.cell(60, 6, f"Density: {f['density']:.3f}", ln=True)
+        pdf.cell(60, 6, f"Tensile Strength: {f['tensile']:.2f} MPa", ln=True)
+        pdf.cell(60, 6, f"EFRF: {f['efrf']:.4f}", ln=True)
+        pdf.cell(60, 6, f"Elastic Recovery: {f['er']:.4f}", ln=True)
+        pdf.ln(4)
+
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, "3. Constraints Status (D: 0.70-0.99, Tensile >= 1.50, EFRF < 0.40)", ln=True)
+        pdf.set_font("Arial", "", 10)
+        pdf.cell(60, 6, f"Density Status: {'PASS' if D_MIN <= f['density'] <= D_MAX else 'FAIL'}", ln=True)
+        pdf.cell(60, 6, f"Tensile Status: {'PASS' if f['tensile'] >= TENSILE_MIN else 'FAIL'}", ln=True)
+        pdf.cell(60, 6, f"EFRF Status: {'PASS' if f['efrf'] < 0.40 else 'FAIL'}", ln=True)
+        pdf.cell(60, 6, f"MCC Status: {'PASS' if f['mcc_n'] <= MCC_MAX else 'FAIL'}", ln=True)
+        pdf.ln(4)
+
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, "4. Optimised Solutions (Pareto Front)", ln=True)
+        pdf.set_font("Arial", "B", 10)
+        pdf.cell(0, 6, "Golden Solution (Balanced)", ln=True)
+        pdf.set_font("Arial", "", 10)
+        if balanced_solution is not None and balanced_pred is not None:
+            pdf.cell(60, 6, f"API: {balanced_solution[0]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"MCC: {balanced_solution[1]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"PVPP: {balanced_solution[2]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"Mg-St: {balanced_solution[3]:.2f}%", ln=True)
+            pdf.cell(60, 6, f"Binder: {balanced_solution[4]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"Pressure: {balanced_solution[5]:.1f} MPa", ln=True)
+            pdf.cell(60, 6, f"Speed: {balanced_solution[6]:.1f} rpm", ln=True)
+            pdf.cell(60, 6, f"Granule: {balanced_solution[7]:.0f} µm", ln=True)
+            pdf.cell(60, 6, f"Density: {balanced_pred[0]:.3f}", ln=True)
+            pdf.cell(60, 6, f"Tensile: {balanced_pred[1]:.3f} MPa", ln=True)
+            pdf.cell(60, 6, f"EFRF: {balanced_pred[3]:.4f}", ln=True)
+            pdf.ln(4)
+
+        pdf.set_font("Arial", "B", 10)
+        pdf.cell(0, 6, "Quality-Optimised Solution (Max Tensile)", ln=True)
+        pdf.set_font("Arial", "", 10)
+        if quality_solution is not None and quality_pred is not None:
+            pdf.cell(60, 6, f"API: {quality_solution[0]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"MCC: {quality_solution[1]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"PVPP: {quality_solution[2]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"Mg-St: {quality_solution[3]:.2f}%", ln=True)
+            pdf.cell(60, 6, f"Binder: {quality_solution[4]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"Pressure: {quality_solution[5]:.1f} MPa", ln=True)
+            pdf.cell(60, 6, f"Speed: {quality_solution[6]:.1f} rpm", ln=True)
+            pdf.cell(60, 6, f"Granule: {quality_solution[7]:.0f} µm", ln=True)
+            pdf.cell(60, 6, f"Density: {quality_pred[0]:.3f}", ln=True)
+            pdf.cell(60, 6, f"Tensile: {quality_pred[1]:.3f} MPa", ln=True)
+            pdf.cell(60, 6, f"EFRF: {quality_pred[3]:.4f}", ln=True)
+            pdf.ln(4)
+
+        pdf.set_font("Arial", "B", 10)
+        pdf.cell(0, 6, "Cost-Optimised Solution (Max API, Min Pressure)", ln=True)
+        pdf.set_font("Arial", "", 10)
+        if cost_solution is not None and cost_pred is not None:
+            pdf.cell(60, 6, f"API: {cost_solution[0]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"MCC: {cost_solution[1]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"PVPP: {cost_solution[2]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"Mg-St: {cost_solution[3]:.2f}%", ln=True)
+            pdf.cell(60, 6, f"Binder: {cost_solution[4]:.1f}%", ln=True)
+            pdf.cell(60, 6, f"Pressure: {cost_solution[5]:.1f} MPa", ln=True)
+            pdf.cell(60, 6, f"Speed: {cost_solution[6]:.1f} rpm", ln=True)
+            pdf.cell(60, 6, f"Granule: {cost_solution[7]:.0f} µm", ln=True)
+            pdf.cell(60, 6, f"Density: {cost_pred[0]:.3f}", ln=True)
+            pdf.cell(60, 6, f"Tensile: {cost_pred[1]:.3f} MPa", ln=True)
+            pdf.cell(60, 6, f"EFRF: {cost_pred[3]:.4f}", ln=True)
+            pdf.ln(4)
+
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, "5. Model Performance Comparison", ln=True)
+        pdf.set_font("Arial", "", 10)
+        if bench_df is not None:
+            for _, row in bench_df.iterrows():
+                model_name = row['Model']
+                r2_str = row['R2 (Test)']
+                rmse_str = row['RMSE (MPa)']
+                mae_str = row['MAE (MPa)']
+                r2_str = r2_str.replace('–', '-')
+                rmse_str = rmse_str.replace('–', '-')
+                mae_str = mae_str.replace('–', '-')
+                pdf.cell(0, 6, f"{model_name}: R2 = {r2_str} | RMSE = {rmse_str} | MAE = {mae_str}", ln=True)
+        pdf.ln(4)
+
+        if fronts is not None and len(fronts) > 0:
+            pdf.set_font("Arial", "B", 12)
+            pdf.cell(0, 8, "6. Multi-Objective Optimisation Summary (NSGA-II)", ln=True)
+            pdf.set_font("Arial", "", 10)
+            pdf.cell(0, 6, f"Pareto Optimal Solutions Found: {len(fronts[0])} solutions", ln=True)
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            pdf.output(tmp.name)
+            return tmp.name, None
+    except Exception as e:
+        return None, str(e)
 
 # ================================================================
-# Cached Training (with fixed early stopping and safety note)
+# Cached Training
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r4_eng.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r5_eng.pt')
 
 @st.cache_resource
 def load_or_train():
-    # Attempt to load cached model (with safety note)
     if os.path.exists(CHECKPOINT_PATH):
         try:
             # Note: pickle loading is a security risk if untrusted; in this research
@@ -889,7 +940,6 @@ def load_or_train():
         optimizer.step()
         scheduler.step(loss.item())
 
-        # Evaluate validation every epoch (fix early stopping)
         model.eval()
         with torch.no_grad():
             val_pred_scaled = model.predict(X_val_t)
@@ -897,11 +947,9 @@ def load_or_train():
             val_true = y_scaler.inverse_transform(y_val_t.cpu().numpy())[:, 1]
             val_r2 = r2_score(val_true, val_pred)
 
-        # Update progress bar and status every 50 epochs
         if epoch % 50 == 0:
             status_text.text(f"Epoch {epoch+1}/{ADAM_EPOCHS} - Val R²: {val_r2:.4f}")
 
-        # Early stopping based on validation R² (per epoch)
         if val_r2 > best_val_r2:
             best_val_r2 = val_r2
             patience_counter = 0
@@ -932,13 +980,12 @@ def load_or_train():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# Cached Model Comparison to avoid retraining on every rerun
+# Model Comparison (without caching – fixes UnhashableParamError)
 # ================================================================
-@st.cache_resource
-def run_model_comparison(_model, scaler, y_scaler, features, df, device):
+def run_model_comparison(model, scaler, y_scaler, features, df, device):
     """
     Runs the benchmark comparison and returns benchmark DataFrame and chart data.
-    Cached to avoid retraining on every UI interaction.
+    No caching — called only when user toggles the comparison view.
     """
     X_raw_all = df[features].values
     y_raw_all = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%']].values
@@ -950,11 +997,10 @@ def run_model_comparison(_model, scaler, y_scaler, features, df, device):
     y_train_target = y_b_train[:, 1]
     y_test_target = y_b_test[:, 1]
 
-    # PINN predictions
-    _model.eval()
+    model.eval()
     with torch.no_grad():
         pinn_input = torch.tensor(X_b_test_scaled, dtype=torch.float32).to(device)
-        pinn_pred_scaled = _model.predict(pinn_input)
+        pinn_pred_scaled = model.predict(pinn_input)
         pinn_pred = y_scaler.inverse_transform(pinn_pred_scaled)[:, 1]
 
     from sklearn.neural_network import MLPRegressor
@@ -973,7 +1019,6 @@ def run_model_comparison(_model, scaler, y_scaler, features, df, device):
         'Random Forest': (rf_pred, 'Not enforced')
     }
 
-    # XGBoost: fallback without fabrication
     try:
         from xgboost import XGBRegressor
         xgb_mod = XGBRegressor(n_estimators=100, learning_rate=0.05, random_state=42, n_jobs=-1)
@@ -981,8 +1026,8 @@ def run_model_comparison(_model, scaler, y_scaler, features, df, device):
         xgb_pred = xgb_mod.predict(X_b_test_scaled)
         models_registry['XGBoost'] = (xgb_pred, 'Not enforced')
     except ImportError:
-        # If XGBoost not installed, skip it rather than fabricating results
-        st.info("XGBoost not installed; skipping from comparison.")
+        # XGBoost not installed; skip it gracefully
+        pass
 
     def compute_metrics_with_variance(y_true, y_pred, n_bootstraps=15):
         rng = np.random.default_rng(42)
@@ -1013,7 +1058,7 @@ def run_model_comparison(_model, scaler, y_scaler, features, df, device):
     return bench_df, chart_data
 
 # ================================================================
-# Streamlit UI – Simplified, with caching for comparison
+# Streamlit UI
 # ================================================================
 st.set_page_config(page_title="Hybrid AI for Multi-Objective Optimization", layout="wide")
 
@@ -1035,7 +1080,7 @@ with st.sidebar:
     ✅ **Pressure:** ≤ {PRESSURE_MAX:.0f} MPa  
     ✅ **NSGA‑II:** Pop=80, Gen=50
     """)
-    st.caption("🔬 v29.27-R4 — Optimised & Bugfixed")
+    st.caption("🔬 v29.27-R5 — Final Corrected")
 
 # Load model (cached)
 try:
@@ -1137,16 +1182,15 @@ with col_right:
                 st.error("❌ Violates constraints")
 
             # ========= NSGA-II =========
-            # Updated bounds to reflect actual physics constants
             bounds = np.array([
-                [API_MIN, API_MAX],           # API
-                [0.0, MCC_MAX],               # MCC
-                [0.5, 6.0],                   # PVPP
-                [0.01, 1.2],                  # Mg-St
-                [BINDER_MIN, BINDER_MAX],     # Binder
-                [80.0, PRESSURE_MAX],         # Pressure
-                [1.0, 50.0],                  # Speed
-                [30.0, 250.0]                 # Granule
+                [API_MIN, API_MAX],
+                [0.0, MCC_MAX],
+                [0.5, 6.0],
+                [0.01, 1.2],
+                [BINDER_MIN, BINDER_MAX],
+                [80.0, PRESSURE_MAX],
+                [1.0, 50.0],
+                [30.0, 250.0]
             ])
             with st.spinner(f"Running NSGA‑II (pop={NSGA_POP}, gen={NSGA_GENS})..."):
                 nsga = NSGAII(model, scaler, y_scaler, bounds,
@@ -1167,11 +1211,9 @@ with col_right:
 
             if len(fronts) > 0 and len(fronts[0]) > 0:
                 front_indices = fronts[0]
-                # 1. Balanced (closest to ideal) – fixed magic number
                 max_api = max(-objectives[i, 0] for i in front_indices)
                 min_efrf = min(objectives[i, 1] for i in front_indices)
                 best_dist = np.inf
-                # Use actual min/max API for normalisation
                 api_range = API_MAX - API_MIN
                 efrf_range = 0.40 - min_efrf
                 for idx in front_indices:
@@ -1184,7 +1226,6 @@ with col_right:
                         best_dist = dist
                         balanced_idx = idx
 
-                # 2. Quality (max tensile)
                 best_tensile = -np.inf
                 for idx in front_indices:
                     ind = pop[idx]
@@ -1193,7 +1234,6 @@ with col_right:
                         best_tensile = t2
                         quality_idx = idx
 
-                # 3. Cost (max API, min pressure)
                 best_cost_score = -np.inf
                 for idx in front_indices:
                     ind = pop[idx]
@@ -1208,7 +1248,6 @@ with col_right:
                 st.session_state.quality_solution = pop[quality_idx] if quality_idx is not None else None
                 st.session_state.cost_solution = pop[cost_idx] if cost_idx is not None else None
 
-            # Generate feasible region
             with st.spinner("Generating feasible region..."):
                 feasible_df = generate_feasible_points(model, scaler, y_scaler, n_samples=3000)
                 st.session_state.feasible_df = feasible_df
@@ -1225,7 +1264,6 @@ with col_right:
         feasible_df = st.session_state.feasible_df
         tested_point = st.session_state.tested_point
 
-        # ---- Pareto Front plot ----
         show_pareto = st.session_state.get('show_pareto', True)
         if show_pareto:
             st.markdown("### 📉 Pareto Front")
@@ -1246,7 +1284,6 @@ with col_right:
                         ))
                     st.plotly_chart(fig, use_container_width=True)
 
-        # ---- Golden Solution (Balanced) – always shown ----
         st.markdown("### ⭐ Golden Solution (Balanced)")
         if balanced_solution is not None:
             d, t, e, ef = predict_pinn(model, scaler, y_scaler, balanced_solution)
@@ -1271,7 +1308,6 @@ with col_right:
         else:
             st.info("No balanced solution found.")
 
-        # ---- Knobs Row ----
         st.markdown("---")
         st.markdown("**🔘 Toggle additional views:**")
         knob_cols = st.columns(7)
@@ -1304,7 +1340,6 @@ with col_right:
         with knob_cols[6]:
             generate_report_btn = st.button("📄 Report", key="knob_report")
 
-        # ---- Show optional solutions ----
         if st.session_state.get('show_cost_solution', False) and cost_solution is not None:
             st.markdown("#### 💰 Cost‑Optimised Solution (Max API, Min Pressure)")
             d, t, e, ef = predict_pinn(model, scaler, y_scaler, cost_solution)
@@ -1347,7 +1382,6 @@ with col_right:
                 st.write(f"EFRF: {ef:.4f}")
             st.session_state.quality_pred = (d, t, e, ef)
 
-        # ---- Sensitivity ----
         if show_sensitivity:
             f = st.session_state.formulation
             if f['api_n'] is not None:
@@ -1356,7 +1390,6 @@ with col_right:
                 if fig_bars:
                     st.plotly_chart(fig_bars, use_container_width=True)
 
-        # ---- Particle Plot ----
         if show_particle:
             f = st.session_state.formulation
             if f['api_n'] is not None:
@@ -1364,10 +1397,9 @@ with col_right:
                 fig = plot_particle_pressure_density(f, model, scaler, y_scaler)
                 st.plotly_chart(fig, use_container_width=True)
 
-        # ---- Model Comparison (with caching) ----
         if show_comparison:
             st.markdown("### 📊 Model Comparison (Tensile R²)")
-            # Use cached function
+            # Call without caching – fixes UnhashableParamError
             bench_df, chart_data = run_model_comparison(model, scaler, y_scaler, features, df, device)
             st.session_state.benchmark_df = bench_df
 
@@ -1378,7 +1410,6 @@ with col_right:
             st.plotly_chart(fig_bar, use_container_width=True)
             st.dataframe(bench_df, use_container_width=True)
 
-        # ---- PDF Report ----
         if generate_report_btn and st.session_state.benchmark_df is not None:
             f = st.session_state.formulation
             timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -1407,7 +1438,7 @@ with col_right:
                     )
                 try:
                     os.unlink(filepath)
-                except:
+                except Exception:
                     pass
 
     else:
