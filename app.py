@@ -1,10 +1,8 @@
 """
-Hubryd AI – v29.27-R5 (Final Corrected)
+Hubryd AI – v29.27-R6 (Golden Solution Centred)
 Hybrid AI for Multi-Objective Optimization of Tablet Formulation
-- Vectorised data generation and evaluation
-- Fixed early stopping, crowding distance, NSGA bounds
-- Model comparison without caching (fixes UnhashableParamError)
-- Reproducible random number generation
+- Fixed balanced-solution selection (now picks middle of Pareto front)
+- All previous optimisations retained
 Nile Valley University · Sudan
 """
 
@@ -32,12 +30,12 @@ except ImportError:
     FPDF_AVAILABLE = False
 
 # ================================================================
-# Physics Constants – Aligned with manuscript
+# Physics Constants
 # ================================================================
 D_MIN = 0.70
 D_MAX = 0.99
 TENSILE_MIN = 1.50
-EFRF_MAX = 0.50                 # Exploration upper limit (loss penalty)
+EFRF_MAX = 0.50
 MCC_MAX = 8.0
 PRESSURE_MAX = 400.0
 BINDER_MIN = 0.3
@@ -50,7 +48,7 @@ API_MAX = 98.0
 # ================================================================
 N_SAMPLES = 15000
 ADAM_EPOCHS = 800
-PATIENCE = 80                 # Now counted in epochs (not checks)
+PATIENCE = 80
 NSGA_POP = 80
 NSGA_GENS = 50
 HIDDEN_SIZE = 256
@@ -62,7 +60,7 @@ W_PHYSICS = 1.0
 W_EFRF_PENALTY = 100.0
 
 # ================================================================
-# Session State Initialisation
+# Session State
 # ================================================================
 if 'api' not in st.session_state:
     st.session_state.update({
@@ -103,12 +101,7 @@ if 'api' not in st.session_state:
 # ================================================================
 # Vectorised Helper Functions
 # ================================================================
-
 def normalize_components(api, binder, pvpp, mgst, mcc):
-    """
-    Vectorised version: accepts arrays or scalars.
-    Returns arrays of shape (n,5) with components clipped and sum=100.
-    """
     api = np.asarray(api, dtype=float)
     binder = np.asarray(binder, dtype=float)
     pvpp = np.asarray(pvpp, dtype=float)
@@ -153,12 +146,7 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
 
     return api, binder, pvpp, mgst, mcc
 
-
 def add_interaction_features(X_raw):
-    """
-    X_raw: (n,8) array of raw features.
-    Returns (n,21) array of raw + engineered features.
-    """
     pressure = X_raw[:, 5:6]
     binder = X_raw[:, 4:5]
     api = X_raw[:, 0:1]
@@ -188,7 +176,6 @@ def add_interaction_features(X_raw):
         api2, pressure2, binder2, speed2
     ], axis=1)
 
-
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     rng = np.random.default_rng(random_state)
     api_raw = rng.uniform(API_MIN, API_MAX, n_samples)
@@ -207,7 +194,6 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     X = np.column_stack([api_n, mcc_n, pvpp_n, mgst_n, binder_n,
                          pressure_raw, speed_raw, granule_raw])
 
-    # Density (Heckel)
     k = 0.025 + 0.0001 * pressure_raw
     A = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
     x_val = k * pressure_raw + A
@@ -216,7 +202,6 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     D += rng.normal(0, 0.002, n_samples)
     D = np.clip(D, D_MIN, D_MAX)
 
-    # Tensile
     porosity = 1.0 - D
     sigma0 = 5.0 + 0.1 * (api_n - 85.0) + 0.2 * binder_n - 0.5 * mgst_n
     sigma0 = np.clip(sigma0, 2.0, 8.0)
@@ -235,7 +220,6 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     strength *= rng.normal(1.0, 0.01, n_samples)
     strength = np.clip(strength, 0.5, 6.0)
 
-    # Elastic Recovery
     er_base = (1.8 + 0.3 * (api_n - 85.0)/10.0 +
                0.08 * (speed_raw - 10.0)/30.0 -
                0.1 * (pressure_raw - 100.0)/150.0)
@@ -346,7 +330,7 @@ class MultiTaskPINN(nn.Module):
         return data_loss + physics_loss
 
 # ================================================================
-# NSGA-II with vectorised evaluation and fixed crowding-distance
+# NSGA-II (with vectorised evaluation)
 # ================================================================
 class NSGAII:
     def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS,
@@ -749,7 +733,7 @@ def plot_particle_pressure_density(formulation, model, scaler, y_scaler):
     return fig
 
 # ================================================================
-# PDF Report (include full code, but keep as is)
+# PDF Report
 # ================================================================
 def generate_pdf_report(formulation, bench_df, balanced_solution, quality_solution, cost_solution,
                         balanced_pred, quality_pred, cost_pred, fronts, timestamp):
@@ -880,14 +864,12 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
 # Cached Training
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r5_eng.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r6_eng.pt')
 
 @st.cache_resource
 def load_or_train():
     if os.path.exists(CHECKPOINT_PATH):
         try:
-            # Note: pickle loading is a security risk if untrusted; in this research
-            # environment it is acceptable as the model is generated locally.
             ckpt = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=False)
             model = MultiTaskPINN(ckpt['input_dim'], hidden=HIDDEN_SIZE)
             model.load_state_dict(ckpt['model_state'])
@@ -980,13 +962,9 @@ def load_or_train():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# Model Comparison (without caching – fixes UnhashableParamError)
+# Model Comparison (without caching – safe for Streamlit)
 # ================================================================
 def run_model_comparison(model, scaler, y_scaler, features, df, device):
-    """
-    Runs the benchmark comparison and returns benchmark DataFrame and chart data.
-    No caching — called only when user toggles the comparison view.
-    """
     X_raw_all = df[features].values
     y_raw_all = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%']].values
     X_b_train, X_b_test, y_b_train, y_b_test = train_test_split(
@@ -1026,7 +1004,6 @@ def run_model_comparison(model, scaler, y_scaler, features, df, device):
         xgb_pred = xgb_mod.predict(X_b_test_scaled)
         models_registry['XGBoost'] = (xgb_pred, 'Not enforced')
     except ImportError:
-        # XGBoost not installed; skip it gracefully
         pass
 
     def compute_metrics_with_variance(y_true, y_pred, n_bootstraps=15):
@@ -1080,9 +1057,8 @@ with st.sidebar:
     ✅ **Pressure:** ≤ {PRESSURE_MAX:.0f} MPa  
     ✅ **NSGA‑II:** Pop=80, Gen=50
     """)
-    st.caption("🔬 v29.27-R5 — Final Corrected")
+    st.caption("🔬 v29.27-R6 — Golden Solution Centred")
 
-# Load model (cached)
 try:
     model, scaler, y_scaler, features, df = load_or_train()
 except Exception as e:
@@ -1093,7 +1069,6 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 if model is not None:
     device = next(model.parameters()).device
 
-# Main layout
 col_left, col_right = st.columns([1, 1.2], gap="medium")
 
 with col_left:
@@ -1181,7 +1156,6 @@ with col_right:
             else:
                 st.error("❌ Violates constraints")
 
-            # ========= NSGA-II =========
             bounds = np.array([
                 [API_MIN, API_MAX],
                 [0.0, MCC_MAX],
@@ -1204,28 +1178,33 @@ with col_right:
             st.session_state.nsga_fronts = fronts
             st.session_state.run_optimized = True
 
-            # ---- Extract 3 Solutions ----
+            # ---- EXTRACT 3 SOLUTIONS (FIXED BALANCED SELECTION) ----
             balanced_idx = None
             quality_idx = None
             cost_idx = None
 
             if len(fronts) > 0 and len(fronts[0]) > 0:
                 front_indices = fronts[0]
+
+                # 1. Balanced (closest to ideal: high API, low EFRF)
                 max_api = max(-objectives[i, 0] for i in front_indices)
                 min_efrf = min(objectives[i, 1] for i in front_indices)
                 best_dist = np.inf
                 api_range = API_MAX - API_MIN
                 efrf_range = 0.40 - min_efrf
+
                 for idx in front_indices:
                     api_val = -objectives[idx, 0]
                     efrf_val = objectives[idx, 1]
-                    norm_api = (api_val - API_MIN) / api_range if api_range > 0 else 0
+                    # CORRECTED: distance from API_MAX (ideal)
+                    norm_api = (API_MAX - api_val) / api_range if api_range > 0 else 0
                     norm_efrf = (efrf_val - min_efrf) / efrf_range if efrf_range > 0 else 0
                     dist = np.sqrt(norm_api**2 + norm_efrf**2)
                     if dist < best_dist:
                         best_dist = dist
                         balanced_idx = idx
 
+                # 2. Quality (max tensile)
                 best_tensile = -np.inf
                 for idx in front_indices:
                     ind = pop[idx]
@@ -1234,6 +1213,7 @@ with col_right:
                         best_tensile = t2
                         quality_idx = idx
 
+                # 3. Cost (max API, min pressure)
                 best_cost_score = -np.inf
                 for idx in front_indices:
                     ind = pop[idx]
@@ -1253,7 +1233,6 @@ with col_right:
                 st.session_state.feasible_df = feasible_df
                 st.session_state.tested_point = (api_n, efrf)
 
-    # ---- Display cached results ----
     if st.session_state.run_optimized:
         pop = st.session_state.nsga_pop
         objectives = st.session_state.nsga_objectives
@@ -1399,7 +1378,6 @@ with col_right:
 
         if show_comparison:
             st.markdown("### 📊 Model Comparison (Tensile R²)")
-            # Call without caching – fixes UnhashableParamError
             bench_df, chart_data = run_model_comparison(model, scaler, y_scaler, features, df, device)
             st.session_state.benchmark_df = bench_df
 
