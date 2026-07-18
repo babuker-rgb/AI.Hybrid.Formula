@@ -1,16 +1,8 @@
 """
-Hubryd AI – v29.27-R9 (Reordered Toggles)
+Hubryd AI – v29.27-R10 (English UI, Reordered Toggles)
 Hybrid AI for Multi-Objective Optimization of Tablet Formulation
-- Toggles reordered as requested:
-  1. Pareto Front (always shown)
-  2. Golden Solution (always shown)
-  3. Cost-wise solution (toggle)
-  4. Quality-wise solution (toggle)
-  5. Comparison (toggle)
-  6. Sensitivity (toggle)
-  7. Particle Plot (toggle)
-  8. Report (button, standalone)
-- All previous optimisations retained
+- Fully reordered toggles: Cost → Quality → Comparison → Sensitivity → Particle → Report
+- All UI labels in English
 Nile Valley University · Sudan
 """
 
@@ -871,7 +863,7 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
 # Cached Training
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r9_eng.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r10_eng.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -1064,7 +1056,7 @@ with st.sidebar:
     ✅ **Pressure:** ≤ {PRESSURE_MAX:.0f} MPa  
     ✅ **NSGA‑II:** Pop=80, Gen=50
     """)
-    st.caption("🔬 v29.27-R9 — Reordered Toggles")
+    st.caption("🔬 v29.27-R10 — English UI, Reordered")
 
 try:
     model, scaler, y_scaler, features, df = load_or_train()
@@ -1297,20 +1289,20 @@ with col_right:
         st.markdown("---")
 
         # ---- 3. Toggle: Cost-wise solution ----
-        st.toggle("💰 الحل الاقتصادي (Max API, Min Pressure)", value=st.session_state.get('show_cost_solution', False), key="knob_cost")
+        st.toggle("💰 Cost-wise Solution (Max API, Min Pressure)", value=st.session_state.get('show_cost_solution', False), key="knob_cost")
         if st.session_state.get('show_cost_solution', False) and cost_solution is not None:
-            st.markdown("#### 💰 التركيبة المثلى اقتصادياً (أعلى API، أقل ضغط)")
+            st.markdown("#### 💰 Cost-Optimised Formulation (Max API, Min Pressure)")
             d, t, e, ef = predict_pinn(model, scaler, y_scaler, cost_solution)
             col1, col2 = st.columns(2)
             with col1:
-                st.write("**التركيبة:**")
+                st.write("**Formulation:**")
                 st.write(f"API: {cost_solution[0]:.1f}%")
                 st.write(f"MCC: {cost_solution[1]:.1f}%")
                 st.write(f"PVPP: {cost_solution[2]:.1f}%")
                 st.write(f"Mg-St: {cost_solution[3]:.2f}%")
                 st.write(f"Binder: {cost_solution[4]:.1f}%")
             with col2:
-                st.write("**العملية وخصائص الجودة:**")
+                st.write("**Process & CQAs:**")
                 st.write(f"Pressure: {cost_solution[5]:.1f} MPa")
                 st.write(f"Speed: {cost_solution[6]:.1f} rpm")
                 st.write(f"Granule: {cost_solution[7]:.0f} µm")
@@ -1320,20 +1312,20 @@ with col_right:
             st.session_state.cost_pred = (d, t, e, ef)
 
         # ---- 4. Toggle: Quality-wise solution ----
-        st.toggle("🏆 حل الجودة (أعلى Tensile Strength)", value=st.session_state.get('show_quality_solution', False), key="knob_quality")
+        st.toggle("🏆 Quality-wise Solution (Max Tensile Strength)", value=st.session_state.get('show_quality_solution', False), key="knob_quality")
         if st.session_state.get('show_quality_solution', False) and quality_solution is not None:
-            st.markdown("#### 🏆 التركيبة المثلى من ناحية الجودة (أعلى مقاومة شد)")
+            st.markdown("#### 🏆 Quality-Optimised Formulation (Max Tensile Strength)")
             d, t, e, ef = predict_pinn(model, scaler, y_scaler, quality_solution)
             col1, col2 = st.columns(2)
             with col1:
-                st.write("**التركيبة:**")
+                st.write("**Formulation:**")
                 st.write(f"API: {quality_solution[0]:.1f}%")
                 st.write(f"MCC: {quality_solution[1]:.1f}%")
                 st.write(f"PVPP: {quality_solution[2]:.1f}%")
                 st.write(f"Mg-St: {quality_solution[3]:.2f}%")
                 st.write(f"Binder: {quality_solution[4]:.1f}%")
             with col2:
-                st.write("**العملية وخصائص الجودة:**")
+                st.write("**Process & CQAs:**")
                 st.write(f"Pressure: {quality_solution[5]:.1f} MPa")
                 st.write(f"Speed: {quality_solution[6]:.1f} rpm")
                 st.write(f"Granule: {quality_solution[7]:.0f} µm")
@@ -1342,10 +1334,10 @@ with col_right:
                 st.write(f"EFRF: {ef:.4f}")
             st.session_state.quality_pred = (d, t, e, ef)
 
-        # ---- 5. Toggle: Comparison ----
-        st.toggle("📊 المقارنة (Comparison)", value=st.session_state.get('show_comparison', True), key="knob_comparison")
+        # ---- 5. Toggle: Model Comparison ----
+        st.toggle("📊 Model Comparison", value=st.session_state.get('show_comparison', True), key="knob_comparison")
         if st.session_state.get('show_comparison', False):
-            st.markdown("### 📊 مقارنة النماذج (Tensile R²)")
+            st.markdown("### 📊 Model Comparison (Tensile R²)")
             bench_df, chart_data = run_model_comparison(model, scaler, y_scaler, features, df, device)
             st.session_state.benchmark_df = bench_df
 
@@ -1356,27 +1348,27 @@ with col_right:
             st.plotly_chart(fig_bar, use_container_width=True)
             st.dataframe(bench_df, use_container_width=True)
 
-        # ---- 6. Toggle: Sensitivity ----
-        st.toggle("🔬 الحساسية (Sensitivity)", value=st.session_state.get('show_sensitivity', False), key="knob_sensitivity")
+        # ---- 6. Toggle: Sensitivity Analysis ----
+        st.toggle("🔬 Sensitivity Analysis", value=st.session_state.get('show_sensitivity', False), key="knob_sensitivity")
         if st.session_state.get('show_sensitivity', False):
             f = st.session_state.formulation
             if f['api_n'] is not None:
-                st.markdown("### 🔬 تحليل الحساسية – تأثير المعاملات على EFRF")
+                st.markdown("### 🔬 Sensitivity Analysis – Parameter Impact on EFRF")
                 fig_bars = plot_sensitivity_bars(f, model, scaler, y_scaler, efrf_max=0.40)
                 if fig_bars:
                     st.plotly_chart(fig_bars, use_container_width=True)
 
-        # ---- 7. Toggle: Particle Plot ----
-        st.toggle("📊 تأثير حجم الحبيبات (Particle Plot)", value=st.session_state.get('show_particle_plot', False), key="knob_particle_plot")
+        # ---- 7. Toggle: Particle Size Effect ----
+        st.toggle("📊 Particle Size Effect", value=st.session_state.get('show_particle_plot', False), key="knob_particle_plot")
         if st.session_state.get('show_particle_plot', False):
             f = st.session_state.formulation
             if f['api_n'] is not None:
-                st.markdown("### 📊 تأثير حجم الحبيبات مع تغير الضغط")
+                st.markdown("### 📊 Particle Size Effect with Pressure Variation")
                 fig = plot_particle_pressure_density(f, model, scaler, y_scaler)
                 st.plotly_chart(fig, use_container_width=True)
 
-        # ---- 8. Report button (standalone, no content below) ----
-        generate_report_btn = st.button("📄 التقرير (PDF)", key="knob_report")
+        # ---- 8. Report button (standalone) ----
+        generate_report_btn = st.button("📄 Generate Report (PDF)", key="knob_report")
 
         if generate_report_btn and st.session_state.benchmark_df is not None:
             f = st.session_state.formulation
@@ -1393,13 +1385,13 @@ with col_right:
                 balanced_pred, quality_pred, cost_pred, fronts, timestamp
             )
             if error:
-                st.error(f"فشل إنشاء التقرير: {error}")
+                st.error(f"Failed to generate report: {error}")
                 if not FPDF_AVAILABLE:
-                    st.info("الرجاء تثبيت fpdf2: `pip install fpdf2`")
+                    st.info("Please install fpdf2: `pip install fpdf2`")
             else:
                 with open(filepath, "rb") as pdf_file:
                     st.download_button(
-                        label="📥 تحميل التقرير (PDF)",
+                        label="📥 Download Report (PDF)",
                         data=pdf_file,
                         file_name=f"hubryd_report_all_{timestamp[:10]}.pdf",
                         mime="application/pdf"
@@ -1410,6 +1402,6 @@ with col_right:
                     pass
 
     else:
-        st.info("قم بتعديل الشرائح ثم اضغط '🔬 Predict & Optimise' لعرض النتائج.")
+        st.info("Adjust sliders and click '🔬 Predict & Optimise' to see results.")
 
 st.caption("📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Sudan")
