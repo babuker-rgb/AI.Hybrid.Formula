@@ -1,7 +1,15 @@
 """
-Hubryd AI – v29.27-R8 (Content Under Knob)
+Hubryd AI – v29.27-R9 (Reordered Toggles)
 Hybrid AI for Multi-Objective Optimization of Tablet Formulation
-- Each toggle shows its content directly below the knob
+- Toggles reordered as requested:
+  1. Pareto Front (always shown)
+  2. Golden Solution (always shown)
+  3. Cost-wise solution (toggle)
+  4. Quality-wise solution (toggle)
+  5. Comparison (toggle)
+  6. Sensitivity (toggle)
+  7. Particle Plot (toggle)
+  8. Report (button, standalone)
 - All previous optimisations retained
 Nile Valley University · Sudan
 """
@@ -72,12 +80,11 @@ if 'api' not in st.session_state:
         'pressure': 235.0,
         'speed': 10.0,
         'granule': 125.0,
-        'show_pareto': True,
-        'show_sensitivity': False,
-        'show_comparison': True,
-        'show_particle_plot': False,
         'show_cost_solution': False,
         'show_quality_solution': False,
+        'show_comparison': True,
+        'show_sensitivity': False,
+        'show_particle_plot': False,
         'granule_mode': 'Fixed',
         'nsga_pop': None,
         'nsga_objectives': None,
@@ -864,7 +871,7 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
 # Cached Training
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r8_eng.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r9_eng.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -1057,7 +1064,7 @@ with st.sidebar:
     ✅ **Pressure:** ≤ {PRESSURE_MAX:.0f} MPa  
     ✅ **NSGA‑II:** Pop=80, Gen=50
     """)
-    st.caption("🔬 v29.27-R8 — Content Under Knob")
+    st.caption("🔬 v29.27-R9 — Reordered Toggles")
 
 try:
     model, scaler, y_scaler, features, df = load_or_train()
@@ -1243,27 +1250,26 @@ with col_right:
         feasible_df = st.session_state.feasible_df
         tested_point = st.session_state.tested_point
 
-        # ---- Pareto Front (toggle) ----
-        show_pareto = st.session_state.get('show_pareto', True)
-        if show_pareto:
-            st.markdown("### 📉 Pareto Front")
-            if len(fronts) > 0 and len(fronts[0]) > 0:
-                num_solutions = len(fronts[0])
-                st.success(f"✅ Pareto front: {num_solutions} optimal solutions")
-                fig = plot_pareto_clean(objectives, fronts, None, feasible_df, tested_point, efrf_max=0.40)
-                if fig is not None:
-                    if balanced_solution is not None:
-                        d, t, e, ef = predict_pinn(model, scaler, y_scaler, balanced_solution)
-                        fig.add_trace(go.Scatter(
-                            x=[balanced_solution[0]],
-                            y=[ef],
-                            mode='markers',
-                            name='⭐ Golden (Balanced)',
-                            marker=dict(size=12, color='gold', symbol='star', line=dict(width=2, color='black')),
-                            hovertemplate='Golden (Balanced)<br>API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
-                        ))
-                    st.plotly_chart(fig, use_container_width=True)
+        # ---- 1. Pareto Front (always shown) ----
+        st.markdown("### 📉 Pareto Front")
+        if len(fronts) > 0 and len(fronts[0]) > 0:
+            num_solutions = len(fronts[0])
+            st.success(f"✅ Pareto front: {num_solutions} optimal solutions")
+            fig = plot_pareto_clean(objectives, fronts, None, feasible_df, tested_point, efrf_max=0.40)
+            if fig is not None:
+                if balanced_solution is not None:
+                    d, t, e, ef = predict_pinn(model, scaler, y_scaler, balanced_solution)
+                    fig.add_trace(go.Scatter(
+                        x=[balanced_solution[0]],
+                        y=[ef],
+                        mode='markers',
+                        name='⭐ Golden (Balanced)',
+                        marker=dict(size=12, color='gold', symbol='star', line=dict(width=2, color='black')),
+                        hovertemplate='Golden (Balanced)<br>API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
+                    ))
+                st.plotly_chart(fig, use_container_width=True)
 
+        # ---- 2. Golden Solution (always shown) ----
         st.markdown("### ⭐ Golden Solution (Balanced)")
         if balanced_solution is not None:
             d, t, e, ef = predict_pinn(model, scaler, y_scaler, balanced_solution)
@@ -1290,20 +1296,56 @@ with col_right:
 
         st.markdown("---")
 
-        # ---- Toggle: Sensitivity (content directly below) ----
-        st.toggle("🔬 Sensitivity", value=st.session_state.get('show_sensitivity', False), key="knob_sensitivity")
-        if st.session_state.get('show_sensitivity', False):
-            f = st.session_state.formulation
-            if f['api_n'] is not None:
-                st.markdown("### 🔬 Sensitivity Analysis – Parameter Impact on EFRF")
-                fig_bars = plot_sensitivity_bars(f, model, scaler, y_scaler, efrf_max=0.40)
-                if fig_bars:
-                    st.plotly_chart(fig_bars, use_container_width=True)
+        # ---- 3. Toggle: Cost-wise solution ----
+        st.toggle("💰 الحل الاقتصادي (Max API, Min Pressure)", value=st.session_state.get('show_cost_solution', False), key="knob_cost")
+        if st.session_state.get('show_cost_solution', False) and cost_solution is not None:
+            st.markdown("#### 💰 التركيبة المثلى اقتصادياً (أعلى API، أقل ضغط)")
+            d, t, e, ef = predict_pinn(model, scaler, y_scaler, cost_solution)
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**التركيبة:**")
+                st.write(f"API: {cost_solution[0]:.1f}%")
+                st.write(f"MCC: {cost_solution[1]:.1f}%")
+                st.write(f"PVPP: {cost_solution[2]:.1f}%")
+                st.write(f"Mg-St: {cost_solution[3]:.2f}%")
+                st.write(f"Binder: {cost_solution[4]:.1f}%")
+            with col2:
+                st.write("**العملية وخصائص الجودة:**")
+                st.write(f"Pressure: {cost_solution[5]:.1f} MPa")
+                st.write(f"Speed: {cost_solution[6]:.1f} rpm")
+                st.write(f"Granule: {cost_solution[7]:.0f} µm")
+                st.write(f"Density: {d:.3f}")
+                st.write(f"Tensile: {t:.3f} MPa")
+                st.write(f"EFRF: {ef:.4f}")
+            st.session_state.cost_pred = (d, t, e, ef)
 
-        # ---- Toggle: Comparison ----
-        st.toggle("📊 Comparison", value=st.session_state.get('show_comparison', True), key="knob_comparison")
+        # ---- 4. Toggle: Quality-wise solution ----
+        st.toggle("🏆 حل الجودة (أعلى Tensile Strength)", value=st.session_state.get('show_quality_solution', False), key="knob_quality")
+        if st.session_state.get('show_quality_solution', False) and quality_solution is not None:
+            st.markdown("#### 🏆 التركيبة المثلى من ناحية الجودة (أعلى مقاومة شد)")
+            d, t, e, ef = predict_pinn(model, scaler, y_scaler, quality_solution)
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**التركيبة:**")
+                st.write(f"API: {quality_solution[0]:.1f}%")
+                st.write(f"MCC: {quality_solution[1]:.1f}%")
+                st.write(f"PVPP: {quality_solution[2]:.1f}%")
+                st.write(f"Mg-St: {quality_solution[3]:.2f}%")
+                st.write(f"Binder: {quality_solution[4]:.1f}%")
+            with col2:
+                st.write("**العملية وخصائص الجودة:**")
+                st.write(f"Pressure: {quality_solution[5]:.1f} MPa")
+                st.write(f"Speed: {quality_solution[6]:.1f} rpm")
+                st.write(f"Granule: {quality_solution[7]:.0f} µm")
+                st.write(f"Density: {d:.3f}")
+                st.write(f"Tensile: {t:.3f} MPa")
+                st.write(f"EFRF: {ef:.4f}")
+            st.session_state.quality_pred = (d, t, e, ef)
+
+        # ---- 5. Toggle: Comparison ----
+        st.toggle("📊 المقارنة (Comparison)", value=st.session_state.get('show_comparison', True), key="knob_comparison")
         if st.session_state.get('show_comparison', False):
-            st.markdown("### 📊 Model Comparison (Tensile R²)")
+            st.markdown("### 📊 مقارنة النماذج (Tensile R²)")
             bench_df, chart_data = run_model_comparison(model, scaler, y_scaler, features, df, device)
             st.session_state.benchmark_df = bench_df
 
@@ -1314,63 +1356,27 @@ with col_right:
             st.plotly_chart(fig_bar, use_container_width=True)
             st.dataframe(bench_df, use_container_width=True)
 
-        # ---- Toggle: Particle Plot ----
-        st.toggle("📊 Particle Plot", value=st.session_state.get('show_particle_plot', False), key="knob_particle_plot")
+        # ---- 6. Toggle: Sensitivity ----
+        st.toggle("🔬 الحساسية (Sensitivity)", value=st.session_state.get('show_sensitivity', False), key="knob_sensitivity")
+        if st.session_state.get('show_sensitivity', False):
+            f = st.session_state.formulation
+            if f['api_n'] is not None:
+                st.markdown("### 🔬 تحليل الحساسية – تأثير المعاملات على EFRF")
+                fig_bars = plot_sensitivity_bars(f, model, scaler, y_scaler, efrf_max=0.40)
+                if fig_bars:
+                    st.plotly_chart(fig_bars, use_container_width=True)
+
+        # ---- 7. Toggle: Particle Plot ----
+        st.toggle("📊 تأثير حجم الحبيبات (Particle Plot)", value=st.session_state.get('show_particle_plot', False), key="knob_particle_plot")
         if st.session_state.get('show_particle_plot', False):
             f = st.session_state.formulation
             if f['api_n'] is not None:
-                st.markdown("### 📊 Particle Size Effect with Pressure Variation")
+                st.markdown("### 📊 تأثير حجم الحبيبات مع تغير الضغط")
                 fig = plot_particle_pressure_density(f, model, scaler, y_scaler)
                 st.plotly_chart(fig, use_container_width=True)
 
-        # ---- Toggle: Cost-wise solution ----
-        st.toggle("💰 cost-wise optimum solution", value=st.session_state.get('show_cost_solution', False), key="knob_cost")
-        if st.session_state.get('show_cost_solution', False) and cost_solution is not None:
-            st.markdown("#### 💰 Cost‑Optimised Solution (Max API, Min Pressure)")
-            d, t, e, ef = predict_pinn(model, scaler, y_scaler, cost_solution)
-            col1, col2 = st.columns(2)
-            with col1:
-                st.write("**Formulation:**")
-                st.write(f"API: {cost_solution[0]:.1f}%")
-                st.write(f"MCC: {cost_solution[1]:.1f}%")
-                st.write(f"PVPP: {cost_solution[2]:.1f}%")
-                st.write(f"Mg-St: {cost_solution[3]:.2f}%")
-                st.write(f"Binder: {cost_solution[4]:.1f}%")
-            with col2:
-                st.write("**Process & CQAs:**")
-                st.write(f"Pressure: {cost_solution[5]:.1f} MPa")
-                st.write(f"Speed: {cost_solution[6]:.1f} rpm")
-                st.write(f"Granule: {cost_solution[7]:.0f} µm")
-                st.write(f"Density: {d:.3f}")
-                st.write(f"Tensile: {t:.3f} MPa")
-                st.write(f"EFRF: {ef:.4f}")
-            st.session_state.cost_pred = (d, t, e, ef)
-
-        # ---- Toggle: Quality-wise solution ----
-        st.toggle("🏆 quality-wise optimum solution", value=st.session_state.get('show_quality_solution', False), key="knob_quality")
-        if st.session_state.get('show_quality_solution', False) and quality_solution is not None:
-            st.markdown("#### 🏆 Quality‑Optimised Solution (Max Tensile Strength)")
-            d, t, e, ef = predict_pinn(model, scaler, y_scaler, quality_solution)
-            col1, col2 = st.columns(2)
-            with col1:
-                st.write("**Formulation:**")
-                st.write(f"API: {quality_solution[0]:.1f}%")
-                st.write(f"MCC: {quality_solution[1]:.1f}%")
-                st.write(f"PVPP: {quality_solution[2]:.1f}%")
-                st.write(f"Mg-St: {quality_solution[3]:.2f}%")
-                st.write(f"Binder: {quality_solution[4]:.1f}%")
-            with col2:
-                st.write("**Process & CQAs:**")
-                st.write(f"Pressure: {quality_solution[5]:.1f} MPa")
-                st.write(f"Speed: {quality_solution[6]:.1f} rpm")
-                st.write(f"Granule: {quality_solution[7]:.0f} µm")
-                st.write(f"Density: {d:.3f}")
-                st.write(f"Tensile: {t:.3f} MPa")
-                st.write(f"EFRF: {ef:.4f}")
-            st.session_state.quality_pred = (d, t, e, ef)
-
-        # ---- Report button (always visible) ----
-        generate_report_btn = st.button("📄 Report", key="knob_report")
+        # ---- 8. Report button (standalone, no content below) ----
+        generate_report_btn = st.button("📄 التقرير (PDF)", key="knob_report")
 
         if generate_report_btn and st.session_state.benchmark_df is not None:
             f = st.session_state.formulation
@@ -1387,13 +1393,13 @@ with col_right:
                 balanced_pred, quality_pred, cost_pred, fronts, timestamp
             )
             if error:
-                st.error(f"PDF generation failed: {error}")
+                st.error(f"فشل إنشاء التقرير: {error}")
                 if not FPDF_AVAILABLE:
-                    st.info("Please install fpdf2: `pip install fpdf2`")
+                    st.info("الرجاء تثبيت fpdf2: `pip install fpdf2`")
             else:
                 with open(filepath, "rb") as pdf_file:
                     st.download_button(
-                        label="📥 Download PDF Report (All Solutions)",
+                        label="📥 تحميل التقرير (PDF)",
                         data=pdf_file,
                         file_name=f"hubryd_report_all_{timestamp[:10]}.pdf",
                         mime="application/pdf"
@@ -1404,6 +1410,6 @@ with col_right:
                     pass
 
     else:
-        st.info("Adjust sliders and click 'Predict & Optimise' to see results.")
+        st.info("قم بتعديل الشرائح ثم اضغط '🔬 Predict & Optimise' لعرض النتائج.")
 
 st.caption("📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Sudan")
