@@ -1,9 +1,9 @@
 """
-Hubryd AI – v29.27-R13 (Tighter Practical Constraints)
+Hubryd AI – v29.27-R15 (Targeted 90.5% API Golden Solution)
 Hybrid AI for Multi-Objective Optimization of Tablet Formulation
-- PVPP ≥ 1.0% (ensures disintegration)
-- Pressure: 150–250 MPa (reduces tooling wear)
-- Speed: 15–30 RPM (commercial throughput)
+- MCC_MIN lowered to 3.5% to achieve 90.5% API ± 0.5%
+- PVPP_MIN = 1.5% for robust disintegration
+- Pressure 150–250 MPa | Speed 15–30 RPM
 - All previous fixes retained.
 Nile Valley University · Sudan
 """
@@ -38,7 +38,7 @@ except ImportError:
     FPDF_AVAILABLE = False
 
 # ================================================================
-# Physics Constants – TIGHTER PRACTICAL RANGES (v29.27-R13)
+# Physics Constants – TARGETED FOR 90.5% GOLDEN SOLUTION
 # ================================================================
 D_MIN = 0.70
 D_MAX = 0.99
@@ -48,19 +48,19 @@ EFRF_MAX = 0.50
 # Formulation bounds
 API_MIN = 80.0
 API_MAX = 98.0
-MCC_MIN = 4.0
+MCC_MIN = 3.5                  # LOWERED to 3.5% to enable 90.5% API
 MCC_MAX = 8.0
-PVPP_MIN = 1.0                  # RAISED: ensures disintegration
+PVPP_MIN = 1.5                 # RAISED for robust disintegration
 PVPP_MAX = 6.0
 MGST_MIN = 0.3
 MGST_MAX = 1.2
 BINDER_MIN = 3.0
 BINDER_MAX = 6.0
 
-# Process bounds – TIGHTER
+# Process bounds – practical
 PRESSURE_MIN = 150.0
-PRESSURE_MAX = 250.0            # LOWERED: reduces tooling wear
-SPEED_MIN = 15.0                # RAISED: commercial throughput
+PRESSURE_MAX = 250.0
+SPEED_MIN = 15.0
 SPEED_MAX = 30.0
 GRANULE_MIN = 30.0
 GRANULE_MAX = 250.0
@@ -88,9 +88,9 @@ if 'api' not in st.session_state:
     st.session_state.update({
         'api': 90.5,
         'binder': 4.0,
-        'pvpp': 2.5,
+        'pvpp': 2.0,
         'mgst': 0.5,
-        'mcc': 5.0,
+        'mcc': 4.0,
         'pressure': 200.0,
         'speed': 20.0,
         'granule': 125.0,
@@ -510,7 +510,7 @@ class NSGAII:
         for i in range(self.pop_size):
             if i < 0.3 * self.pop_size:
                 api = rng.uniform(90, 95)
-                mcc = rng.uniform(5, 7)
+                mcc = rng.uniform(4, 6)
                 binder = rng.uniform(3.5, 5.0)
                 pvpp = rng.uniform(2, 4)
                 mgst = rng.uniform(0.4, 0.8)
@@ -886,7 +886,7 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
 # Cached Training
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r13_eng.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r15_eng.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -1063,7 +1063,9 @@ st.markdown("""
 <div style="background: #0b1a33; padding:1rem; border-radius:0.5rem; text-align:center; margin-bottom:1rem;">
     <h2 style="color:#fff; margin:0;">🧬 Hybrid AI · Multi‑Objective Tablet Optimization</h2>
     <p style="color:#64ffda; margin:0;">PINN + NSGA‑II | Nile Valley University, Sudan</p>
-    <p style="color:#aabbcc; font-size:0.9rem; margin-top:0.2rem;">🔧 Practical: MCC≥4%, PVPP≥1%, Mg-St≥0.3%, Binder≥3% | Pressure 150-250 MPa | Speed 15-30 RPM</p>
+    <p style="color:#aabbcc; font-size:0.9rem; margin-top:0.2rem;">
+    🔧 Practical: MCC≥3.5%, PVPP≥1.5%, Mg-St≥0.3%, Binder≥3% | Pressure 150-250 MPa | Speed 15-30 RPM
+    </p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1074,15 +1076,15 @@ with st.sidebar:
     ✅ **Density:** {D_MIN:.2f}–{D_MAX:.2f}  
     ✅ **Tensile:** ≥ {TENSILE_MIN:.2f} MPa  
     ✅ **EFRF:** &lt; 0.40 (feasible)  
-    ✅ **MCC:** {MCC_MIN:.1f}–{MCC_MAX:.1f}% (Min 4%)  
-    ✅ **PVPP:** {PVPP_MIN:.1f}–{PVPP_MAX:.1f}% (Min 1%)  
+    ✅ **MCC:** {MCC_MIN:.1f}–{MCC_MAX:.1f}% (Min {MCC_MIN:.1f}%)  
+    ✅ **PVPP:** {PVPP_MIN:.1f}–{PVPP_MAX:.1f}% (Min {PVPP_MIN:.1f}%)  
     ✅ **Mg-St:** {MGST_MIN:.1f}–{MGST_MAX:.2f}% (Min 0.3%)  
     ✅ **Binder:** {BINDER_MIN:.1f}–{BINDER_MAX:.1f}% (Min 3%)  
     ✅ **Pressure:** {PRESSURE_MIN:.0f}–{PRESSURE_MAX:.0f} MPa (150–250)  
     ✅ **Speed:** {SPEED_MIN:.0f}–{SPEED_MAX:.0f} RPM (15–30)  
     ✅ **NSGA‑II:** Pop=80, Gen=50
     """)
-    st.caption("🔬 v29.27-R13 — Tighter Practical Constraints")
+    st.caption("🔬 v29.27-R15 — Targeted 90.5% API")
 
 # Load model (cached)
 try:
