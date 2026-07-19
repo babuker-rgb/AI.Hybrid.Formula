@@ -1,8 +1,8 @@
 """
-Hubryd AI – v29.27-R11 (Fixed Toggle Keys, Correct Order)
+Hubryd AI – v29.27-R12 (Practical Industrial Constraints)
 Hybrid AI for Multi-Objective Optimization of Tablet Formulation
-- st.set_page_config is now the first Streamlit command.
-- Toggle keys use consistent session-state variables.
+- Enforced practical minima: MCC≥4%, Mg-St≥0.3%, Binder≥3%
+- Pressure: 150–300 MPa | Speed: 5–30 RPM
 - All UI labels in English.
 Nile Valley University · Sudan
 """
@@ -37,18 +37,28 @@ except ImportError:
     FPDF_AVAILABLE = False
 
 # ================================================================
-# Physics Constants
+# Physics Constants – UPDATED TO PRACTICAL INDUSTRIAL RANGES
 # ================================================================
 D_MIN = 0.70
 D_MAX = 0.99
 TENSILE_MIN = 1.50
 EFRF_MAX = 0.50
 MCC_MAX = 8.0
-PRESSURE_MAX = 400.0
-BINDER_MIN = 0.3
+MCC_MIN = 4.0                     # <-- NEW: Minimum MCC for binder effect
+PRESSURE_MAX = 300.0              # <-- LOWERED: Practical max
+PRESSURE_MIN = 150.0              # <-- RAISED: Practical min
+BINDER_MIN = 3.0                  # <-- RAISED: Practical binder level
 BINDER_MAX = 6.0
+MGST_MIN = 0.3                    # <-- RAISED: Minimum lubricant for ejection
+MGST_MAX = 1.2
 API_MIN = 80.0
 API_MAX = 98.0
+SPEED_MIN = 5.0                   # <-- RAISED: Economical min speed
+SPEED_MAX = 30.0                  # <-- LOWERED: Industrial max speed
+PVPP_MIN = 0.5
+PVPP_MAX = 6.0
+GRANULE_MIN = 30.0
+GRANULE_MAX = 250.0
 
 # ================================================================
 # Training Parameters
@@ -72,12 +82,12 @@ W_EFRF_PENALTY = 100.0
 if 'api' not in st.session_state:
     st.session_state.update({
         'api': 90.5,
-        'binder': 3.0,
+        'binder': 4.0,
         'pvpp': 3.0,
-        'mgst': 0.15,
-        'mcc': 3.35,
-        'pressure': 235.0,
-        'speed': 10.0,
+        'mgst': 0.5,
+        'mcc': 5.0,
+        'pressure': 220.0,
+        'speed': 15.0,
         'granule': 125.0,
         'show_cost_solution': False,
         'show_quality_solution': False,
@@ -105,7 +115,7 @@ if 'api' not in st.session_state:
     })
 
 # ================================================================
-# Vectorised Helper Functions (unchanged)
+# Vectorised Helper Functions (UPDATED WITH NEW BOUNDS)
 # ================================================================
 def normalize_components(api, binder, pvpp, mgst, mcc):
     api = np.asarray(api, dtype=float)
@@ -114,27 +124,31 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
     mgst = np.asarray(mgst, dtype=float)
     mcc = np.asarray(mcc, dtype=float)
 
+    # Enforce new practical minimums and maximums
     api = np.clip(api, API_MIN, API_MAX)
-    binder = np.clip(binder, 0.1, 15.0)
-    pvpp = np.clip(pvpp, 0.1, 15.0)
-    mgst = np.clip(mgst, 0.01, 3.0)
-    mcc = np.clip(mcc, 0.1, 20.0)
+    binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
+    pvpp = np.clip(pvpp, PVPP_MIN, PVPP_MAX)
+    mgst = np.clip(mgst, MGST_MIN, MGST_MAX)
+    mcc = np.clip(mcc, MCC_MIN, MCC_MAX)
 
     total = api + binder + pvpp + mgst + mcc
     total = np.where(total <= 0, 1.0, total)
 
+    # Normalise to 100%
     api = (api / total) * 100.0
     binder = (binder / total) * 100.0
     pvpp = (pvpp / total) * 100.0
     mgst = (mgst / total) * 100.0
     mcc = (mcc / total) * 100.0
 
+    # Re-clamp after normalisation (ensures they stay within practical bounds)
     api = np.clip(api, API_MIN, API_MAX)
     binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
-    pvpp = np.clip(pvpp, 0.5, 6.0)
-    mgst = np.clip(mgst, 0.01, 1.2)
-    mcc = np.clip(mcc, 0.0, MCC_MAX)
+    pvpp = np.clip(pvpp, PVPP_MIN, PVPP_MAX)
+    mgst = np.clip(mgst, MGST_MIN, MGST_MAX)
+    mcc = np.clip(mcc, MCC_MIN, MCC_MAX)
 
+    # Final re-normalisation to fix sum to 100% after clipping
     total2 = api + binder + pvpp + mgst + mcc
     total2 = np.where(total2 <= 0, 1.0, total2)
     scale = 100.0 / total2
@@ -144,11 +158,12 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
     mgst = mgst * scale
     mcc = mcc * scale
 
+    # Final safety clamp
     api = np.clip(api, API_MIN, API_MAX)
     binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
-    pvpp = np.clip(pvpp, 0.5, 6.0)
-    mgst = np.clip(mgst, 0.01, 1.2)
-    mcc = np.clip(mcc, 0.0, MCC_MAX)
+    pvpp = np.clip(pvpp, PVPP_MIN, PVPP_MAX)
+    mgst = np.clip(mgst, MGST_MIN, MGST_MAX)
+    mcc = np.clip(mcc, MCC_MIN, MCC_MAX)
 
     return api, binder, pvpp, mgst, mcc
 
@@ -184,14 +199,15 @@ def add_interaction_features(X_raw):
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     rng = np.random.default_rng(random_state)
+    # Updated bounds for generation
     api_raw = rng.uniform(API_MIN, API_MAX, n_samples)
     binder_raw = rng.uniform(BINDER_MIN, BINDER_MAX, n_samples)
-    pvpp_raw = rng.uniform(0.5, 6.0, n_samples)
-    mgst_raw = rng.uniform(0.01, 1.2, n_samples)
-    mcc_raw = rng.uniform(0.0, MCC_MAX, n_samples)
-    pressure_raw = rng.uniform(80.0, PRESSURE_MAX, n_samples)
-    speed_raw = rng.uniform(1.0, 50.0, n_samples)
-    granule_raw = rng.uniform(30.0, 250.0, n_samples)
+    pvpp_raw = rng.uniform(PVPP_MIN, PVPP_MAX, n_samples)
+    mgst_raw = rng.uniform(MGST_MIN, MGST_MAX, n_samples)
+    mcc_raw = rng.uniform(MCC_MIN, MCC_MAX, n_samples)
+    pressure_raw = rng.uniform(PRESSURE_MIN, PRESSURE_MAX, n_samples)
+    speed_raw = rng.uniform(SPEED_MIN, SPEED_MAX, n_samples)
+    granule_raw = rng.uniform(GRANULE_MIN, GRANULE_MAX, n_samples)
 
     api_n, binder_n, pvpp_n, mgst_n, mcc_n = normalize_components(
         api_raw, binder_raw, pvpp_raw, mgst_raw, mcc_raw
@@ -200,6 +216,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     X = np.column_stack([api_n, mcc_n, pvpp_n, mgst_n, binder_n,
                          pressure_raw, speed_raw, granule_raw])
 
+    # Physics models (unchanged)
     k = 0.025 + 0.0001 * pressure_raw
     A = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
     x_val = k * pressure_raw + A
@@ -242,7 +259,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# PINN Model (unchanged)
+# PINN Model (Unchanged)
 # ================================================================
 class Mish(nn.Module):
     def forward(self, x):
@@ -336,7 +353,7 @@ class MultiTaskPINN(nn.Module):
         return data_loss + physics_loss
 
 # ================================================================
-# NSGA-II (unchanged from v29.27-R10)
+# NSGA-II (UPDATED REPAIR FUNCTIONS WITH NEW BOUNDS)
 # ================================================================
 class NSGAII:
     def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS,
@@ -353,12 +370,12 @@ class NSGAII:
     def _repair(self, ind):
         api, mcc, pvpp, mgst, binder, pressure, speed, granule = ind
         api, binder, pvpp, mgst, mcc = normalize_components(api, binder, pvpp, mgst, mcc)
-        pressure = np.clip(pressure, 80, PRESSURE_MAX)
-        speed = np.clip(speed, 1, 50)
+        pressure = np.clip(pressure, PRESSURE_MIN, PRESSURE_MAX)
+        speed = np.clip(speed, SPEED_MIN, SPEED_MAX)
         if self.granule_fixed:
             granule = self.granule_fixed_val
         else:
-            granule = np.clip(granule, 30, 250)
+            granule = np.clip(granule, GRANULE_MIN, GRANULE_MAX)
         return np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule])
 
     def _repair_batch(self, pop):
@@ -367,12 +384,12 @@ class NSGAII:
         pressure = pop[:, 5]; speed = pop[:, 6]; granule = pop[:, 7]
 
         api, binder, pvpp, mgst, mcc = normalize_components(api, binder, pvpp, mgst, mcc)
-        pressure = np.clip(pressure, 80, PRESSURE_MAX)
-        speed = np.clip(speed, 1, 50)
+        pressure = np.clip(pressure, PRESSURE_MIN, PRESSURE_MAX)
+        speed = np.clip(speed, SPEED_MIN, SPEED_MAX)
         if self.granule_fixed:
             granule = np.full_like(granule, self.granule_fixed_val)
         else:
-            granule = np.clip(granule, 30, 250)
+            granule = np.clip(granule, GRANULE_MIN, GRANULE_MAX)
 
         return np.column_stack([api, mcc, pvpp, mgst, binder, pressure, speed, granule])
 
@@ -494,19 +511,19 @@ class NSGAII:
         for i in range(self.pop_size):
             if i < 0.3 * self.pop_size:
                 api = rng.uniform(90, 95)
-                mcc = rng.uniform(2, 6)
-                binder = rng.uniform(1.5, 3.5)
-                pvpp = rng.uniform(1, 4)
-                mgst = rng.uniform(0.1, 0.4)
+                mcc = rng.uniform(5, 7)
+                binder = rng.uniform(3.5, 5.0)
+                pvpp = rng.uniform(2, 4)
+                mgst = rng.uniform(0.4, 0.8)
             else:
                 api = rng.uniform(API_MIN, API_MAX)
-                mcc = rng.uniform(0.1, MCC_MAX)
+                mcc = rng.uniform(MCC_MIN, MCC_MAX)
                 binder = rng.uniform(BINDER_MIN, BINDER_MAX)
-                pvpp = rng.uniform(0.5, 6)
-                mgst = rng.uniform(0.01, 1.2)
-            pressure = rng.uniform(80, PRESSURE_MAX)
-            speed = rng.uniform(1, 50)
-            granule = rng.uniform(30, 250)
+                pvpp = rng.uniform(PVPP_MIN, PVPP_MAX)
+                mgst = rng.uniform(MGST_MIN, MGST_MAX)
+            pressure = rng.uniform(PRESSURE_MIN, PRESSURE_MAX)
+            speed = rng.uniform(SPEED_MIN, SPEED_MAX)
+            granule = rng.uniform(GRANULE_MIN, GRANULE_MAX)
             ind = np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule])
             pop.append(self._repair(ind))
         pop = np.array(pop)
@@ -547,7 +564,7 @@ class NSGAII:
         return pop, objectives, fronts
 
 # ================================================================
-# Prediction and Plotting Helpers
+# Prediction and Plotting Helpers (UPDATED SENSITIVITY PARAMS)
 # ================================================================
 def predict_pinn(model, scaler, y_scaler, inputs):
     try:
@@ -570,12 +587,12 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
     rng = np.random.default_rng(42)
     api = rng.uniform(API_MIN, API_MAX, n_samples)
     binder = rng.uniform(BINDER_MIN, BINDER_MAX, n_samples)
-    pvpp = rng.uniform(0.5, 6.0, n_samples)
-    mgst = rng.uniform(0.01, 1.2, n_samples)
-    mcc = rng.uniform(0.0, MCC_MAX, n_samples)
-    pressure = rng.uniform(80.0, PRESSURE_MAX, n_samples)
-    speed = rng.uniform(1.0, 50.0, n_samples)
-    granule = rng.uniform(30.0, 250.0, n_samples)
+    pvpp = rng.uniform(PVPP_MIN, PVPP_MAX, n_samples)
+    mgst = rng.uniform(MGST_MIN, MGST_MAX, n_samples)
+    mcc = rng.uniform(MCC_MIN, MCC_MAX, n_samples)
+    pressure = rng.uniform(PRESSURE_MIN, PRESSURE_MAX, n_samples)
+    speed = rng.uniform(SPEED_MIN, SPEED_MAX, n_samples)
+    granule = rng.uniform(GRANULE_MIN, GRANULE_MAX, n_samples)
 
     api_n, binder_n, pvpp_n, mgst_n, mcc_n = normalize_components(
         api, binder, pvpp, mgst, mcc
@@ -597,7 +614,7 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
 
     mask = ((D_MIN <= density) & (density <= D_MAX) &
             (tensile >= TENSILE_MIN) & (efrf < 0.40) &
-            (mcc_n <= MCC_MAX))
+            (mcc_n <= MCC_MAX) & (mcc_n >= MCC_MIN))
     feasible_api = api_n[mask]
     feasible_efrf = efrf[mask]
     return pd.DataFrame({'API': feasible_api, 'EFRF': feasible_efrf})
@@ -661,13 +678,13 @@ def plot_sensitivity_bars(formulation, model, scaler, y_scaler, efrf_max=0.40):
 
     param_defs = [
         {'name': 'API', 'current': api0, 'min': API_MIN, 'max': API_MAX, 'unit': '%'},
-        {'name': 'MCC', 'current': mcc0, 'min': 0, 'max': MCC_MAX, 'unit': '%'},
-        {'name': 'PVPP', 'current': pvpp0, 'min': 0.5, 'max': 6.0, 'unit': '%'},
-        {'name': 'Mg-St', 'current': mgst0, 'min': 0.01, 'max': 1.2, 'unit': '%'},
+        {'name': 'MCC', 'current': mcc0, 'min': MCC_MIN, 'max': MCC_MAX, 'unit': '%'},
+        {'name': 'PVPP', 'current': pvpp0, 'min': PVPP_MIN, 'max': PVPP_MAX, 'unit': '%'},
+        {'name': 'Mg-St', 'current': mgst0, 'min': MGST_MIN, 'max': MGST_MAX, 'unit': '%'},
         {'name': 'Binder', 'current': binder0, 'min': BINDER_MIN, 'max': BINDER_MAX, 'unit': '%'},
-        {'name': 'Pressure', 'current': press0, 'min': 80, 'max': PRESSURE_MAX, 'unit': 'MPa'},
-        {'name': 'Speed', 'current': speed0, 'min': 1, 'max': 50, 'unit': 'rpm'},
-        {'name': 'Granule', 'current': granule0, 'min': 30, 'max': 250, 'unit': 'µm'}
+        {'name': 'Pressure', 'current': press0, 'min': PRESSURE_MIN, 'max': PRESSURE_MAX, 'unit': 'MPa'},
+        {'name': 'Speed', 'current': speed0, 'min': SPEED_MIN, 'max': SPEED_MAX, 'unit': 'rpm'},
+        {'name': 'Granule', 'current': granule0, 'min': GRANULE_MIN, 'max': GRANULE_MAX, 'unit': 'µm'}
     ]
 
     base_input = [api0, mcc0, pvpp0, mgst0, binder0, press0, speed0, granule0]
@@ -714,8 +731,8 @@ def plot_particle_pressure_density(formulation, model, scaler, y_scaler):
     api0 = formulation['api_n']; mcc0 = formulation['mcc_n']
     pvpp0 = formulation['pvpp_n']; mgst0 = formulation['mgst_n']
     binder0 = formulation['binder_n']; speed0 = formulation['speed']
-    granule_range = np.linspace(30, 250, 20)
-    pressure_range = np.linspace(80, PRESSURE_MAX, 20)
+    granule_range = np.linspace(GRANULE_MIN, GRANULE_MAX, 20)
+    pressure_range = np.linspace(PRESSURE_MIN, PRESSURE_MAX, 20)
     density_grid = np.zeros((len(pressure_range), len(granule_range)))
     for i, press in enumerate(pressure_range):
         for j, g in enumerate(granule_range):
@@ -739,7 +756,7 @@ def plot_particle_pressure_density(formulation, model, scaler, y_scaler):
     return fig
 
 # ================================================================
-# PDF Report (unchanged)
+# PDF Report (Unchanged)
 # ================================================================
 def generate_pdf_report(formulation, bench_df, balanced_solution, quality_solution, cost_solution,
                         balanced_pred, quality_pred, cost_pred, fronts, timestamp):
@@ -870,7 +887,7 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
 # Cached Training
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r11_eng.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r12_eng.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -1041,27 +1058,31 @@ def run_model_comparison(model, scaler, y_scaler, features, df, device):
     return bench_df, chart_data
 
 # ================================================================
-# MAIN UI (moved after all definitions, but st.set_page_config already called)
+# MAIN UI
 # ================================================================
 st.markdown("""
 <div style="background: #0b1a33; padding:1rem; border-radius:0.5rem; text-align:center; margin-bottom:1rem;">
     <h2 style="color:#fff; margin:0;">🧬 Hybrid AI · Multi‑Objective Tablet Optimization</h2>
     <p style="color:#64ffda; margin:0;">PINN + NSGA‑II | Nile Valley University, Sudan</p>
+    <p style="color:#aabbcc; font-size:0.9rem; margin-top:0.2rem;">🔧 Practical Constraints: MCC≥4%, Mg-St≥0.3%, Binder≥3% | Pressure 150-300 MPa | Speed 5-30 RPM</p>
 </div>
 """, unsafe_allow_html=True)
 
 with st.sidebar:
-    st.markdown("### 📚 Physics Constraints")
+    st.markdown("### 📚 Physics Constraints (Practical Ranges)")
     st.markdown(f"""
     ✅ **API:** {API_MIN:.0f}–{API_MAX:.0f}%  
     ✅ **Density:** {D_MIN:.2f}–{D_MAX:.2f}  
     ✅ **Tensile:** ≥ {TENSILE_MIN:.2f} MPa  
     ✅ **EFRF:** &lt; 0.40 (feasible)  
-    ✅ **MCC:** ≤ {MCC_MAX:.1f}%  
-    ✅ **Pressure:** ≤ {PRESSURE_MAX:.0f} MPa  
+    ✅ **MCC:** {MCC_MIN:.1f}–{MCC_MAX:.1f}% (Min 4%)  
+    ✅ **Mg-St:** {MGST_MIN:.1f}–{MGST_MAX:.2f}% (Min 0.3%)  
+    ✅ **Binder:** {BINDER_MIN:.1f}–{BINDER_MAX:.1f}% (Min 3%)  
+    ✅ **Pressure:** {PRESSURE_MIN:.0f}–{PRESSURE_MAX:.0f} MPa (150–300)  
+    ✅ **Speed:** {SPEED_MIN:.0f}–{SPEED_MAX:.0f} RPM (5–30)  
     ✅ **NSGA‑II:** Pop=80, Gen=50
     """)
-    st.caption("🔬 v29.27-R11 — Fixed Toggle Keys")
+    st.caption("🔬 v29.27-R12 — Practical Industrial Constraints")
 
 # Load model (cached)
 try:
@@ -1084,23 +1105,23 @@ with col_left:
         with c1:
             api = st.slider("API (%)", API_MIN, API_MAX, st.session_state.api, 0.1, key="api_slider")
             binder = st.slider("Binder (%)", BINDER_MIN, BINDER_MAX, st.session_state.binder, 0.1, key="binder_slider")
-            pvpp = st.slider("PVPP (%)", 0.5, 6.0, st.session_state.pvpp, 0.1, key="pvpp_slider")
+            pvpp = st.slider("PVPP (%)", PVPP_MIN, PVPP_MAX, st.session_state.pvpp, 0.1, key="pvpp_slider")
         with c2:
-            mgst = st.slider("Mg-St (%)", 0.01, 1.2, st.session_state.mgst, 0.01, key="mgst_slider")
-            mcc = st.slider("MCC (%)", 0.0, MCC_MAX, st.session_state.mcc, 0.1, key="mcc_slider")
+            mgst = st.slider("Mg-St (%)", MGST_MIN, MGST_MAX, st.session_state.mgst, 0.01, key="mgst_slider")
+            mcc = st.slider("MCC (%)", MCC_MIN, MCC_MAX, st.session_state.mcc, 0.1, key="mcc_slider")
         total = api + binder + pvpp + mgst + mcc
         if abs(total-100) < 0.1:
             st.success(f"✅ Total = {total:.2f}%")
         else:
             st.warning(f"⚠️ Total = {total:.2f}% (should be 100%)")
 
-    st.markdown("### ⚙️ Process Parameters")
+    st.markdown("### ⚙️ Process Parameters (Practical Ranges)")
     with st.container(border=True):
-        pressure = st.slider("Pressure (MPa)", 80.0, PRESSURE_MAX,
-                             st.session_state.get('pressure', 235.0), 1.0,
+        pressure = st.slider("Pressure (MPa)", PRESSURE_MIN, PRESSURE_MAX,
+                             st.session_state.get('pressure', 220.0), 1.0,
                              key="pressure_slider")
-        speed = st.slider("Speed (rpm)", 1.0, 50.0,
-                          st.session_state.get('speed', 10.0), 0.5,
+        speed = st.slider("Speed (rpm)", SPEED_MIN, SPEED_MAX,
+                          st.session_state.get('speed', 15.0), 0.5,
                           key="speed_slider")
         granule_mode = st.radio(
             "Granule Size",
@@ -1110,7 +1131,7 @@ with col_left:
             key="granule_mode_radio"
         )
         if granule_mode == "Fixed (slider)":
-            granule = st.slider("Granule Size (µm)", 30.0, 250.0,
+            granule = st.slider("Granule Size (µm)", GRANULE_MIN, GRANULE_MAX,
                                 st.session_state.get('granule', 125.0), 1.0,
                                 key="granule_slider")
             granule_fixed = True
@@ -1118,7 +1139,7 @@ with col_left:
         else:
             granule = st.session_state.get('granule', 125.0)
             granule_fixed = False
-            st.info("Granule size optimised by NSGA‑II (30–250 µm)")
+            st.info(f"Granule size optimised by NSGA‑II ({GRANULE_MIN:.0f}–{GRANULE_MAX:.0f} µm)")
             st.session_state.granule_mode = 'Variable'
 
     predict_btn = st.button("🔬 Predict & Optimise", use_container_width=True, type="primary")
@@ -1164,13 +1185,13 @@ with col_right:
 
             bounds = np.array([
                 [API_MIN, API_MAX],
-                [0.0, MCC_MAX],
-                [0.5, 6.0],
-                [0.01, 1.2],
+                [MCC_MIN, MCC_MAX],
+                [PVPP_MIN, PVPP_MAX],
+                [MGST_MIN, MGST_MAX],
                 [BINDER_MIN, BINDER_MAX],
-                [80.0, PRESSURE_MAX],
-                [1.0, 50.0],
-                [30.0, 250.0]
+                [PRESSURE_MIN, PRESSURE_MAX],
+                [SPEED_MIN, SPEED_MAX],
+                [GRANULE_MIN, GRANULE_MAX]
             ])
             with st.spinner(f"Running NSGA‑II (pop={NSGA_POP}, gen={NSGA_GENS})..."):
                 nsga = NSGAII(model, scaler, y_scaler, bounds,
@@ -1202,7 +1223,6 @@ with col_right:
                 for idx in front_indices:
                     api_val = -objectives[idx, 0]
                     efrf_val = objectives[idx, 1]
-                    # CORRECTED: distance from API_MAX (ideal)
                     norm_api = (API_MAX - api_val) / api_range if api_range > 0 else 0
                     norm_efrf = (efrf_val - min_efrf) / efrf_range if efrf_range > 0 else 0
                     dist = np.sqrt(norm_api**2 + norm_efrf**2)
@@ -1295,7 +1315,7 @@ with col_right:
 
         st.markdown("---")
 
-        # ---- 3. Toggle: Cost-wise solution (FIXED) ----
+        # ---- 3. Toggle: Cost-wise solution ----
         st.toggle(
             "💰 Cost-wise Solution (Max API, Min Pressure)",
             value=st.session_state.get("show_cost_solution", False),
@@ -1322,7 +1342,7 @@ with col_right:
                 st.write(f"EFRF: {ef:.4f}")
             st.session_state.cost_pred = (d, t, e, ef)
 
-        # ---- 4. Toggle: Quality-wise solution (FIXED) ----
+        # ---- 4. Toggle: Quality-wise solution ----
         st.toggle(
             "🏆 Quality-wise Solution (Max Tensile Strength)",
             value=st.session_state.get("show_quality_solution", False),
@@ -1349,7 +1369,7 @@ with col_right:
                 st.write(f"EFRF: {ef:.4f}")
             st.session_state.quality_pred = (d, t, e, ef)
 
-        # ---- 5. Toggle: Model Comparison (FIXED) ----
+        # ---- 5. Toggle: Model Comparison ----
         st.toggle(
             "📊 Model Comparison",
             value=st.session_state.get("show_comparison", True),
@@ -1367,7 +1387,7 @@ with col_right:
             st.plotly_chart(fig_bar, use_container_width=True)
             st.dataframe(bench_df, use_container_width=True)
 
-        # ---- 6. Toggle: Sensitivity Analysis (FIXED) ----
+        # ---- 6. Toggle: Sensitivity Analysis ----
         st.toggle(
             "🔬 Sensitivity Analysis",
             value=st.session_state.get("show_sensitivity", False),
@@ -1381,7 +1401,7 @@ with col_right:
                 if fig_bars:
                     st.plotly_chart(fig_bars, use_container_width=True)
 
-        # ---- 7. Toggle: Particle Size Effect (FIXED) ----
+        # ---- 7. Toggle: Particle Size Effect ----
         st.toggle(
             "📊 Particle Size Effect",
             value=st.session_state.get("show_particle_plot", False),
@@ -1394,7 +1414,7 @@ with col_right:
                 fig = plot_particle_pressure_density(f, model, scaler, y_scaler)
                 st.plotly_chart(fig, use_container_width=True)
 
-        # ---- 8. Report button (standalone) ----
+        # ---- 8. Report button ----
         generate_report_btn = st.button("📄 Generate Report (PDF)", key="knob_report")
 
         if generate_report_btn and st.session_state.benchmark_df is not None:
