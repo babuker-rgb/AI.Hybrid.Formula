@@ -1,9 +1,10 @@
 """
-Hubryd AI – v29.27-R12 (Practical Industrial Constraints)
+Hubryd AI – v29.27-R13 (Tighter Practical Constraints)
 Hybrid AI for Multi-Objective Optimization of Tablet Formulation
-- Enforced practical minima: MCC≥4%, Mg-St≥0.3%, Binder≥3%
-- Pressure: 150–300 MPa | Speed: 5–30 RPM
-- All UI labels in English.
+- PVPP ≥ 1.0% (ensures disintegration)
+- Pressure: 150–250 MPa (reduces tooling wear)
+- Speed: 15–30 RPM (commercial throughput)
+- All previous fixes retained.
 Nile Valley University · Sudan
 """
 
@@ -37,26 +38,30 @@ except ImportError:
     FPDF_AVAILABLE = False
 
 # ================================================================
-# Physics Constants – UPDATED TO PRACTICAL INDUSTRIAL RANGES
+# Physics Constants – TIGHTER PRACTICAL RANGES (v29.27-R13)
 # ================================================================
 D_MIN = 0.70
 D_MAX = 0.99
 TENSILE_MIN = 1.50
 EFRF_MAX = 0.50
-MCC_MAX = 8.0
-MCC_MIN = 4.0                     # <-- NEW: Minimum MCC for binder effect
-PRESSURE_MAX = 300.0              # <-- LOWERED: Practical max
-PRESSURE_MIN = 150.0              # <-- RAISED: Practical min
-BINDER_MIN = 3.0                  # <-- RAISED: Practical binder level
-BINDER_MAX = 6.0
-MGST_MIN = 0.3                    # <-- RAISED: Minimum lubricant for ejection
-MGST_MAX = 1.2
+
+# Formulation bounds
 API_MIN = 80.0
 API_MAX = 98.0
-SPEED_MIN = 5.0                   # <-- RAISED: Economical min speed
-SPEED_MAX = 30.0                  # <-- LOWERED: Industrial max speed
-PVPP_MIN = 0.5
+MCC_MIN = 4.0
+MCC_MAX = 8.0
+PVPP_MIN = 1.0                  # RAISED: ensures disintegration
 PVPP_MAX = 6.0
+MGST_MIN = 0.3
+MGST_MAX = 1.2
+BINDER_MIN = 3.0
+BINDER_MAX = 6.0
+
+# Process bounds – TIGHTER
+PRESSURE_MIN = 150.0
+PRESSURE_MAX = 250.0            # LOWERED: reduces tooling wear
+SPEED_MIN = 15.0                # RAISED: commercial throughput
+SPEED_MAX = 30.0
 GRANULE_MIN = 30.0
 GRANULE_MAX = 250.0
 
@@ -83,11 +88,11 @@ if 'api' not in st.session_state:
     st.session_state.update({
         'api': 90.5,
         'binder': 4.0,
-        'pvpp': 3.0,
+        'pvpp': 2.5,
         'mgst': 0.5,
         'mcc': 5.0,
-        'pressure': 220.0,
-        'speed': 15.0,
+        'pressure': 200.0,
+        'speed': 20.0,
         'granule': 125.0,
         'show_cost_solution': False,
         'show_quality_solution': False,
@@ -124,7 +129,6 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
     mgst = np.asarray(mgst, dtype=float)
     mcc = np.asarray(mcc, dtype=float)
 
-    # Enforce new practical minimums and maximums
     api = np.clip(api, API_MIN, API_MAX)
     binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
     pvpp = np.clip(pvpp, PVPP_MIN, PVPP_MAX)
@@ -134,21 +138,18 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
     total = api + binder + pvpp + mgst + mcc
     total = np.where(total <= 0, 1.0, total)
 
-    # Normalise to 100%
     api = (api / total) * 100.0
     binder = (binder / total) * 100.0
     pvpp = (pvpp / total) * 100.0
     mgst = (mgst / total) * 100.0
     mcc = (mcc / total) * 100.0
 
-    # Re-clamp after normalisation (ensures they stay within practical bounds)
     api = np.clip(api, API_MIN, API_MAX)
     binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
     pvpp = np.clip(pvpp, PVPP_MIN, PVPP_MAX)
     mgst = np.clip(mgst, MGST_MIN, MGST_MAX)
     mcc = np.clip(mcc, MCC_MIN, MCC_MAX)
 
-    # Final re-normalisation to fix sum to 100% after clipping
     total2 = api + binder + pvpp + mgst + mcc
     total2 = np.where(total2 <= 0, 1.0, total2)
     scale = 100.0 / total2
@@ -158,7 +159,6 @@ def normalize_components(api, binder, pvpp, mgst, mcc):
     mgst = mgst * scale
     mcc = mcc * scale
 
-    # Final safety clamp
     api = np.clip(api, API_MIN, API_MAX)
     binder = np.clip(binder, BINDER_MIN, BINDER_MAX)
     pvpp = np.clip(pvpp, PVPP_MIN, PVPP_MAX)
@@ -199,7 +199,6 @@ def add_interaction_features(X_raw):
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     rng = np.random.default_rng(random_state)
-    # Updated bounds for generation
     api_raw = rng.uniform(API_MIN, API_MAX, n_samples)
     binder_raw = rng.uniform(BINDER_MIN, BINDER_MAX, n_samples)
     pvpp_raw = rng.uniform(PVPP_MIN, PVPP_MAX, n_samples)
@@ -887,7 +886,7 @@ def generate_pdf_report(formulation, bench_df, balanced_solution, quality_soluti
 # Cached Training
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r12_eng.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r13_eng.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -1064,7 +1063,7 @@ st.markdown("""
 <div style="background: #0b1a33; padding:1rem; border-radius:0.5rem; text-align:center; margin-bottom:1rem;">
     <h2 style="color:#fff; margin:0;">🧬 Hybrid AI · Multi‑Objective Tablet Optimization</h2>
     <p style="color:#64ffda; margin:0;">PINN + NSGA‑II | Nile Valley University, Sudan</p>
-    <p style="color:#aabbcc; font-size:0.9rem; margin-top:0.2rem;">🔧 Practical Constraints: MCC≥4%, Mg-St≥0.3%, Binder≥3% | Pressure 150-300 MPa | Speed 5-30 RPM</p>
+    <p style="color:#aabbcc; font-size:0.9rem; margin-top:0.2rem;">🔧 Practical: MCC≥4%, PVPP≥1%, Mg-St≥0.3%, Binder≥3% | Pressure 150-250 MPa | Speed 15-30 RPM</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1076,13 +1075,14 @@ with st.sidebar:
     ✅ **Tensile:** ≥ {TENSILE_MIN:.2f} MPa  
     ✅ **EFRF:** &lt; 0.40 (feasible)  
     ✅ **MCC:** {MCC_MIN:.1f}–{MCC_MAX:.1f}% (Min 4%)  
+    ✅ **PVPP:** {PVPP_MIN:.1f}–{PVPP_MAX:.1f}% (Min 1%)  
     ✅ **Mg-St:** {MGST_MIN:.1f}–{MGST_MAX:.2f}% (Min 0.3%)  
     ✅ **Binder:** {BINDER_MIN:.1f}–{BINDER_MAX:.1f}% (Min 3%)  
-    ✅ **Pressure:** {PRESSURE_MIN:.0f}–{PRESSURE_MAX:.0f} MPa (150–300)  
-    ✅ **Speed:** {SPEED_MIN:.0f}–{SPEED_MAX:.0f} RPM (5–30)  
+    ✅ **Pressure:** {PRESSURE_MIN:.0f}–{PRESSURE_MAX:.0f} MPa (150–250)  
+    ✅ **Speed:** {SPEED_MIN:.0f}–{SPEED_MAX:.0f} RPM (15–30)  
     ✅ **NSGA‑II:** Pop=80, Gen=50
     """)
-    st.caption("🔬 v29.27-R12 — Practical Industrial Constraints")
+    st.caption("🔬 v29.27-R13 — Tighter Practical Constraints")
 
 # Load model (cached)
 try:
@@ -1118,10 +1118,10 @@ with col_left:
     st.markdown("### ⚙️ Process Parameters (Practical Ranges)")
     with st.container(border=True):
         pressure = st.slider("Pressure (MPa)", PRESSURE_MIN, PRESSURE_MAX,
-                             st.session_state.get('pressure', 220.0), 1.0,
+                             st.session_state.get('pressure', 200.0), 1.0,
                              key="pressure_slider")
         speed = st.slider("Speed (rpm)", SPEED_MIN, SPEED_MAX,
-                          st.session_state.get('speed', 15.0), 0.5,
+                          st.session_state.get('speed', 20.0), 0.5,
                           key="speed_slider")
         granule_mode = st.radio(
             "Granule Size",
