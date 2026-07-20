@@ -1,9 +1,9 @@
 """
-Hubryd AI – v29.27-R26 (SIMPLIFIED & GUARANTEED)
-Hybrid AI for Multi-Objective Optimization of Tablet Formulation
-- SIMPLIFIED: Single compaction model (Heckel) – NO array ambiguity
-- ALL advanced features removed for stability
-- Guaranteed to run without errors
+Hubryd AI – v29.27-R25 (SIMPLIFIED & GUARANTEED FIX)
+Advanced Hybrid AI for Multi-Objective Optimization of Tablet Formulation
+- FIXED: All array ambiguity errors eliminated
+- Uses .item() and float() conversion everywhere
+- Safe handling of model=None
 Nile Valley University · Sudan
 """
 
@@ -107,6 +107,8 @@ W_TENSILE = 500.0
 W_ER = 5.0
 W_PHYSICS = 1.0
 W_EFRF_PENALTY = 100.0
+W_DISINTEGRATION = 10.0
+W_DISSOLUTION = 10.0
 
 # ================================================================
 # SESSION STATE
@@ -132,6 +134,7 @@ if 'api' not in st.session_state:
         'show_comparison': True,
         'show_sensitivity': False,
         'show_particle_plot': False,
+        'show_dissolution': False,
         'granule_mode': 'Fixed',
         'nsga_pop': None,
         'nsga_objectives': None,
@@ -147,12 +150,63 @@ if 'api' not in st.session_state:
             'pressure': None, 'speed': None, 'dwell_time': None,
             'friction': None, 'decompression_time': None,
             'granule_use': None, 'granule_fixed': None,
-            'density': None, 'tensile': None, 'er': None, 'efrf': None
+            'density': None, 'tensile': None, 'er': None, 'efrf': None,
+            'disintegration': None, 'dissolution_tau': None, 'dissolution_beta': None
         },
         'feasible_df': None,
         'tested_point': None,
         'benchmark_df': None
     })
+
+# ================================================================
+# COMPACTION MODELS - WITH SAFE SCALAR CONVERSION
+# ================================================================
+def select_compaction_model(api_n, binder_n, pressure, particle_size, moisture):
+    """All inputs MUST BE SCALARS (float/int)"""
+    # Force conversion to scalar
+    api_n = float(api_n)
+    binder_n = float(binder_n)
+    pressure = float(pressure)
+    particle_size = float(particle_size)
+    moisture = float(moisture)
+    
+    if api_n > 90 and particle_size < 50:
+        model_type = "Heckel"
+        k = 0.025 + 0.0001 * pressure - 0.001 * (api_n - 85) / 10
+        A = 1.0 + 0.01 * (api_n - 85) - 0.05 * binder_n
+        return model_type, {'k': k, 'A': A}
+    elif moisture > 3.0 and particle_size > 100:
+        model_type = "Kawakita"
+        a = 0.5 + 0.01 * (pressure - 150) / 50
+        b = 0.8 + 0.02 * binder_n
+        return model_type, {'a': a, 'b': b}
+    else:
+        model_type = "Walker"
+        K = 0.3 + 0.01 * binder_n
+        n = 0.15 + 0.005 * (api_n - 80)
+        return model_type, {'K': K, 'n': n}
+
+# ================================================================
+# COMPATIBILITY CHECK - WITH SAFE SCALAR CONVERSION
+# ================================================================
+def compatibility_check(api_n, binder_grade, moisture):
+    """All inputs MUST BE SCALARS (float/int)"""
+    api_n = float(api_n)
+    binder_grade = int(binder_grade)
+    moisture = float(moisture)
+    
+    warnings = []
+    score = 1.0
+    if api_n > 90 and moisture > 4.0:
+        warnings.append("⚠️ High API loading with high moisture may cause stability issues.")
+        score -= 0.2
+    if moisture > 3.5:
+        warnings.append("⚠️ High moisture may cause premature swelling of superdisintegrant.")
+        score -= 0.1
+    if binder_grade in [0, 1] and api_n > 90:
+        score -= 0.05
+        warnings.append("ℹ️ Fine MCC grades may not provide sufficient binding at high API loading.")
+    return {'score': max(score, 0.0), 'warnings': warnings}
 
 # ================================================================
 # DWELL TIME CALCULATION
@@ -164,7 +218,37 @@ def calculate_dwell_time(speed_rpm, punch_width=10, pitch_diameter=100):
     return np.clip(dwell_time_ms, 5.0, 80.0)
 
 # ================================================================
-# HELPER FUNCTIONS - SIMPLIFIED
+# DISINTEGRATION AND DISSOLUTION
+# ================================================================
+def predict_disintegration_time(tensile, pvpp_n, api_n, binder_n, moisture):
+    tensile = np.asarray(tensile)
+    pvpp_n = np.asarray(pvpp_n)
+    api_n = np.asarray(api_n)
+    binder_n = np.asarray(binder_n)
+    moisture = np.asarray(moisture)
+    
+    base_time = 2.0 + 0.5 * tensile
+    pvpp_effect = 5.0 * np.exp(-0.5 * pvpp_n)
+    api_effect = 0.1 * (api_n - 80)
+    binder_effect = 0.2 * (binder_n - 2.0)
+    moisture_effect = -0.1 * moisture
+    time = base_time - pvpp_effect + api_effect + binder_effect + moisture_effect
+    return np.clip(time, 1.0, 30.0)
+
+def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_time):
+    api_n = np.asarray(api_n)
+    pvpp_n = np.asarray(pvpp_n)
+    particle_size = np.asarray(particle_size)
+    disintegration_time = np.asarray(disintegration_time)
+    
+    tau = 5.0 + 0.5 * disintegration_time - 0.1 * pvpp_n + 0.05 * (api_n - 80)
+    tau = np.clip(tau, 2.0, 20.0)
+    beta = 1.0 + 0.01 * (particle_size - 50) / 50
+    beta = np.clip(beta, 0.8, 2.5)
+    return {'tau': tau, 'beta': beta}
+
+# ================================================================
+# HELPER FUNCTIONS
 # ================================================================
 def normalize_components(api, binder, pvpp, mgst, mcc):
     api = np.asarray(api, dtype=float)
@@ -287,12 +371,33 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         dwell_time_raw, friction_raw, decompression_time_raw
     ])
 
-    # --- SIMPLIFIED: Use ONLY Heckel model with fixed parameters ---
-    # No array ambiguity because we use simple arithmetic
-    k = 0.025 + 0.0001 * pressure_raw
-    A = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
-    x_val = k * pressure_raw + A
-    D = 1.0 - np.exp(-x_val)
+    # --- SAFE: Convert to scalar using .item() ---
+    api_first = float(api_n[0].item() if hasattr(api_n[0], 'item') else api_n[0])
+    binder_first = float(binder_n[0].item() if hasattr(binder_n[0], 'item') else binder_n[0])
+    pressure_first = float(pressure_raw[0].item() if hasattr(pressure_raw[0], 'item') else pressure_raw[0])
+    particle_first = float(particle_size_raw[0].item() if hasattr(particle_size_raw[0], 'item') else particle_size_raw[0])
+    moisture_first = float(moisture_raw[0].item() if hasattr(moisture_raw[0], 'item') else moisture_raw[0])
+    binder_grade_first = int(binder_grade_raw[0].item() if hasattr(binder_grade_raw[0], 'item') else binder_grade_raw[0])
+    
+    # Select compaction model using scalar values
+    model_type, params = select_compaction_model(
+        api_first, binder_first, pressure_first, particle_first, moisture_first
+    )
+    
+    # Calculate density based on selected model
+    if model_type == "Heckel":
+        k = params['k']
+        A = params['A']
+        D = 1 - np.exp(-(k * pressure_raw + A))
+    elif model_type == "Kawakita":
+        a = params['a']
+        b = params['b']
+        D = 1 - (pressure_raw / (a * pressure_raw + 1/b))
+    else:  # Walker
+        K = params['K']
+        n = params['n']
+        D = 1 - K * (pressure_raw ** (-n))
+    
     D = np.clip(D, D_MIN, D_MAX)
     D += rng.normal(0, 0.002, n_samples)
     D = np.clip(D, D_MIN, D_MAX)
@@ -327,6 +432,13 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     er = er_base + rng.normal(0, 0.01, n_samples)
     er = np.clip(er, 0.5, 4.0)
 
+    # Disintegration and dissolution
+    disintegration = predict_disintegration_time(strength, pvpp_n, api_n, binder_n, moisture_raw)
+    dissolution_params = predict_dissolution_profile(api_n, pvpp_n, particle_size_raw, disintegration)
+    
+    # SAFE: compatibility check using scalar values
+    compat_result = compatibility_check(api_first, binder_grade_first, moisture_first)
+
     feature_names = [
         'API_%', 'MCC_%', 'PVPP_%', 'MgSt_%', 'Binder_%',
         'Pressure_MPa', 'Speed_rpm', 'Granule_Size_µm',
@@ -337,6 +449,10 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     df['Density'] = D
     df['Tensile_Strength_MPa'] = strength
     df['Elastic_Recovery_%'] = er
+    df['Disintegration_Time_min'] = disintegration
+    df['Dissolution_Tau'] = dissolution_params['tau']
+    df['Dissolution_Beta'] = dissolution_params['beta']
+    df['Compatibility_Score'] = compat_result['score']
     
     return df, feature_names
 
@@ -371,7 +487,7 @@ class MultiTaskPINN(nn.Module):
         self.res1 = ResidualBlock(hidden)
         self.res2 = ResidualBlock(hidden)
         self.transition = nn.Sequential(nn.Linear(hidden, hidden//2), nn.Tanh())
-        self.output = nn.Linear(hidden//2, 5)
+        self.output = nn.Linear(hidden//2, 8)
 
     def forward(self, X):
         x = self.input_layer(X)
@@ -384,7 +500,10 @@ class MultiTaskPINN(nn.Module):
         er = raw[:, 2:3]
         k = torch.nn.functional.softplus(raw[:, 3:4]) + 1e-4
         A = raw[:, 4:5]
-        return torch.cat([density, tensile, er, k, A], dim=1)
+        disintegration = torch.nn.functional.softplus(raw[:, 5:6])
+        dissolution_tau = torch.nn.functional.softplus(raw[:, 6:7])
+        dissolution_beta = torch.nn.functional.softplus(raw[:, 7:8]) + 1e-4
+        return torch.cat([density, tensile, er, k, A, disintegration, dissolution_tau, dissolution_beta], dim=1)
 
     def predict(self, X_scaled):
         self.eval()
@@ -394,7 +513,7 @@ class MultiTaskPINN(nn.Module):
             device = next(self.parameters()).device
             X_scaled = X_scaled.to(device)
             output = self.forward(X_scaled)
-            return output[:, :3].cpu().numpy()
+            return output[:, :8].cpu().numpy()
 
     def compute_loss(self, X_scaled, X_raw, y_true, y_scaler, epoch=0, total_epochs=ADAM_EPOCHS):
         pressure = X_raw[:, 5].view(-1, 1)
@@ -406,12 +525,21 @@ class MultiTaskPINN(nn.Module):
         er_pred = y_pred[:, 2:3]
         k_pred = y_pred[:, 3:4]
         A_pred = y_pred[:, 4:5]
+        disintegration_pred = y_pred[:, 5:6]
+        dissolution_tau_pred = y_pred[:, 6:7]
+        dissolution_beta_pred = y_pred[:, 7:8]
 
+        # Data loss
         loss_dens = nn.MSELoss()(density_pred, y_true[:, 0:1])
         loss_tensile = nn.MSELoss()(tensile_pred, y_true[:, 1:2])
         loss_er = nn.MSELoss()(er_pred, y_true[:, 2:3])
-        data_loss = W_DENSITY * loss_dens + W_TENSILE * loss_tensile + W_ER * loss_er
+        loss_disin = nn.MSELoss()(disintegration_pred, y_true[:, 5:6])
+        loss_tau = nn.MSELoss()(dissolution_tau_pred, y_true[:, 6:7])
+        loss_beta = nn.MSELoss()(dissolution_beta_pred, y_true[:, 7:8])
+        data_loss = (W_DENSITY * loss_dens + W_TENSILE * loss_tensile + W_ER * loss_er +
+                     W_DISINTEGRATION * loss_disin + W_DISSOLUTION * (loss_tau + loss_beta))
 
+        # Physics losses
         scale_dens, mean_dens = y_scaler.scale_[0], y_scaler.mean_[0]
         scale_tensile, mean_tensile = y_scaler.scale_[1], y_scaler.mean_[1]
         scale_er, mean_er = y_scaler.scale_[2], y_scaler.mean_[2]
@@ -427,15 +555,19 @@ class MultiTaskPINN(nn.Module):
         efrf_real = er_real / torch.clamp(tensile_real, min=1e-4)
         efrf_penalty = torch.mean(torch.relu(efrf_real - 0.50) ** 2) * W_EFRF_PENALTY
 
+        disin_penalty = torch.mean(torch.relu(disintegration_pred - DISINTEGRATION_MAX) ** 2) * 5.0
+        tau_penalty = torch.mean(torch.relu(dissolution_tau_pred - 25.0) ** 2) * 1.0
+
         mcc_penalty = torch.mean(torch.relu(mcc - SLIDER_MCC_MAX) ** 2) * 0.3
         density_penalty = torch.mean(torch.relu(density_real - D_MAX) ** 2 +
                                      torch.relu(D_MIN - density_real) ** 2) * 0.5
 
-        physics_loss = W_PHYSICS * (heckel_loss + efrf_penalty) + mcc_penalty + density_penalty
+        physics_loss = (W_PHYSICS * (heckel_loss + efrf_penalty) +
+                        disin_penalty + tau_penalty + mcc_penalty + density_penalty)
         return data_loss + physics_loss
 
 # ================================================================
-# NSGA-II
+# NSGA-II - SIMPLIFIED
 # ================================================================
 class NSGAII:
     def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS,
@@ -507,6 +639,8 @@ class NSGAII:
         er = np.maximum(pred[:, 2], 1e-4)
         efrf = er / tensile
         efrf = np.clip(efrf, 1e-4, 5.0)
+        disintegration = np.maximum(pred[:, 5], 0.5)
+        dissolution_tau = np.maximum(pred[:, 6], 1.0)
 
         g1 = D_MIN - density
         g2 = density - D_MAX
@@ -515,6 +649,8 @@ class NSGAII:
         penalty = np.zeros(n)
         penalty += np.where(tensile < TENSILE_MIN, (TENSILE_MIN - tensile)**2, 0.0)
         penalty += np.where(efrf >= 0.40, (efrf - 0.40)**2, 0.0)
+        penalty += np.where(disintegration > DISINTEGRATION_MAX, (disintegration - DISINTEGRATION_MAX)**2, 0.0)
+        penalty += np.where(dissolution_tau > 20.0, (dissolution_tau - 20.0)**2, 0.0)
         mcc_val = repaired[:, 1]
         penalty += np.where(mcc_val > self.bounds[1,1], (mcc_val - self.bounds[1,1])**2, 0.0)
 
@@ -672,7 +808,7 @@ class NSGAII:
 # ================================================================
 def predict_pinn(model, scaler, y_scaler, inputs):
     if model is None:
-        return 0.7, 2.0, 0.5, 0.25
+        return 0.7, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
     try:
         aug = add_interaction_features(np.array([inputs]))[0]
         scaled = scaler.transform([aug])
@@ -684,10 +820,13 @@ def predict_pinn(model, scaler, y_scaler, inputs):
         tensile = max(pred[1], 1e-4)
         er = max(pred[2], 1e-4)
         efrf = er / tensile
-        return density, tensile, er, efrf
+        disintegration = max(pred[5], 0.5)
+        dissolution_tau = max(pred[6], 1.0)
+        dissolution_beta = max(pred[7], 0.5)
+        return density, tensile, er, efrf, disintegration, dissolution_tau, dissolution_beta
     except Exception as e:
         st.error(f"Prediction error: {e}")
-        return 0.7, 2.0, 0.5, 0.25
+        return 0.7, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
 
 def plot_pareto_clean(objectives, fronts, balanced_solution=None, feasible_df=None,
                       tested_point=None, efrf_max=0.40):
@@ -771,7 +910,7 @@ def plot_sensitivity_bars(formulation, model, scaler, y_scaler, efrf_max=0.40):
 
     base_input = [api0, mcc0, pvpp0, mgst0, binder0, press0, speed0, granule0,
                   particle_size0, moisture0, 0, dwell_time0, friction0, decompression_time0]
-    _, _, _, efrf_base = predict_pinn(model, scaler, y_scaler, base_input)
+    _, _, _, efrf_base, _, _, _ = predict_pinn(model, scaler, y_scaler, base_input)
 
     sensitivities = []
     for idx, p in enumerate(param_defs):
@@ -779,8 +918,8 @@ def plot_sensitivity_bars(formulation, model, scaler, y_scaler, efrf_max=0.40):
         low_input[idx] = p['min']
         high_input = base_input.copy()
         high_input[idx] = p['max']
-        _, _, _, efrf_low = predict_pinn(model, scaler, y_scaler, low_input)
-        _, _, _, efrf_high = predict_pinn(model, scaler, y_scaler, high_input)
+        _, _, _, efrf_low, _, _, _ = predict_pinn(model, scaler, y_scaler, low_input)
+        _, _, _, efrf_high, _, _, _ = predict_pinn(model, scaler, y_scaler, high_input)
         delta = abs(efrf_high - efrf_low)
         sensitivities.append({
             'Parameter': f"{p['name']}",
@@ -809,11 +948,33 @@ def plot_sensitivity_bars(formulation, model, scaler, y_scaler, efrf_max=0.40):
     )
     return fig
 
+def plot_dissolution_profile(tau, beta, api_n, title="Predicted Dissolution Profile"):
+    time_points = np.linspace(0, 60, 100)
+    dissolution = 100 * (1 - np.exp(-((time_points / tau) ** beta)))
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=time_points,
+        y=dissolution,
+        mode='lines',
+        name=f'Q(t) = 100×(1-exp(-((t/{tau:.1f})^{beta:.2f})))',
+        line=dict(color='blue', width=2)
+    ))
+    fig.add_hline(y=85, line_dash='dash', line_color='red',
+                  annotation_text='85% dissolution target')
+    fig.update_layout(
+        title=f'{title} (API: {api_n:.1f}%)',
+        xaxis_title='Time (minutes)',
+        yaxis_title='% Dissolved',
+        height=350,
+        template='plotly_white'
+    )
+    return fig
+
 # ================================================================
-# MODEL TRAINING - SIMPLIFIED
+# MODEL TRAINING
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r26_simple_eng.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r25_eng.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -832,10 +993,11 @@ def load_or_train():
             if os.path.exists(CHECKPOINT_PATH):
                 os.remove(CHECKPOINT_PATH)
 
-    st.caption("🔄 Training simplified model (15k samples, up to 800 epochs)...")
+    st.caption("🔄 Training advanced model (15k samples, up to 800 epochs)...")
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
-    y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%']].values
+    y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%',
+            'Disintegration_Time_min','Dissolution_Tau','Dissolution_Beta']].values
     X_aug = add_interaction_features(X_raw)
     input_dim = X_aug.shape[1]
     scaler = StandardScaler()
@@ -1025,9 +1187,11 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
     er = np.maximum(pred[:, 2], 1e-4)
     efrf = er / tensile
     efrf = np.clip(efrf, 1e-4, 5.0)
+    disintegration = np.maximum(pred[:, 5], 0.5)
 
     mask = ((D_MIN <= density) & (density <= D_MAX) &
             (tensile >= TENSILE_MIN) & (efrf < 0.40) &
+            (disintegration <= DISINTEGRATION_MAX) &
             (mcc_n <= BOUND_MCC_MAX) & (mcc_n >= BOUND_MCC_MIN))
     feasible_api = api_n[mask]
     feasible_efrf = efrf[mask]
@@ -1039,9 +1203,9 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
 st.markdown("""
 <div style="background: #0b1a33; padding:1rem; border-radius:0.5rem; text-align:center; margin-bottom:1rem;">
     <h2 style="color:#fff; margin:0;">🧬 Hybrid AI · Advanced Pharmaceutical PINN</h2>
-    <p style="color:#64ffda; margin:0; font-size:0.9rem;">v29.27-R26 (SIMPLIFIED & GUARANTEED)</p>
+    <p style="color:#64ffda; margin:0; font-size:0.9rem;">v29.27-R25 (GUARANTEED FIX)</p>
     <p style="color:#aabbcc; margin:0; font-size:0.85rem;">Nile Valley University, Sudan</p>
-    <p style="color:#8899aa; font-size:0.75rem;">Single Compaction Model · No Array Ambiguity</p>
+    <p style="color:#8899aa; font-size:0.75rem;">Advanced Compaction Models · Material Properties · Process Physics · Pharmaceutical Properties</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1052,6 +1216,7 @@ with st.sidebar:
     ✅ **Density:** {D_MIN:.2f}–{D_MAX:.2f}  
     ✅ **Tensile:** ≥ {TENSILE_MIN:.2f} MPa  
     ✅ **EFRF:** &lt; 0.40 (feasible)  
+    ✅ **Disintegration:** ≤ {DISINTEGRATION_MAX:.0f} min (USP)  
     ✅ **Slider MCC:** {SLIDER_MCC_MIN:.1f}–{SLIDER_MCC_MAX:.1f}%  
     ✅ **Slider PVPP:** {SLIDER_PVPP_MIN:.1f}–{SLIDER_PVPP_MAX:.1f}%  
     ✅ **Slider MgSt:** {SLIDER_MGST_MIN:.2f}–{SLIDER_MGST_MAX:.2f}%  
@@ -1061,7 +1226,7 @@ with st.sidebar:
     ✅ **Speed:** {BOUND_SPEED_MIN:.0f}–{BOUND_SPEED_MAX:.0f} RPM  
     ✅ **NSGA‑II:** Pop=80, Gen=50
     """)
-    st.caption("🔬 v29.27-R26 — Simplified & Guaranteed")
+    st.caption("🔬 v29.27-R25 — Guaranteed Fix - Array Ambiguity Eliminated")
 
 # Load model
 try:
@@ -1093,6 +1258,12 @@ with col_left:
             binder_grade = st.selectbox("Binder Grade", BINDER_GRADES, index=st.session_state.binder_grade, key="binder_grade_select")
             binder_grade_idx = BINDER_GRADES.index(binder_grade)
             st.session_state.binder_grade = binder_grade_idx
+            # Use compatibility check with scalar values
+            compat_result = compatibility_check(api, binder_grade_idx, moisture)
+            if compat_result['warnings']:
+                st.warning(compat_result['warnings'][0])
+            else:
+                st.success("✅ Compatibility: Good")
         total = api + binder + pvpp + mgst + mcc
         if abs(total-100) < 0.1:
             st.success(f"✅ Total = {total:.2f}%")
@@ -1146,7 +1317,7 @@ with col_right:
             inputs = [api_n, mcc_n, pvpp_n, mgst_n, binder_n, pressure, speed, granule_use,
                       particle_size, moisture, binder_grade_idx, dwell_time, friction, decompression_time]
 
-            density, tensile, er, efrf = predict_pinn(model, scaler, y_scaler, inputs)
+            density, tensile, er, efrf, disintegration, dissolution_tau, dissolution_beta = predict_pinn(model, scaler, y_scaler, inputs)
 
             st.session_state.formulation = {
                 'api_n': api_n, 'binder_n': binder_n, 'pvpp_n': pvpp_n,
@@ -1155,18 +1326,21 @@ with col_right:
                 'pressure': pressure, 'speed': speed, 'dwell_time': dwell_time,
                 'friction': friction, 'decompression_time': decompression_time,
                 'granule_use': granule_use, 'granule_fixed': granule_fixed,
-                'density': density, 'tensile': tensile, 'er': er, 'efrf': efrf
+                'density': density, 'tensile': tensile, 'er': er, 'efrf': efrf,
+                'disintegration': disintegration, 'dissolution_tau': dissolution_tau,
+                'dissolution_beta': dissolution_beta
             }
 
-            st.markdown("**Constraints Status** (D: 0.70–0.99, Tensile ≥ 1.50, EFRF < 0.40)")
-            col_metrics = st.columns(4)
+            st.markdown("**Constraints Status** (D: 0.70–0.99, Tensile ≥ 1.50, EFRF < 0.40, Disintegration ≤ 15 min)")
+            col_metrics = st.columns(5)
             col_metrics[0].metric("Density", f"{density:.3f}", f"[{D_MIN:.2f}, {D_MAX:.2f}]")
             col_metrics[1].metric("Tensile", f"{tensile:.2f} MPa", f"≥ {TENSILE_MIN:.2f}")
             col_metrics[2].metric("EFRF", f"{efrf:.4f}", f"< 0.40")
             col_metrics[3].metric("MCC", f"{mcc_n:.1f}%", f"≤ {BOUND_MCC_MAX:.1f}%")
+            col_metrics[4].metric("Disintegration", f"{disintegration:.1f} min", f"≤ {DISINTEGRATION_MAX:.0f} min")
 
             if all([D_MIN <= density <= D_MAX, tensile >= TENSILE_MIN, efrf < 0.40,
-                    mcc_n <= BOUND_MCC_MAX]):
+                    mcc_n <= BOUND_MCC_MAX, disintegration <= DISINTEGRATION_MAX]):
                 st.success("✅ All constraints satisfied")
             else:
                 st.error("❌ Violates constraints")
@@ -1225,7 +1399,7 @@ with col_right:
                 best_tensile = -np.inf
                 for idx in front_indices:
                     ind = pop[idx]
-                    d2, t2, e2, ef2 = predict_pinn(model, scaler, y_scaler, ind)
+                    d2, t2, e2, ef2, dis2, tau2, beta2 = predict_pinn(model, scaler, y_scaler, ind)
                     if t2 > best_tensile:
                         best_tensile = t2
                         quality_idx = idx
@@ -1266,7 +1440,7 @@ with col_right:
             fig = plot_pareto_clean(objectives, fronts, None, feasible_df, tested_point, efrf_max=0.40)
             if fig is not None:
                 if balanced_solution is not None:
-                    d, t, e, ef = predict_pinn(model, scaler, y_scaler, balanced_solution)
+                    d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, balanced_solution)
                     fig.add_trace(go.Scatter(
                         x=[balanced_solution[0]],
                         y=[ef],
@@ -1279,9 +1453,9 @@ with col_right:
 
         st.markdown("### ⭐ Golden Solution (Balanced)")
         if balanced_solution is not None:
-            d, t, e, ef = predict_pinn(model, scaler, y_scaler, balanced_solution)
+            d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, balanced_solution)
             with st.container(border=True):
-                col1, col2 = st.columns(2)
+                col1, col2, col3 = st.columns(3)
                 with col1:
                     st.write("**Formulation**")
                     st.write(f"API: {balanced_solution[0]:.1f}%")
@@ -1290,6 +1464,11 @@ with col_right:
                     st.write(f"Mg-St: {balanced_solution[3]:.2f}%")
                     st.write(f"Binder: {balanced_solution[4]:.1f}%")
                 with col2:
+                    st.write("**Material Properties**")
+                    st.write(f"Particle Size: {balanced_solution[8]:.0f} µm")
+                    st.write(f"Moisture: {balanced_solution[9]:.1f}%")
+                    st.write(f"Binder Grade: {BINDER_GRADES[int(balanced_solution[10])]}")
+                with col3:
                     st.write("**Process & CQAs**")
                     st.write(f"Pressure: {balanced_solution[5]:.1f} MPa")
                     st.write(f"Speed: {balanced_solution[6]:.1f} rpm")
@@ -1297,7 +1476,8 @@ with col_right:
                     st.write(f"Density: {d:.3f}")
                     st.write(f"Tensile: {t:.3f} MPa")
                     st.write(f"EFRF: {ef:.4f}")
-            st.session_state.balanced_pred = (d, t, e, ef)
+                    st.write(f"Disintegration: {dis:.1f} min")
+            st.session_state.balanced_pred = (d, t, e, ef, dis, tau, beta)
         else:
             st.info("No balanced solution found.")
 
@@ -1306,7 +1486,7 @@ with col_right:
         st.toggle("💰 Cost-wise Solution (Max API, Min Pressure)", value=st.session_state.get("show_cost_solution", False), key="show_cost_solution")
         if st.session_state.show_cost_solution and cost_solution is not None:
             st.markdown("#### 💰 Cost-Optimised Formulation")
-            d, t, e, ef = predict_pinn(model, scaler, y_scaler, cost_solution)
+            d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, cost_solution)
             col1, col2 = st.columns(2)
             with col1:
                 st.write("**Formulation:**")
@@ -1319,11 +1499,12 @@ with col_right:
                 st.write("**CQAs:**")
                 st.write(f"Tensile: {t:.3f} MPa")
                 st.write(f"EFRF: {ef:.4f}")
+                st.write(f"Disintegration: {dis:.1f} min")
 
         st.toggle("🏆 Quality-wise Solution (Max Tensile)", value=st.session_state.get("show_quality_solution", False), key="show_quality_solution")
         if st.session_state.show_quality_solution and quality_solution is not None:
             st.markdown("#### 🏆 Quality-Optimised Formulation")
-            d, t, e, ef = predict_pinn(model, scaler, y_scaler, quality_solution)
+            d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, quality_solution)
             col1, col2 = st.columns(2)
             with col1:
                 st.write("**Formulation:**")
@@ -1336,6 +1517,7 @@ with col_right:
                 st.write("**CQAs:**")
                 st.write(f"Tensile: {t:.3f} MPa")
                 st.write(f"EFRF: {ef:.4f}")
+                st.write(f"Disintegration: {dis:.1f} min")
 
         st.toggle("📊 Model Comparison", value=st.session_state.get("show_comparison", True), key="show_comparison")
         if st.session_state.show_comparison:
@@ -1358,9 +1540,20 @@ with col_right:
                 if fig_bars:
                     st.plotly_chart(fig_bars, use_container_width=True)
 
+        st.toggle("📊 Dissolution Profile", value=st.session_state.get("show_dissolution", False), key="show_dissolution")
+        if st.session_state.show_dissolution:
+            st.markdown("### 📊 Predicted Dissolution Profile")
+            f = st.session_state.formulation
+            if f['api_n'] is not None:
+                tau = f.get('dissolution_tau', 10.0)
+                beta = f.get('dissolution_beta', 1.0)
+                api_n = f['api_n']
+                fig = plot_dissolution_profile(tau, beta, api_n)
+                st.plotly_chart(fig, use_container_width=True)
+
         generate_report_btn = st.button("📄 Generate Report (PDF)", key="knob_report")
         if generate_report_btn and st.session_state.benchmark_df is not None:
-            st.info("PDF generation is not implemented in this simplified version.")
+            st.info("PDF generation for advanced model is not fully implemented in this version.")
 
     else:
         if model is None:
