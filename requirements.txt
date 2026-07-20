@@ -6,3 +6,4 @@ scikit-learn
 plotly
 fpdf2
 xgboost   # optional, but recommended
+pip install streamlit numpy pandas torch scikit-learn plotly fpdf2 xgboost
