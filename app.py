@@ -1,5 +1,5 @@
 """
-Hubryd AI – v29.27-R20 (Complete Final Version)
+Hubryd AI – v29.27-R20 (Simplified Header)
 Hybrid AI for Multi-Objective Optimization of Tablet Formulation
 - Slider minimums: MCC=1.5%, PVPP=1.0%, MgSt=0.10%, Binder=1.4% (for manual tests up to ~96% API)
 - Optimiser bounds: MCC≥2.0%, PVPP≥1.5%, MgSt≥0.3%, Binder≥3.0% (practical Golden Solution)
@@ -1081,16 +1081,13 @@ def run_model_comparison(model, scaler, y_scaler, features, df, device):
     return bench_df, chart_data
 
 # ================================================================
-# MAIN UI – Streamlit App
+# MAIN UI – SIMPLIFIED HEADER
 # ================================================================
 st.markdown("""
 <div style="background: #0b1a33; padding:1rem; border-radius:0.5rem; text-align:center; margin-bottom:1rem;">
     <h2 style="color:#fff; margin:0;">🧬 Hybrid AI · Multi‑Objective Tablet Optimization</h2>
-    <p style="color:#64ffda; margin:0;">PINN + NSGA‑II | Nile Valley University, Sudan</p>
-    <p style="color:#aabbcc; font-size:0.9rem; margin-top:0.2rem;">
-    🔧 Slider min: MCC=1.5%, PVPP=1.0%, MgSt=0.10%, Binder=1.4% (tests up to ~96% API)<br>
-    ⚙️ Optimiser bounds (practical): MCC≥2.0%, PVPP≥1.5%, MgSt≥0.3%, Binder≥3.0%
-    </p>
+    <p style="color:#64ffda; margin:0; font-size:0.9rem;">v29.27-R20</p>
+    <p style="color:#aabbcc; margin:0; font-size:0.85rem;">Nile Valley University, Sudan</p>
 </div>
 """, unsafe_allow_html=True)
 
