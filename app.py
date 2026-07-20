@@ -1,9 +1,9 @@
 """
-Hubryd AI – v29.27-R25 (SIMPLIFIED & GUARANTEED FIX)
+Hubryd AI – v29.27-R23 (Fully Bugfixed Advanced Model)
 Advanced Hybrid AI for Multi-Objective Optimization of Tablet Formulation
-- FIXED: All array ambiguity errors eliminated
-- Uses .item() and float() conversion everywhere
+- Fixed all array ambiguity errors
 - Safe handling of model=None
+- All advanced features included
 Nile Valley University · Sudan
 """
 
@@ -159,17 +159,21 @@ if 'api' not in st.session_state:
     })
 
 # ================================================================
-# COMPACTION MODELS - WITH SAFE SCALAR CONVERSION
+# COMPACTION MODELS
 # ================================================================
+def heckel_equation(pressure, k, A):
+    return 1 - np.exp(-(k * pressure + A))
+
+def kawakita_equation(pressure, a, b):
+    return 1 - (pressure / (a * pressure + 1/b))
+
+def walker_equation(pressure, K, n):
+    return 1 - K * (pressure ** (-n))
+
 def select_compaction_model(api_n, binder_n, pressure, particle_size, moisture):
-    """All inputs MUST BE SCALARS (float/int)"""
-    # Force conversion to scalar
-    api_n = float(api_n)
-    binder_n = float(binder_n)
-    pressure = float(pressure)
-    particle_size = float(particle_size)
-    moisture = float(moisture)
-    
+    """
+    All parameters are scalars (single values), not arrays.
+    """
     if api_n > 90 and particle_size < 50:
         model_type = "Heckel"
         k = 0.025 + 0.0001 * pressure - 0.001 * (api_n - 85) / 10
@@ -187,10 +191,38 @@ def select_compaction_model(api_n, binder_n, pressure, particle_size, moisture):
         return model_type, {'K': K, 'n': n}
 
 # ================================================================
-# COMPATIBILITY CHECK - WITH SAFE SCALAR CONVERSION
+# DWELL TIME CALCULATION
 # ================================================================
+def calculate_dwell_time(speed_rpm, punch_width=10, pitch_diameter=100):
+    if speed_rpm <= 0:
+        return 50.0
+    dwell_time_ms = (punch_width * 60 * 1000) / (np.pi * pitch_diameter * speed_rpm)
+    return np.clip(dwell_time_ms, 5.0, 80.0)
+
+# ================================================================
+# DISINTEGRATION AND DISSOLUTION
+# ================================================================
+def predict_disintegration_time(tensile, pvpp_n, api_n, binder_n, moisture):
+    base_time = 2.0 + 0.5 * tensile
+    pvpp_effect = 5.0 * np.exp(-0.5 * pvpp_n)
+    api_effect = 0.1 * (api_n - 80)
+    binder_effect = 0.2 * (binder_n - 2.0)
+    moisture_effect = -0.1 * moisture
+    time = base_time - pvpp_effect + api_effect + binder_effect + moisture_effect
+    return np.clip(time, 1.0, 30.0)
+
+def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_time):
+    tau = 5.0 + 0.5 * disintegration_time - 0.1 * pvpp_n + 0.05 * (api_n - 80)
+    tau = np.clip(tau, 2.0, 20.0)
+    beta = 1.0 + 0.01 * (particle_size - 50) / 50
+    beta = np.clip(beta, 0.8, 2.5)
+    return {'tau': tau, 'beta': beta}
+
 def compatibility_check(api_n, binder_grade, moisture):
-    """All inputs MUST BE SCALARS (float/int)"""
+    """
+    All parameters are scalars (single values), not arrays.
+    """
+    # Ensure they are Python scalars
     api_n = float(api_n)
     binder_grade = int(binder_grade)
     moisture = float(moisture)
@@ -207,45 +239,6 @@ def compatibility_check(api_n, binder_grade, moisture):
         score -= 0.05
         warnings.append("ℹ️ Fine MCC grades may not provide sufficient binding at high API loading.")
     return {'score': max(score, 0.0), 'warnings': warnings}
-
-# ================================================================
-# DWELL TIME CALCULATION
-# ================================================================
-def calculate_dwell_time(speed_rpm, punch_width=10, pitch_diameter=100):
-    if speed_rpm <= 0:
-        return 50.0
-    dwell_time_ms = (punch_width * 60 * 1000) / (np.pi * pitch_diameter * speed_rpm)
-    return np.clip(dwell_time_ms, 5.0, 80.0)
-
-# ================================================================
-# DISINTEGRATION AND DISSOLUTION
-# ================================================================
-def predict_disintegration_time(tensile, pvpp_n, api_n, binder_n, moisture):
-    tensile = np.asarray(tensile)
-    pvpp_n = np.asarray(pvpp_n)
-    api_n = np.asarray(api_n)
-    binder_n = np.asarray(binder_n)
-    moisture = np.asarray(moisture)
-    
-    base_time = 2.0 + 0.5 * tensile
-    pvpp_effect = 5.0 * np.exp(-0.5 * pvpp_n)
-    api_effect = 0.1 * (api_n - 80)
-    binder_effect = 0.2 * (binder_n - 2.0)
-    moisture_effect = -0.1 * moisture
-    time = base_time - pvpp_effect + api_effect + binder_effect + moisture_effect
-    return np.clip(time, 1.0, 30.0)
-
-def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_time):
-    api_n = np.asarray(api_n)
-    pvpp_n = np.asarray(pvpp_n)
-    particle_size = np.asarray(particle_size)
-    disintegration_time = np.asarray(disintegration_time)
-    
-    tau = 5.0 + 0.5 * disintegration_time - 0.1 * pvpp_n + 0.05 * (api_n - 80)
-    tau = np.clip(tau, 2.0, 20.0)
-    beta = 1.0 + 0.01 * (particle_size - 50) / 50
-    beta = np.clip(beta, 0.8, 2.5)
-    return {'tau': tau, 'beta': beta}
 
 # ================================================================
 # HELPER FUNCTIONS
@@ -341,8 +334,7 @@ def add_interaction_features(X_raw):
 
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     rng = np.random.default_rng(random_state)
-    
-    # Generate all random inputs
+    # Original formulation
     api_raw = rng.uniform(SLIDER_API_MIN, SLIDER_API_MAX, n_samples)
     binder_raw = rng.uniform(SLIDER_BINDER_MIN, SLIDER_BINDER_MAX, n_samples)
     pvpp_raw = rng.uniform(SLIDER_PVPP_MIN, SLIDER_PVPP_MAX, n_samples)
@@ -358,12 +350,10 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     decompression_time_raw = rng.uniform(SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX, n_samples)
     granule_raw = rng.uniform(SLIDER_GRANULE_MIN, SLIDER_GRANULE_MAX, n_samples)
 
-    # Normalise components
     api_n, binder_n, pvpp_n, mgst_n, mcc_n = normalize_components(
         api_raw, binder_raw, pvpp_raw, mgst_raw, mcc_raw
     )
 
-    # Build feature matrix (14 features)
     X = np.column_stack([
         api_n, mcc_n, pvpp_n, mgst_n, binder_n,
         pressure_raw, speed_raw, granule_raw,
@@ -371,20 +361,11 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         dwell_time_raw, friction_raw, decompression_time_raw
     ])
 
-    # --- SAFE: Convert to scalar using .item() ---
-    api_first = float(api_n[0].item() if hasattr(api_n[0], 'item') else api_n[0])
-    binder_first = float(binder_n[0].item() if hasattr(binder_n[0], 'item') else binder_n[0])
-    pressure_first = float(pressure_raw[0].item() if hasattr(pressure_raw[0], 'item') else pressure_raw[0])
-    particle_first = float(particle_size_raw[0].item() if hasattr(particle_size_raw[0], 'item') else particle_size_raw[0])
-    moisture_first = float(moisture_raw[0].item() if hasattr(moisture_raw[0], 'item') else moisture_raw[0])
-    binder_grade_first = int(binder_grade_raw[0].item() if hasattr(binder_grade_raw[0], 'item') else binder_grade_raw[0])
-    
-    # Select compaction model using scalar values
+    # Targets – use first element for scalar selection
     model_type, params = select_compaction_model(
-        api_first, binder_first, pressure_first, particle_first, moisture_first
+        float(api_n[0]), float(binder_n[0]), float(pressure_raw[0]),
+        float(particle_size_raw[0]), float(moisture_raw[0])
     )
-    
-    # Calculate density based on selected model
     if model_type == "Heckel":
         k = params['k']
         A = params['A']
@@ -393,16 +374,14 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         a = params['a']
         b = params['b']
         D = 1 - (pressure_raw / (a * pressure_raw + 1/b))
-    else:  # Walker
+    else:
         K = params['K']
         n = params['n']
         D = 1 - K * (pressure_raw ** (-n))
-    
     D = np.clip(D, D_MIN, D_MAX)
     D += rng.normal(0, 0.002, n_samples)
     D = np.clip(D, D_MIN, D_MAX)
 
-    # Tensile strength
     porosity = 1.0 - D
     sigma0 = 5.0 + 0.1 * (api_n - 85.0) + 0.2 * binder_n - 0.5 * mgst_n
     sigma0 = np.clip(sigma0, 2.0, 8.0)
@@ -423,7 +402,6 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     strength *= rng.normal(1.0, 0.01, n_samples)
     strength = np.clip(strength, 0.5, 6.0)
 
-    # Elastic Recovery
     er_base = (1.8 + 0.3 * (api_n - 85.0)/10.0 +
                0.08 * (speed_raw - 10.0)/30.0 -
                0.1 * (pressure_raw - 100.0)/150.0 +
@@ -432,12 +410,13 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     er = er_base + rng.normal(0, 0.01, n_samples)
     er = np.clip(er, 0.5, 4.0)
 
-    # Disintegration and dissolution
     disintegration = predict_disintegration_time(strength, pvpp_n, api_n, binder_n, moisture_raw)
     dissolution_params = predict_dissolution_profile(api_n, pvpp_n, particle_size_raw, disintegration)
     
-    # SAFE: compatibility check using scalar values
-    compat_result = compatibility_check(api_first, binder_grade_first, moisture_first)
+    # SAFE: pass scalar values (first element) to compatibility_check
+    compat_result = compatibility_check(
+        float(api_n[0]), int(binder_grade_raw[0]), float(moisture_raw[0])
+    )
 
     feature_names = [
         'API_%', 'MCC_%', 'PVPP_%', 'MgSt_%', 'Binder_%',
@@ -453,11 +432,10 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     df['Dissolution_Tau'] = dissolution_params['tau']
     df['Dissolution_Beta'] = dissolution_params['beta']
     df['Compatibility_Score'] = compat_result['score']
-    
     return df, feature_names
 
 # ================================================================
-# PINN MODEL - SIMPLIFIED
+# PINN MODEL
 # ================================================================
 class Mish(nn.Module):
     def forward(self, x):
@@ -518,6 +496,11 @@ class MultiTaskPINN(nn.Module):
     def compute_loss(self, X_scaled, X_raw, y_true, y_scaler, epoch=0, total_epochs=ADAM_EPOCHS):
         pressure = X_raw[:, 5].view(-1, 1)
         mcc = X_raw[:, 1].view(-1, 1)
+        api = X_raw[:, 0].view(-1, 1)
+        binder = X_raw[:, 4].view(-1, 1)
+        pvpp = X_raw[:, 2].view(-1, 1)
+        moisture = X_raw[:, 9].view(-1, 1)
+        particle_size = X_raw[:, 8].view(-1, 1)
 
         y_pred = self.forward(X_scaled)
         density_pred = y_pred[:, 0:1]
@@ -567,7 +550,7 @@ class MultiTaskPINN(nn.Module):
         return data_loss + physics_loss
 
 # ================================================================
-# NSGA-II - SIMPLIFIED
+# NSGA-II
 # ================================================================
 class NSGAII:
     def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS,
@@ -808,6 +791,7 @@ class NSGAII:
 # ================================================================
 def predict_pinn(model, scaler, y_scaler, inputs):
     if model is None:
+        st.error("Model is not available. Please check training errors.")
         return 0.7, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
     try:
         aug = add_interaction_features(np.array([inputs]))[0]
@@ -881,6 +865,7 @@ def plot_pareto_clean(objectives, fronts, balanced_solution=None, feasible_df=No
 
 def plot_sensitivity_bars(formulation, model, scaler, y_scaler, efrf_max=0.40):
     if model is None:
+        st.error("Model not available for sensitivity.")
         return None
     api0 = formulation['api_n']; mcc0 = formulation['mcc_n']
     pvpp0 = formulation['pvpp_n']; mgst0 = formulation['mgst_n']
@@ -971,10 +956,10 @@ def plot_dissolution_profile(tau, beta, api_n, title="Predicted Dissolution Prof
     return fig
 
 # ================================================================
-# MODEL TRAINING
+# MODEL TRAINING CACHE
 # ================================================================
 CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r25_eng.pt')
+CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hubryd_v29_27_r23_eng.pt')
 
 @st.cache_resource
 def load_or_train():
@@ -1077,6 +1062,7 @@ def load_or_train():
 # ================================================================
 def run_model_comparison(model, scaler, y_scaler, features, df, device):
     if model is None:
+        st.error("Model not available for comparison.")
         return pd.DataFrame(), []
     X_raw_all = df[features].values
     y_raw_all = df[['Tensile_Strength_MPa']].values
@@ -1203,7 +1189,7 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
 st.markdown("""
 <div style="background: #0b1a33; padding:1rem; border-radius:0.5rem; text-align:center; margin-bottom:1rem;">
     <h2 style="color:#fff; margin:0;">🧬 Hybrid AI · Advanced Pharmaceutical PINN</h2>
-    <p style="color:#64ffda; margin:0; font-size:0.9rem;">v29.27-R25 (GUARANTEED FIX)</p>
+    <p style="color:#64ffda; margin:0; font-size:0.9rem;">v29.27-R23</p>
     <p style="color:#aabbcc; margin:0; font-size:0.85rem;">Nile Valley University, Sudan</p>
     <p style="color:#8899aa; font-size:0.75rem;">Advanced Compaction Models · Material Properties · Process Physics · Pharmaceutical Properties</p>
 </div>
@@ -1226,13 +1212,13 @@ with st.sidebar:
     ✅ **Speed:** {BOUND_SPEED_MIN:.0f}–{BOUND_SPEED_MAX:.0f} RPM  
     ✅ **NSGA‑II:** Pop=80, Gen=50
     """)
-    st.caption("🔬 v29.27-R25 — Guaranteed Fix - Array Ambiguity Eliminated")
+    st.caption("🔬 v29.27-R23 — Fully Bugfixed")
 
 # Load model
 try:
     model, scaler, y_scaler, features, df = load_or_train()
 except Exception as e:
-    st.error(f"⚠️ Training failed: {e}. Using dummy model.")
+    st.error(f"Training failed: {e}. Using dummy model.")
     model = None
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -1258,7 +1244,6 @@ with col_left:
             binder_grade = st.selectbox("Binder Grade", BINDER_GRADES, index=st.session_state.binder_grade, key="binder_grade_select")
             binder_grade_idx = BINDER_GRADES.index(binder_grade)
             st.session_state.binder_grade = binder_grade_idx
-            # Use compatibility check with scalar values
             compat_result = compatibility_check(api, binder_grade_idx, moisture)
             if compat_result['warnings']:
                 st.warning(compat_result['warnings'][0])
@@ -1304,124 +1289,126 @@ with col_right:
     st.markdown("### 📈 Results")
 
     if predict_btn:
+        # Check if model is loaded
         if model is None:
-            st.error("❌ Model is not available. Please fix training errors and restart the app.")
-        elif abs(total-100) > 0.1:
-            st.warning("⚠️ Formulation must sum to 100%")
+            st.error("Model is not available. Please fix training errors and restart.")
         else:
-            api_n, binder_n, pvpp_n, mgst_n, mcc_n = normalize_components(api, binder, pvpp, mgst, mcc)
-            if granule_fixed:
-                granule_use = granule
+            if abs(total-100) > 0.1:
+                st.warning("Formulation must sum to 100%")
             else:
-                granule_use = granule
-            inputs = [api_n, mcc_n, pvpp_n, mgst_n, binder_n, pressure, speed, granule_use,
-                      particle_size, moisture, binder_grade_idx, dwell_time, friction, decompression_time]
+                api_n, binder_n, pvpp_n, mgst_n, mcc_n = normalize_components(api, binder, pvpp, mgst, mcc)
+                if granule_fixed:
+                    granule_use = granule
+                else:
+                    granule_use = granule
+                inputs = [api_n, mcc_n, pvpp_n, mgst_n, binder_n, pressure, speed, granule_use,
+                          particle_size, moisture, binder_grade_idx, dwell_time, friction, decompression_time]
 
-            density, tensile, er, efrf, disintegration, dissolution_tau, dissolution_beta = predict_pinn(model, scaler, y_scaler, inputs)
+                density, tensile, er, efrf, disintegration, dissolution_tau, dissolution_beta = predict_pinn(model, scaler, y_scaler, inputs)
 
-            st.session_state.formulation = {
-                'api_n': api_n, 'binder_n': binder_n, 'pvpp_n': pvpp_n,
-                'mgst_n': mgst_n, 'mcc_n': mcc_n,
-                'particle_size': particle_size, 'moisture': moisture, 'binder_grade': binder_grade_idx,
-                'pressure': pressure, 'speed': speed, 'dwell_time': dwell_time,
-                'friction': friction, 'decompression_time': decompression_time,
-                'granule_use': granule_use, 'granule_fixed': granule_fixed,
-                'density': density, 'tensile': tensile, 'er': er, 'efrf': efrf,
-                'disintegration': disintegration, 'dissolution_tau': dissolution_tau,
-                'dissolution_beta': dissolution_beta
-            }
+                st.session_state.formulation = {
+                    'api_n': api_n, 'binder_n': binder_n, 'pvpp_n': pvpp_n,
+                    'mgst_n': mgst_n, 'mcc_n': mcc_n,
+                    'particle_size': particle_size, 'moisture': moisture, 'binder_grade': binder_grade_idx,
+                    'pressure': pressure, 'speed': speed, 'dwell_time': dwell_time,
+                    'friction': friction, 'decompression_time': decompression_time,
+                    'granule_use': granule_use, 'granule_fixed': granule_fixed,
+                    'density': density, 'tensile': tensile, 'er': er, 'efrf': efrf,
+                    'disintegration': disintegration, 'dissolution_tau': dissolution_tau,
+                    'dissolution_beta': dissolution_beta
+                }
 
-            st.markdown("**Constraints Status** (D: 0.70–0.99, Tensile ≥ 1.50, EFRF < 0.40, Disintegration ≤ 15 min)")
-            col_metrics = st.columns(5)
-            col_metrics[0].metric("Density", f"{density:.3f}", f"[{D_MIN:.2f}, {D_MAX:.2f}]")
-            col_metrics[1].metric("Tensile", f"{tensile:.2f} MPa", f"≥ {TENSILE_MIN:.2f}")
-            col_metrics[2].metric("EFRF", f"{efrf:.4f}", f"< 0.40")
-            col_metrics[3].metric("MCC", f"{mcc_n:.1f}%", f"≤ {BOUND_MCC_MAX:.1f}%")
-            col_metrics[4].metric("Disintegration", f"{disintegration:.1f} min", f"≤ {DISINTEGRATION_MAX:.0f} min")
+                st.markdown("**Constraints Status** (D: 0.70–0.99, Tensile ≥ 1.50, EFRF < 0.40, Disintegration ≤ 15 min)")
+                col_metrics = st.columns(5)
+                col_metrics[0].metric("Density", f"{density:.3f}", f"[{D_MIN:.2f}, {D_MAX:.2f}]")
+                col_metrics[1].metric("Tensile", f"{tensile:.2f} MPa", f"≥ {TENSILE_MIN:.2f}")
+                col_metrics[2].metric("EFRF", f"{efrf:.4f}", f"< 0.40")
+                col_metrics[3].metric("MCC", f"{mcc_n:.1f}%", f"≤ {BOUND_MCC_MAX:.1f}%")
+                col_metrics[4].metric("Disintegration", f"{disintegration:.1f} min", f"≤ {DISINTEGRATION_MAX:.0f} min")
 
-            if all([D_MIN <= density <= D_MAX, tensile >= TENSILE_MIN, efrf < 0.40,
-                    mcc_n <= BOUND_MCC_MAX, disintegration <= DISINTEGRATION_MAX]):
-                st.success("✅ All constraints satisfied")
-            else:
-                st.error("❌ Violates constraints")
+                if all([D_MIN <= density <= D_MAX, tensile >= TENSILE_MIN, efrf < 0.40,
+                        mcc_n <= BOUND_MCC_MAX, disintegration <= DISINTEGRATION_MAX]):
+                    st.success("✅ All constraints satisfied")
+                else:
+                    st.error("❌ Violates constraints")
 
-            bounds = np.array([
-                [SLIDER_API_MIN, SLIDER_API_MAX],
-                [BOUND_MCC_MIN, BOUND_MCC_MAX],
-                [BOUND_PVPP_MIN, BOUND_PVPP_MAX],
-                [BOUND_MGST_MIN, BOUND_MGST_MAX],
-                [BOUND_BINDER_MIN, BOUND_BINDER_MAX],
-                [BOUND_PRESSURE_MIN, BOUND_PRESSURE_MAX],
-                [BOUND_SPEED_MIN, BOUND_SPEED_MAX],
-                [BOUND_GRANULE_MIN, BOUND_GRANULE_MAX],
-                [SLIDER_PARTICLE_SIZE_MIN, SLIDER_PARTICLE_SIZE_MAX],
-                [SLIDER_MOISTURE_MIN, SLIDER_MOISTURE_MAX],
-                [0, len(BINDER_GRADES)-1],
-                [SLIDER_DWELL_TIME_MIN, SLIDER_DWELL_TIME_MAX],
-                [SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX],
-                [SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX]
-            ])
+                bounds = np.array([
+                    [SLIDER_API_MIN, SLIDER_API_MAX],
+                    [BOUND_MCC_MIN, BOUND_MCC_MAX],
+                    [BOUND_PVPP_MIN, BOUND_PVPP_MAX],
+                    [BOUND_MGST_MIN, BOUND_MGST_MAX],
+                    [BOUND_BINDER_MIN, BOUND_BINDER_MAX],
+                    [BOUND_PRESSURE_MIN, BOUND_PRESSURE_MAX],
+                    [BOUND_SPEED_MIN, BOUND_SPEED_MAX],
+                    [BOUND_GRANULE_MIN, BOUND_GRANULE_MAX],
+                    [SLIDER_PARTICLE_SIZE_MIN, SLIDER_PARTICLE_SIZE_MAX],
+                    [SLIDER_MOISTURE_MIN, SLIDER_MOISTURE_MAX],
+                    [0, len(BINDER_GRADES)-1],
+                    [SLIDER_DWELL_TIME_MIN, SLIDER_DWELL_TIME_MAX],
+                    [SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX],
+                    [SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX]
+                ])
 
-            with st.spinner(f"Running NSGA‑II (pop={NSGA_POP}, gen={NSGA_GENS})..."):
-                nsga = NSGAII(model, scaler, y_scaler, bounds,
-                              pop=NSGA_POP, gens=NSGA_GENS,
-                              granule_fixed=granule_fixed,
-                              granule_fixed_val=granule if granule_fixed else 125.0)
-                pop, objectives, fronts = nsga.run()
+                with st.spinner(f"Running NSGA‑II (pop={NSGA_POP}, gen={NSGA_GENS})..."):
+                    nsga = NSGAII(model, scaler, y_scaler, bounds,
+                                  pop=NSGA_POP, gens=NSGA_GENS,
+                                  granule_fixed=granule_fixed,
+                                  granule_fixed_val=granule if granule_fixed else 125.0)
+                    pop, objectives, fronts = nsga.run()
 
-            st.session_state.nsga_pop = pop
-            st.session_state.nsga_objectives = objectives
-            st.session_state.nsga_fronts = fronts
-            st.session_state.run_optimized = True
+                st.session_state.nsga_pop = pop
+                st.session_state.nsga_objectives = objectives
+                st.session_state.nsga_fronts = fronts
+                st.session_state.run_optimized = True
 
-            balanced_idx = None
-            quality_idx = None
-            cost_idx = None
+                balanced_idx = None
+                quality_idx = None
+                cost_idx = None
 
-            if len(fronts) > 0 and len(fronts[0]) > 0:
-                front_indices = fronts[0]
-                max_api = max(-objectives[i, 0] for i in front_indices)
-                min_efrf = min(objectives[i, 1] for i in front_indices)
-                best_dist = np.inf
-                api_range = SLIDER_API_MAX - SLIDER_API_MIN
-                efrf_range = 0.40 - min_efrf
+                if len(fronts) > 0 and len(fronts[0]) > 0:
+                    front_indices = fronts[0]
+                    max_api = max(-objectives[i, 0] for i in front_indices)
+                    min_efrf = min(objectives[i, 1] for i in front_indices)
+                    best_dist = np.inf
+                    api_range = SLIDER_API_MAX - SLIDER_API_MIN
+                    efrf_range = 0.40 - min_efrf
 
-                for idx in front_indices:
-                    api_val = -objectives[idx, 0]
-                    efrf_val = objectives[idx, 1]
-                    norm_api = (SLIDER_API_MAX - api_val) / api_range if api_range > 0 else 0
-                    norm_efrf = (efrf_val - min_efrf) / efrf_range if efrf_range > 0 else 0
-                    dist = np.sqrt(norm_api**2 + norm_efrf**2)
-                    if dist < best_dist:
-                        best_dist = dist
-                        balanced_idx = idx
+                    for idx in front_indices:
+                        api_val = -objectives[idx, 0]
+                        efrf_val = objectives[idx, 1]
+                        norm_api = (SLIDER_API_MAX - api_val) / api_range if api_range > 0 else 0
+                        norm_efrf = (efrf_val - min_efrf) / efrf_range if efrf_range > 0 else 0
+                        dist = np.sqrt(norm_api**2 + norm_efrf**2)
+                        if dist < best_dist:
+                            best_dist = dist
+                            balanced_idx = idx
 
-                best_tensile = -np.inf
-                for idx in front_indices:
-                    ind = pop[idx]
-                    d2, t2, e2, ef2, dis2, tau2, beta2 = predict_pinn(model, scaler, y_scaler, ind)
-                    if t2 > best_tensile:
-                        best_tensile = t2
-                        quality_idx = idx
+                    best_tensile = -np.inf
+                    for idx in front_indices:
+                        ind = pop[idx]
+                        d2, t2, e2, ef2, dis2, tau2, beta2 = predict_pinn(model, scaler, y_scaler, ind)
+                        if t2 > best_tensile:
+                            best_tensile = t2
+                            quality_idx = idx
 
-                best_cost_score = -np.inf
-                for idx in front_indices:
-                    ind = pop[idx]
-                    api_val = ind[0]
-                    pressure_val = ind[5]
-                    cost_score = api_val - 0.05 * pressure_val
-                    if cost_score > best_cost_score:
-                        best_cost_score = cost_score
-                        cost_idx = idx
+                    best_cost_score = -np.inf
+                    for idx in front_indices:
+                        ind = pop[idx]
+                        api_val = ind[0]
+                        pressure_val = ind[5]
+                        cost_score = api_val - 0.05 * pressure_val
+                        if cost_score > best_cost_score:
+                            best_cost_score = cost_score
+                            cost_idx = idx
 
-                st.session_state.balanced_solution = pop[balanced_idx] if balanced_idx is not None else None
-                st.session_state.quality_solution = pop[quality_idx] if quality_idx is not None else None
-                st.session_state.cost_solution = pop[cost_idx] if cost_idx is not None else None
+                    st.session_state.balanced_solution = pop[balanced_idx] if balanced_idx is not None else None
+                    st.session_state.quality_solution = pop[quality_idx] if quality_idx is not None else None
+                    st.session_state.cost_solution = pop[cost_idx] if cost_idx is not None else None
 
-            with st.spinner("Generating feasible region..."):
-                feasible_df = generate_feasible_points(model, scaler, y_scaler, n_samples=3000)
-                st.session_state.feasible_df = feasible_df
-                st.session_state.tested_point = (api_n, efrf)
+                with st.spinner("Generating feasible region..."):
+                    feasible_df = generate_feasible_points(model, scaler, y_scaler, n_samples=3000)
+                    st.session_state.feasible_df = feasible_df
+                    st.session_state.tested_point = (api_n, efrf)
 
     if st.session_state.run_optimized and model is not None:
         pop = st.session_state.nsga_pop
@@ -1557,7 +1544,7 @@ with col_right:
 
     else:
         if model is None:
-            st.warning("⚠️ Model not loaded. Please fix training issues and restart the app.")
+            st.warning("Model not loaded. Please fix training issues.")
         else:
             st.info("Adjust sliders and click '🔬 Predict & Optimise' to see results.")
 
